@@ -58,46 +58,101 @@ body {
 .mono, code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Cascadia Mono", monospace; font-size: 12.5px; }
 .small { font-size: 12px; }
 
-/* ---------- Layout ---------- */
+/* ---------- Layout: sidebar + main area ---------- */
 
-.app { display: flex; flex-direction: column; min-height: 100%; }
+.app { display: flex; min-height: 100vh; min-height: 100dvh; }
 
-.topbar {
-  display: flex;
-  align-items: center;
-  gap: 20px;
-  padding: 10px 20px;
-  border-bottom: 1px solid var(--border);
+.sidebar {
+  width: 220px;
+  flex-shrink: 0;
   background: var(--bg-elev-1);
-  position: sticky; top: 0; z-index: 20;
+  border-right: 1px solid var(--border);
+  display: flex; flex-direction: column;
+  position: sticky; top: 0;
+  height: 100vh; height: 100dvh;
+  z-index: 30;
+}
+.sidebar-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--border-soft);
+  min-height: 56px;
+}
+.sidebar-close {
+  display: none;
+  background: transparent; border: none;
+  color: var(--muted); font-size: 22px; line-height: 1;
+  width: 30px; height: 30px; border-radius: 6px;
+  cursor: pointer;
+}
+.sidebar-close:hover { background: var(--bg-elev-2); color: var(--text); }
+
+.sidebar-nav {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 12px 10px;
+  overflow-y: auto;
+  flex: 1;
+}
+.sidebar-item {
+  display: flex; align-items: center;
+  background: transparent;
+  color: var(--text-soft);
+  border: none;
+  padding: 9px 14px;
+  border-radius: 7px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 500;
+  text-align: left;
+  white-space: nowrap;
+  transition: background 80ms, color 80ms;
+}
+.sidebar-item:hover { color: var(--text); background: var(--bg-elev-2); }
+.sidebar-item.active {
+  color: var(--text);
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.sidebar-backdrop {
+  display: none;
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.55);
+  z-index: 25;
+  opacity: 0; pointer-events: none;
+  transition: opacity 160ms;
+}
+:root[data-theme='light'] .sidebar-backdrop { background: rgba(31,35,40,0.45); }
+
+.main-area {
+  flex: 1; min-width: 0;
+  display: flex; flex-direction: column;
 }
 
 .brand { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .logo-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
-.brand-text { font-weight: 600; font-size: 14px; letter-spacing: -0.2px; }
+.brand-text { font-weight: 600; font-size: 14px; letter-spacing: -0.2px; text-transform: capitalize; }
 
-.nav { display: flex; gap: 2px; flex: 1; align-items: center; min-width: 0; }
-.tab-btn {
-  background: transparent;
-  color: var(--text-soft);
-  border: none;
-  padding: 6px 12px;
-  border-radius: 6px;
-  cursor: pointer;
-  font: inherit;
-  font-size: 13px;
-  font-weight: 500;
-  white-space: nowrap;
-  transition: background 80ms, color 80ms;
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev-1);
+  position: sticky; top: 0; z-index: 10;
+  min-height: 56px;
 }
-.tab-btn:hover { color: var(--text); background: var(--bg-elev-2); }
-.tab-btn.active { color: var(--text); background: var(--bg-elev-2); box-shadow: inset 0 -2px 0 var(--accent); }
+.topbar-brand { display: none; flex: 1; min-width: 0; }
+.topbar-brand .brand-text { font-size: 15px; }
+.topbar-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; margin-left: auto; }
 
 .nav-toggle {
   display: none;
   background: transparent;
   border: 1px solid var(--border);
-  width: 34px; height: 34px;
+  width: 36px; height: 36px;
   border-radius: 7px;
   cursor: pointer;
   padding: 0;
@@ -106,11 +161,8 @@ body {
   justify-content: center;
   gap: 3px;
 }
-.nav-toggle span {
-  width: 16px; height: 1.5px; background: var(--text); border-radius: 1px;
-}
+.nav-toggle span { width: 16px; height: 1.5px; background: var(--text); border-radius: 1px; }
 
-.topbar-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .theme-toggle {
   background: var(--bg-elev-2);
   border: 1px solid var(--border);
@@ -125,7 +177,7 @@ body {
 }
 .theme-toggle:hover { color: var(--text); border-color: var(--text-soft); }
 
-main { padding: 20px; max-width: 1600px; width: 100%; margin: 0 auto; }
+main { padding: 20px; max-width: 1600px; width: 100%; margin: 0 auto; flex: 1; }
 
 /* ---------- Grids ---------- */
 
@@ -778,32 +830,39 @@ textarea { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; res
   .snap-box.big { max-width: 180px; }
 }
 
-/* Mobile */
+/* Tablet — sidebar starts narrowing */
+@media (max-width: 1100px) {
+  .sidebar { width: 200px; }
+}
+
+/* Phone — sidebar becomes a slide-in drawer */
+@media (max-width: 820px) {
+  .sidebar {
+    position: fixed;
+    top: 0; left: 0;
+    height: 100vh; height: 100dvh;
+    width: 260px; max-width: 82vw;
+    transform: translateX(-100%);
+    transition: transform 200ms ease-out;
+    box-shadow: 0 0 0 0 rgba(0,0,0,0);
+  }
+  .sidebar.open {
+    transform: translateX(0);
+    box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+  }
+  .sidebar-close { display: flex; align-items: center; justify-content: center; }
+  .sidebar-backdrop.visible { display: block; opacity: 1; pointer-events: auto; }
+
+  .nav-toggle { display: flex; }
+  .topbar-brand { display: flex; }
+  .topbar { padding: 10px 14px; }
+
+  .main-area { width: 100%; }
+}
+
+/* Phone content adjustments */
 @media (max-width: 700px) {
   main { padding: 14px; }
-  .topbar {
-    padding: 10px 14px;
-    gap: 10px;
-    flex-wrap: wrap;
-  }
-  .nav-toggle { display: flex; order: 2; }
-  .nav {
-    order: 4;
-    width: 100%;
-    display: none;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 2px;
-    padding-top: 6px;
-    border-top: 1px solid var(--border-soft);
-    margin-top: 4px;
-  }
-  .nav.open { display: flex; }
-  .tab-btn { text-align: left; padding: 9px 12px; }
-  .tab-btn.active { box-shadow: inset 3px 0 0 var(--accent); }
-
-  .brand { flex: 1; }
-  .topbar-right { order: 3; }
 
   .form-row { flex-direction: column; gap: 8px; align-items: stretch; }
   .form-row .field { width: 100%; }
@@ -843,4 +902,5 @@ textarea { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; res
   main { padding: 10px; }
   .card { padding: 12px; }
   .brand-text { font-size: 13px; }
+  .sidebar { width: 240px; max-width: 88vw; }
 }

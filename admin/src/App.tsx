@@ -33,53 +33,71 @@ export default function App() {
     { id: 'console', label: 'ISAPI' },
   ]
 
+  // Lock body scroll when mobile sidebar drawer is open
+  useEffect(() => {
+    if (navOpen) document.body.style.overflow = 'hidden'
+    else document.body.style.overflow = ''
+    return () => { document.body.style.overflow = '' }
+  }, [navOpen])
+
   return (
     <div className="app">
-      <header className="topbar">
-        <div className="brand">
-          <span className="logo-dot" />
-          <span className="brand-text">face_auth</span>
+      <aside className={`sidebar ${navOpen ? 'open' : ''}`} aria-label="primary navigation">
+        <div className="sidebar-head">
+          <div className="brand">
+            <span className="logo-dot" />
+            <span className="brand-text">face_auth</span>
+          </div>
+          <button className="sidebar-close" onClick={() => setNavOpen(false)} aria-label="close menu">×</button>
         </div>
-
-        <button className="nav-toggle" onClick={() => setNavOpen((v) => !v)} aria-label="menu">
-          <span /><span /><span />
-        </button>
-
-        <nav className={`nav ${navOpen ? 'open' : ''}`}>
+        <nav className="sidebar-nav">
           {tabs.map((t) => (
             <button
               key={t.id}
-              className={`tab-btn ${tab === t.id ? 'active' : ''}`}
+              className={`sidebar-item ${tab === t.id ? 'active' : ''}`}
               onClick={() => { setTab(t.id); setNavOpen(false) }}
             >{t.label}</button>
           ))}
         </nav>
+      </aside>
 
-        <div className="topbar-right">
-          {status ? (
-            <span className={status.devicesOnline > 0 ? 'badge ok' : 'badge'}>
-              <span className="status-dot" />
-              {status.devicesOnline}/{status.devices}
-            </span>
-          ) : (
-            <span className="badge err"><span className="status-dot" />offline</span>
-          )}
-          <button
-            className="theme-toggle"
-            onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-            title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
-          >{theme === 'dark' ? 'Light' : 'Dark'}</button>
-        </div>
-      </header>
-      <main>
-        {tab === 'devices' && <DevicesTab />}
-        {tab === 'live' && <LiveTab />}
-        {tab === 'persons' && <PersonsTab />}
-        {tab === 'enrol' && <EnrolTab />}
-        {tab === 'events' && <EventsTab />}
-        {tab === 'agents' && <AgentsTab />}
-        {tab === 'console' && <ConsoleTab />}
-      </main>
+      <div className={`sidebar-backdrop ${navOpen ? 'visible' : ''}`} onClick={() => setNavOpen(false)} />
+
+      <div className="main-area">
+        <header className="topbar">
+          <button className="nav-toggle" onClick={() => setNavOpen(true)} aria-label="open menu">
+            <span /><span /><span />
+          </button>
+          <div className="brand topbar-brand">
+            <span className="logo-dot" />
+            <span className="brand-text">{tabs.find((t) => t.id === tab)?.label}</span>
+          </div>
+          <div className="topbar-right">
+            {status ? (
+              <span className={status.devicesOnline > 0 ? 'badge ok' : 'badge'}>
+                <span className="status-dot" />
+                {status.devicesOnline}/{status.devices}
+              </span>
+            ) : (
+              <span className="badge err"><span className="status-dot" />offline</span>
+            )}
+            <button
+              className="theme-toggle"
+              onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+              title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+            >{theme === 'dark' ? 'Light' : 'Dark'}</button>
+          </div>
+        </header>
+        <main>
+          {tab === 'devices' && <DevicesTab />}
+          {tab === 'live' && <LiveTab />}
+          {tab === 'persons' && <PersonsTab />}
+          {tab === 'enrol' && <EnrolTab />}
+          {tab === 'events' && <EventsTab />}
+          {tab === 'agents' && <AgentsTab />}
+          {tab === 'console' && <ConsoleTab />}
+        </main>
+      </div>
     </div>
   )
 }
