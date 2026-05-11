@@ -1,0 +1,119 @@
+name: face_auth
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PG_USER:-hik}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-hikpush}
+      POSTGRES_DB: ${PG_DB:-hikpush}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${PG_USER:-hik}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      PUSH_PORT: "7660"
+      API_PORT: "8080"
+      DATABASE_URL: "postgres://${PG_USER:-hik}:${PG_PASSWORD:-hikpush}@postgres:5432/${PG_DB:-hikpush}?sslmode=disable"
+      REDIS_URL: "redis:6379"
+      MINIO_ENDPOINT: "minio:9000"
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+      MINIO_BUCKET: ${MINIO_BUCKET:-hikpush}
+      MINIO_PUBLIC_BASE: ${MINIO_PUBLIC_BASE:-}
+      NO_AUTH_MODE: ${NO_AUTH_MODE:-true}
+      DEVICE_DEFAULT_PASSWORD: ${DEVICE_DEFAULT_PASSWORD:-}
+      COMMAND_INTERVAL: "5"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DEBUG_PORT: ${DEBUG_PORT:-}
+      EVENT_CALLBACK_IP: ${EVENT_CALLBACK_IP:-}
+      PUBLIC_PUSH_HOST: ${PUBLIC_PUSH_HOST:-}
+      PUBLIC_PUSH_URL: ${PUBLIC_PUSH_URL:-}
+      TLS_PORT: ${TLS_PORT:-}
+      CERT_DIR: /app/certs
+    ports:
+      - "${PUSH_PORT:-7660}:7660"
+      - "${API_PORT:-8080}:8080"
+      - "${DEBUG_PORT:-7661}:7661"
+      - "${TLS_PORT:-7670}:7670"
+    volumes:
+      - cert_data:/app/certs
+
+  admin:
+    build:
+      context: ./admin
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8080}
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${ADMIN_PORT:-5173}:80"
+
+  # face_auth-agent — runs on the LAN where the Hik device lives. Keeps a
+  # persistent outbound WebSocket to the cloud face_auth so cloud can push
+  # ISAPI requests through it to the LAN device. Enabled with:
+  #   docker compose --profile agent up -d
+  agent:
+    profiles: ["agent"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.agent
+    restart: unless-stopped
+    environment:
+      CLOUD_URL: ${CLOUD_URL:-ws://backend:8080}
+      AGENT_ID: ${AGENT_ID:-}
+      AGENT_NAME: ${AGENT_NAME:-LAN agent}
+      AGENT_TOKEN: ${AGENT_TOKEN:-}
+    network_mode: host
+
+volumes:
+  pg_data:
+  redis_data:
+  minio_data:
+  cert_data:
