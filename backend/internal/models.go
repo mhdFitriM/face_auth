@@ -61,6 +61,7 @@ type Person struct {
 	ValidBegin     *time.Time      `json:"validBegin,omitempty"`
 	ValidEnd       *time.Time      `json:"validEnd,omitempty"`
 	Metadata       json.RawMessage `json:"metadata,omitempty"`
+	QRToken        string          `json:"qrToken,omitempty"`
 	CreatedAt      time.Time       `json:"createdAt"`
 }
 

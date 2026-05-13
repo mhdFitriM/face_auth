@@ -110,6 +110,16 @@ services:
       AGENT_ID: ${AGENT_ID:-}
       AGENT_NAME: ${AGENT_NAME:-LAN agent}
       AGENT_TOKEN: ${AGENT_TOKEN:-}
+      QR_STRIP_PREFIX: ${QR_STRIP_PREFIX:-}
+      QR_STRIP_SUFFIX: ${QR_STRIP_SUFFIX:-}
+      QR_LISTEN_PORT: ${QR_LISTEN_PORT:-7771}
+      QR_DEVICE: ${QR_DEVICE:-}
+      QR_DEVICE_AUTO: ${QR_DEVICE_AUTO:-}
+    # If you set QR_DEVICE=/dev/input/eventN or QR_DEVICE_AUTO=true, you must
+    # also expose that input device into the container. Uncomment one of:
+    # devices:
+    #   - /dev/input:/dev/input:ro            # all input devices (broad)
+    #   - /dev/input/event3:/dev/input/event3:ro   # specific scanner only
     network_mode: host
 
 volumes:

@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef, useMemo } from 'react'
 import { api, apiUrl, subscribeEvents, DeviceForm, PersonForm } from './api'
 
-type Tab = 'devices' | 'live' | 'persons' | 'enrol' | 'events' | 'agents' | 'console'
+type Tab = 'devices' | 'live' | 'persons' | 'enrol' | 'events' | 'qr-auth' | 'agents' | 'console'
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('devices')
@@ -29,6 +29,7 @@ export default function App() {
     { id: 'persons', label: 'Persons' },
     { id: 'enrol',   label: 'Enrol' },
     { id: 'events',  label: 'Events' },
+    { id: 'qr-auth', label: 'QR Auth' },
     { id: 'agents',  label: 'Agents' },
     { id: 'console', label: 'ISAPI' },
   ]
@@ -94,6 +95,7 @@ export default function App() {
           {tab === 'persons' && <PersonsTab />}
           {tab === 'enrol' && <EnrolTab />}
           {tab === 'events' && <EventsTab />}
+          {tab === 'qr-auth' && <QRAuthTab />}
           {tab === 'agents' && <AgentsTab />}
           {tab === 'console' && <ConsoleTab />}
         </main>
@@ -584,10 +586,21 @@ function PersonModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
 function PersonDetailModal({ personId, onClose, onDeleted }: { personId: string; onClose: () => void; onDeleted: () => void }) {
   const [data, setData] = useState<any>(null)
   const [err, setErr] = useState('')
+  const [qrBust, setQrBust] = useState(0)
 
   useEffect(() => {
     api.getPerson(personId).then(setData).catch((e) => setErr(String(e)))
   }, [personId])
+
+  const rotateQR = async () => {
+    try {
+      const r = await api.rotateQR(personId)
+      const fresh = await api.getPerson(personId)
+      setData(fresh)
+      setQrBust(Date.now())
+      if (r.qrToken) navigator.clipboard?.writeText(r.qrToken)
+    } catch (e: any) { alert(String(e)) }
+  }
 
   if (err) return <Modal title="Person" onClose={onClose}><div className="err">{err}</div></Modal>
   if (!data) return <Modal title="Person" onClose={onClose}><div className="empty">Loading…</div></Modal>
@@ -627,6 +640,25 @@ function PersonDetailModal({ personId, onClose, onDeleted }: { personId: string;
           <DetailRow label="ID" value={<span className="mono small">{p.id}</span>} />
           <DetailRow label="Created" value={<span className="small muted">{new Date(p.createdAt).toLocaleString()}</span>} />
         </div>
+      </div>
+
+      <div className="qr-block">
+        <h3 className="section-title">QR token (for 2-step auth)</h3>
+        {p.qrToken ? (
+          <div className="qr-row">
+            <img className="qr-img" src={`${api.qrImageUrl(personId, 240)}&_b=${qrBust}`} alt="QR" />
+            <div className="qr-meta">
+              <div className="mono small" style={{ wordBreak: 'break-all' }}>{p.qrToken}</div>
+              <p className="muted small">Print or save this. Scanning it at an agent's USB scanner unlocks the face camera briefly for this user.</p>
+              <button className="btn-ghost" onClick={rotateQR}>Rotate token</button>
+            </div>
+          </div>
+        ) : (
+          <div className="qr-row">
+            <div className="empty" style={{ flex: 1 }}>No QR token yet.</div>
+            <button className="btn-primary" onClick={rotateQR}>Generate</button>
+          </div>
+        )}
       </div>
     </Modal>
   )
@@ -1177,6 +1209,43 @@ AGENT_TOKEN=${credentials.token} \\
   face_auth/agent`}</pre>
             </details>
             <details className="bridge-steps">
+              <summary>USB QR scanner — plug into the agent host (Windows)</summary>
+              <p>Windows doesn't have <code>/dev/input/*</code>, but a small AutoHotkey script catches scanner keystrokes (faster than human typing) and posts them to the agent. No interference with normal typing.</p>
+              <ol>
+                <li>Install <a href="https://www.autohotkey.com/" target="_blank" rel="noreferrer">AutoHotkey v2</a> on the Windows machine where the agent runs.</li>
+                <li>Download the watcher script: <a href={apiUrl('/api/agents/scripts/qr-watcher.ahk')} download>qr-watcher.ahk</a></li>
+                <li>Right-click the downloaded file → <strong>Run script</strong>. You'll see a tray icon "face_auth QR watcher".</li>
+                <li>Make it auto-start at login: press <kbd>Win+R</kbd> → type <code>shell:startup</code> → drag the .ahk file into that folder.</li>
+                <li>Scan a QR — the tray icon shows "Scan forwarded: 1" and the QR Auth tab shows a new session.</li>
+              </ol>
+              <p className="muted small">Configure your scanner to add a fixed prefix (e.g. <code>in#</code>) and set <code>QR_STRIP_PREFIX=in#</code> on the agent. That gives an extra layer of certainty that only scanner input ever reaches face_auth — even if someone manually types something that happens to match a QR token format, it'll be ignored without the prefix.</p>
+            </details>
+            <details className="bridge-steps">
+              <summary>USB QR scanner — plug into the agent host (Linux)</summary>
+              <p>When the agent is running on a Linux box (Pi, mini-PC, NAS), it can read keystrokes from a USB QR scanner natively — no helper script, no admin UI clicks. The flow becomes: user scans QR → device's face camera unlocks for ~5 seconds → user shows face → door opens.</p>
+              <ol>
+                <li>Plug the scanner into the agent host. Find its event device:
+                  <pre className="result">{`ls -l /dev/input/by-id/  # find the scanner — usually contains "barcode" / "scanner" / vendor name`}</pre>
+                </li>
+                <li>Add to the agent's env (or docker run):
+                  <pre className="result">{`QR_DEVICE=/dev/input/by-id/usb-Symbol_Bar_Code_Scanner-event-kbd
+QR_STRIP_PREFIX=in#   # only if your scanner is programmed to add this`}</pre>
+                </li>
+                <li>If running in Docker, expose the device:
+                  <pre className="result">{`docker run -d --restart unless-stopped --network host \\
+  --device /dev/input/by-id/usb-Symbol_Bar_Code_Scanner-event-kbd:/dev/input/scanner \\
+  -e QR_DEVICE=/dev/input/scanner \\
+  -e CLOUD_URL=wss://${cloudHost} \\
+  -e AGENT_ID=${credentials.id} \\
+  -e AGENT_TOKEN=${credentials.token} \\
+  face_auth/agent`}</pre>
+                </li>
+                <li>Or auto-discover: set <code>QR_DEVICE_AUTO=true</code> and the agent picks the first scanner-like device under <code>/dev/input/by-id/</code>.</li>
+                <li>You'll see in the agent log: <code>HID: listening on /dev/input/...</code> and each scan logged as <code>HID scan -&gt; cloud: 200 ...</code></li>
+              </ol>
+              <p className="muted small">Tip: the user running the agent needs read access on the device — either add to the <code>input</code> group (<code>sudo usermod -aG input $USER</code>) or run with elevated privileges. Docker with <code>--device</code> handles this automatically.</p>
+            </details>
+            <details className="bridge-steps">
               <summary>Android (via Termux)</summary>
               <p>Install <a href="https://termux.dev/" target="_blank" rel="noreferrer">Termux</a> from F-Droid. Inside Termux:</p>
               <pre className="result">{`pkg install wget
@@ -1204,6 +1273,44 @@ AGENT_TOKEN=${credentials.token} \\
           ))}
           {downloads.length === 0 && <div className="empty">No agent binaries bundled in this build.</div>}
         </div>
+      </Card>
+
+      <Card title="Companion: USB QR scanner watcher">
+        <p className="card-sub">
+          For production with a USB QR scanner plugged into the agent's host machine. Pick the helper that matches the host OS.
+        </p>
+        <div className="download-grid">
+          <a className="download-tile" href={apiUrl('/api/agents/scripts/qr-watcher.ahk')} download>
+            <strong>Windows — AutoHotkey v2 script</strong>
+            <span className="muted mono small">qr-watcher.ahk</span>
+            <span className="muted small">Install AHK v2 → run this once → put in shell:startup</span>
+          </a>
+          <div className="download-tile" style={{ cursor: 'default' }}>
+            <strong>Linux — built into the agent</strong>
+            <span className="muted small">set <code>QR_DEVICE=/dev/input/by-id/usb-…</code> in the env, or <code>QR_DEVICE_AUTO=true</code></span>
+            <span className="muted small">no extra script needed — agent reads HID natively</span>
+          </div>
+          <div className="download-tile" style={{ cursor: 'default' }}>
+            <strong>macOS — manual</strong>
+            <span className="muted small">most users plug into a Pi/Linux box instead. If macOS is required, a small helper can POST to <code>/scan</code></span>
+          </div>
+        </div>
+
+        <details className="bridge-steps" style={{ marginTop: 14 }}>
+          <summary>Windows setup — full steps</summary>
+          <ol>
+            <li>Install <a href="https://www.autohotkey.com/" target="_blank" rel="noreferrer">AutoHotkey v2</a> on the Windows machine where the agent runs.</li>
+            <li>Click the <strong>Windows — AutoHotkey v2 script</strong> tile above to download <code>qr-watcher.ahk</code>.</li>
+            <li>Double-click the file. A tray icon appears (look in the bottom-right of your taskbar, click the <code>^</code> arrow to expand hidden icons).</li>
+            <li>Right-click the tray icon → <strong>Send a test scan</strong>. Within ~1 s a new entry should appear in the <strong>QR Auth</strong> tab (likely as "unknown QR token" — that's expected, it proves the pipeline works).</li>
+            <li>Make it auto-start at login: press <kbd>Win+R</kbd> → type <code>shell:startup</code> → drag the .ahk file into that folder.</li>
+            <li>Configure your scanner to add a fixed prefix like <code>in#</code> (one-time scan of a config QR from its manual). Set <code>QR_STRIP_PREFIX=in#</code> on the agent.</li>
+            <li>Plug in scanner. Done — scans now flow scanner → AHK → agent → cloud → device unlocks face for 5s.</li>
+          </ol>
+          <p className="muted small">
+            <strong>Troubleshooting:</strong> right-click the tray icon → <strong>Open log file</strong>. Every keystroke buffer assembly, forward, and agent response is logged. If the log shows <code>ERROR: 12029</code> the agent isn't reachable on <code>127.0.0.1:7771</code> — start the agent service first.
+          </p>
+        </details>
       </Card>
 
       <Card title={`Registered agents (${agents.length})`}>
@@ -1281,6 +1388,139 @@ function AgentModal({ onClose, onCreated }: { onClose: () => void; onCreated: (c
     </Modal>
   )
 }
+
+// ===================== QR Auth =====================
+
+function QRAuthTab() {
+  const [data, setData] = useState<{ active: any[]; history: any[] }>({ active: [], history: [] })
+  const [devices, setDevices] = useState<any[]>([])
+  const [scanInput, setScanInput] = useState('')
+  const [scanResult, setScanResult] = useState<any>(null)
+
+  const load = () => api.qrAuthSessions().then((d) => setData(d || { active: [], history: [] })).catch(() => {})
+  useEffect(() => {
+    load(); const t = setInterval(load, 1000)
+    api.listDevices().then((d) => setDevices(d || []))
+    return () => clearInterval(t)
+  }, [])
+
+  const simulateScan = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setScanResult(null)
+    try {
+      const r = await api.qrAuthScan(scanInput.trim())
+      setScanResult(r)
+      setScanInput('')
+    } catch (e: any) { setScanResult({ error: String(e) }) }
+  }
+
+  const lockAll = async (id: string) => {
+    if (!confirm(`Set ALL users on ${id} to "locked" state (cardAndPw — face requires a QR scan)?`)) return
+    try {
+      const r = await api.lockAllUsers(id)
+      alert(`Locked ${r.locked} users on the device.`)
+    } catch (e: any) { alert(String(e)) }
+  }
+
+  const statusClass = (s: string) => s === 'open' ? 'ok' : s === 'face_matched' ? 'ok' : s === 'timed_out' ? '' : ''
+
+  return (
+    <>
+      <div className="page-toolbar">
+        <h1 className="page-title">QR Auth <span className="muted">· custom 2-step</span></h1>
+      </div>
+
+      <Card title="How it works">
+        <p className="card-sub">
+          Default state: every user on the device is in a "locked" verify mode (<code>cardAndPw</code>) that they can't satisfy.
+          When a user scans their QR at an agent's USB scanner, face_auth briefly switches that user's mode to <code>face</code> for ~5 seconds.
+          As soon as the face camera matches the user (or the window expires) face_auth re-locks them, preventing tailgating.
+        </p>
+        <p className="card-sub">
+          One-time setup per device: click <strong>Lock all users</strong> below to seed every device user into the locked baseline. New persons enrolled via face_auth go straight into the locked state.
+        </p>
+        <div className="device-list" style={{ marginTop: 10 }}>
+          {devices.map((d) => (
+            <div key={d.deviceID} className="row-item">
+              <div className="row-item-main">
+                <strong>{d.name || d.deviceID}</strong>
+                <div className="muted small mono">{d.deviceID}</div>
+              </div>
+              <button className="btn-ghost" onClick={() => lockAll(d.deviceID)}>Lock all users</button>
+            </div>
+          ))}
+          {devices.length === 0 && <div className="empty">No devices yet.</div>}
+        </div>
+      </Card>
+
+      <Card title="Simulate a scan" header={<span className="muted small">use this to test without a USB scanner</span>}>
+        <form onSubmit={simulateScan} className="form-row">
+          <input value={scanInput} onChange={(e) => setScanInput(e.target.value)} placeholder="paste a QR token here" style={{ flex: 4 }} />
+          <button type="submit" className="btn-primary" style={{ flex: 1 }}>Scan</button>
+        </form>
+        {scanResult && <pre className="result">{JSON.stringify(scanResult, null, 2)}</pre>}
+      </Card>
+
+      <Card title={`Active sessions (${data.active.length})`}>
+        <div className="row-list">
+          {data.active.map((s) => (
+            <div key={s.id} className="row-item">
+              <div className="row-item-main">
+                <div className="row-item-title">
+                  <strong>{s.name}</strong>
+                  <span className="chip">#{s.employeeNo}</span>
+                  <span className="badge ok"><span className="status-dot" />face window open</span>
+                </div>
+                <div className="row-item-meta">
+                  <span className="muted small">device {s.deviceId}</span>
+                  <span className="muted small">expires {new Date(s.expiresAt).toLocaleTimeString()}</span>
+                </div>
+              </div>
+            </div>
+          ))}
+          {data.active.length === 0 && <div className="empty">No active sessions. Scan a QR to open one.</div>}
+        </div>
+      </Card>
+
+      <Card title={`History (${data.history.length})`}>
+        <div className="table-wrap">
+          <table className="data-table">
+            <thead>
+              <tr><th>Person</th><th>Opened</th><th>Result</th><th>Duration</th></tr>
+            </thead>
+            <tbody>
+              {data.history.map((s) => {
+                const dur = (new Date(s.expiresAt).getTime() - new Date(s.openedAt).getTime()) / 1000
+                return (
+                  <tr key={s.id}>
+                    <td data-label="Person">
+                      <div className="cell-stack">
+                        <strong>{s.name}</strong>
+                        <span className="muted small mono">#{s.employeeNo}</span>
+                      </div>
+                    </td>
+                    <td data-label="Opened" className="small muted">{new Date(s.openedAt).toLocaleTimeString()}</td>
+                    <td data-label="Result">
+                      <span className={`badge ${statusClass(s.status)}`}>
+                        <span className="status-dot" />{s.status.replace('_', ' ')}
+                      </span>
+                    </td>
+                    <td data-label="Duration" className="small muted">{dur.toFixed(1)} s</td>
+                  </tr>
+                )
+              })}
+              {data.history.length === 0 && (
+                <tr><td colSpan={4}><div className="empty">No history yet.</div></td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </>
+  )
+}
+
+// ===================== Bridge helper (kept for credentials display) =====================
 
 function BridgeRow({ label, value, onCopy, copied }: { label: string; value: string | number; onCopy?: () => void; copied?: boolean }) {
   return (

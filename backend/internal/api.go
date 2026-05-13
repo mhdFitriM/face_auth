@@ -15,9 +15,11 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/google/uuid"
+	qrcode "github.com/skip2/go-qrcode"
 )
 
 func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
+	qrAuth := NewQRAuth(store, cfg, hub)
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: true,
 		BodyLimit:             50 * 1024 * 1024,
@@ -250,6 +252,21 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		return c.JSON(out)
 	})
 
+	// Companion scripts (Windows QR watcher, etc.)
+	api.Get("/agents/scripts/:file", func(c *fiber.Ctx) error {
+		name := c.Params("file")
+		if strings.Contains(name, "/") || strings.Contains(name, "..") {
+			return c.Status(400).SendString("bad filename")
+		}
+		path := "/app/scripts/" + name
+		if _, err := os.Stat(path); err != nil {
+			return c.Status(404).SendString("not found")
+		}
+		c.Set("Content-Disposition", "attachment; filename="+name)
+		c.Set("Content-Type", "text/plain; charset=utf-8")
+		return c.SendFile(path)
+	})
+
 	api.Get("/agents/downloads/:file", func(c *fiber.Ctx) error {
 		name := c.Params("file")
 		if strings.Contains(name, "/") || strings.Contains(name, "..") {
@@ -312,6 +329,71 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		}
 		return c.JSON(body)
 	})
+	// ---------- QR token + QR auth ----------
+
+	api.Post("/persons/:id/qr/rotate", func(c *fiber.Ctx) error {
+		p, _ := store.GetPerson(c.Context(), c.Params("id"))
+		if p == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "person not found"})
+		}
+		token := RandomString(24, charset+hexCharset)
+		if err := store.SetQRToken(c.Context(), p.ID, token); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"ok": true, "qrToken": token})
+	})
+
+	api.Get("/persons/:id/qr.png", func(c *fiber.Ctx) error {
+		p, _ := store.GetPerson(c.Context(), c.Params("id"))
+		if p == nil || p.QRToken == "" {
+			return c.Status(404).SendString("no QR token — call /qr/rotate first")
+		}
+		size, _ := strconv.Atoi(c.Query("size", "256"))
+		if size < 96 {
+			size = 96
+		}
+		if size > 1024 {
+			size = 1024
+		}
+		png, err := qrcode.Encode(p.QRToken, qrcode.Medium, size)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		c.Set("Content-Type", "image/png")
+		c.Set("Cache-Control", "no-store")
+		return c.Send(png)
+	})
+
+	api.Post("/qr-auth/scan", func(c *fiber.Ctx) error {
+		var body struct {
+			QRToken string `json:"qrToken"`
+			AgentID string `json:"agentId"`
+		}
+		if err := json.Unmarshal(c.Body(), &body); err != nil || body.QRToken == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "qrToken required"})
+		}
+		s, err := qrAuth.Scan(c.Context(), body.QRToken, body.AgentID)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"ok": false, "error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"ok": true, "session": s})
+	})
+
+	api.Get("/qr-auth/sessions", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{
+			"active":  qrAuth.ActiveSessions(),
+			"history": qrAuth.History(),
+		})
+	})
+
+	api.Post("/devices/:id/lock-all-users", func(c *fiber.Ctx) error {
+		n, err := qrAuth.LockAllUsersOnDevice(c.Context(), c.Params("id"))
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"ok": true, "locked": n})
+	})
+
 	api.Delete("/persons/:id", func(c *fiber.Ctx) error {
 		ctx := c.Context()
 		p, _ := store.GetPerson(ctx, c.Params("id"))

@@ -1,0 +1,32 @@
+## VPS override — bind face_auth services only on 127.0.0.1.
+## The shared reverse proxy in ../reverse-proxy terminates TLS and routes
+## the public domain to these localhost ports.
+##
+## Usage:
+##   cd face_auth/
+##   cp .env.vps.example .env
+##   # edit .env with real domain / passwords
+##   docker compose -f docker-compose.yml -f docker-compose.vps.yml up -d --build
+
+services:
+  backend:
+    ports: !override
+      - "127.0.0.1:${FACEAUTH_API_PORT:-8084}:8080"
+      # Push listener (7660) and TLS push (7670) are not exposed to the public
+      # because devices on the cloud-side never dial in directly — they reach
+      # us through the agent's outbound WebSocket.
+    environment:
+      # No TLS listener on prod (TLS is handled by the shared Caddy in front).
+      TLS_PORT: ""
+      DEBUG_PORT: ""
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+
+  admin:
+    build:
+      context: ./admin
+      args:
+        # Empty = frontend uses same-origin (relative URLs). The shared
+        # reverse proxy will route /api/* and /agent/* paths to backend.
+        VITE_API_URL: ""
+    ports: !override
+      - "127.0.0.1:${FACEAUTH_ADMIN_PORT:-8085}:80"

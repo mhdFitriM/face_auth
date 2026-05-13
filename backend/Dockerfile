@@ -15,7 +15,7 @@ RUN mkdir -p /agents && \
     CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /agents/face_auth-agent-linux-amd64        ./cmd/agent && \
     CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o /agents/face_auth-agent-linux-arm64        ./cmd/agent && \
     CGO_ENABLED=0 GOOS=linux   GOARCH=arm   GOARM=7 go build -trimpath -ldflags="-s -w" -o /agents/face_auth-agent-linux-armv7 ./cmd/agent && \
-    CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /agents/face_auth-agent-windows-amd64.exe  ./cmd/agent && \
+    CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w -H=windowsgui" -o /agents/face_auth-agent-windows-amd64.exe  ./cmd/agent && \
     CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /agents/face_auth-agent-darwin-amd64       ./cmd/agent && \
     CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o /agents/face_auth-agent-darwin-arm64       ./cmd/agent
 
@@ -24,5 +24,6 @@ RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /app
 COPY --from=build /out/server /app/server
 COPY --from=build /agents /app/agents
+COPY --from=build /src/scripts /app/scripts
 EXPOSE 7660 8080
 ENTRYPOINT ["/app/server"]

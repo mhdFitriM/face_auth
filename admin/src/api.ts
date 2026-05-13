@@ -1,4 +1,6 @@
-const API = (import.meta.env.VITE_API_URL as string) || 'http://localhost:8080'
+// In dev (docker compose locally), VITE_API_URL points at the backend's exposed port.
+// In prod behind the shared reverse proxy, leave it empty — same-origin requests work fine.
+const API = (import.meta.env.VITE_API_URL as string) ?? ''
 
 export const apiUrl = (path: string) => `${API}${path}`
 
@@ -125,6 +127,16 @@ export const api = {
   regenAgentToken: (id: string) => req(`/api/agents/${encodeURIComponent(id)}/regen-token`, { method: 'POST' }),
   agentDownloads: () => req('/api/agents/downloads'),
   agentDownloadUrl: (file: string) => apiUrl(`/api/agents/downloads/${encodeURIComponent(file)}`),
+  rotateQR: (personId: string) => req(`/api/persons/${encodeURIComponent(personId)}/qr/rotate`, { method: 'POST' }),
+  qrImageUrl: (personId: string, size = 256) => apiUrl(`/api/persons/${encodeURIComponent(personId)}/qr.png?size=${size}`),
+  qrAuthSessions: () => req('/api/qr-auth/sessions'),
+  qrAuthScan: (qrToken: string, agentId?: string) =>
+    req('/api/qr-auth/scan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ qrToken, agentId }),
+    }),
+  lockAllUsers: (deviceId: string) => req(`/api/devices/${encodeURIComponent(deviceId)}/lock-all-users`, { method: 'POST' }),
 }
 
 export function subscribeEvents(onEvent: (e: any) => void) {

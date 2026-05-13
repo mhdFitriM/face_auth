@@ -164,6 +164,8 @@ ALTER TABLE persons ADD COLUMN IF NOT EXISTS door_right TEXT DEFAULT '1';
 ALTER TABLE persons ADD COLUMN IF NOT EXISTS plan_template TEXT DEFAULT '1';
 ALTER TABLE persons ADD COLUMN IF NOT EXISTS valid_begin TIMESTAMPTZ;
 ALTER TABLE persons ADD COLUMN IF NOT EXISTS valid_end TIMESTAMPTZ;
+ALTER TABLE persons ADD COLUMN IF NOT EXISTS qr_token TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_persons_qr_token ON persons(qr_token) WHERE qr_token IS NOT NULL AND qr_token <> '';
 
 CREATE TABLE IF NOT EXISTS faces (
     id TEXT PRIMARY KEY,
@@ -484,16 +486,43 @@ func (s *Store) CreatePerson(ctx context.Context, p Person) error {
 	return err
 }
 
+// GetPersonByQRToken finds the person owning a given QR token. Used at
+// scan time to map "the person scanned the QR" back to a user record.
+func (s *Store) GetPersonByQRToken(ctx context.Context, token string) (*Person, error) {
+	if token == "" {
+		return nil, nil
+	}
+	row := s.PG.QueryRow(ctx, `
+		SELECT id, name, employee_no, gender, person_type, person_role,
+		       long_term, attendance_only, door_right, plan_template,
+		       valid_begin, valid_end, metadata, COALESCE(qr_token,''), created_at
+		FROM persons WHERE qr_token=$1 LIMIT 1`, token)
+	p := &Person{}
+	err := row.Scan(&p.ID, &p.Name, &p.EmployeeNo, &p.Gender, &p.PersonType, &p.PersonRole,
+		&p.LongTerm, &p.AttendanceOnly, &p.DoorRight, &p.PlanTemplate,
+		&p.ValidBegin, &p.ValidEnd, &p.Metadata, &p.QRToken, &p.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	return p, err
+}
+
+// SetQRToken assigns or rotates a person's QR token.
+func (s *Store) SetQRToken(ctx context.Context, personID, token string) error {
+	_, err := s.PG.Exec(ctx, `UPDATE persons SET qr_token=NULLIF($1,'') WHERE id=$2`, token, personID)
+	return err
+}
+
 func (s *Store) GetPersonByEmployeeNo(ctx context.Context, employeeNo string) (*Person, error) {
 	row := s.PG.QueryRow(ctx, `
 		SELECT id, name, employee_no, gender, person_type, person_role,
 		       long_term, attendance_only, door_right, plan_template,
-		       valid_begin, valid_end, metadata, created_at
+		       valid_begin, valid_end, metadata, COALESCE(qr_token,''), created_at
 		FROM persons WHERE employee_no=$1 LIMIT 1`, employeeNo)
 	p := &Person{}
 	err := row.Scan(&p.ID, &p.Name, &p.EmployeeNo, &p.Gender, &p.PersonType, &p.PersonRole,
 		&p.LongTerm, &p.AttendanceOnly, &p.DoorRight, &p.PlanTemplate,
-		&p.ValidBegin, &p.ValidEnd, &p.Metadata, &p.CreatedAt)
+		&p.ValidBegin, &p.ValidEnd, &p.Metadata, &p.QRToken, &p.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -504,12 +533,12 @@ func (s *Store) GetPerson(ctx context.Context, id string) (*Person, error) {
 	row := s.PG.QueryRow(ctx, `
 		SELECT id, name, employee_no, gender, person_type, person_role,
 		       long_term, attendance_only, door_right, plan_template,
-		       valid_begin, valid_end, metadata, created_at
+		       valid_begin, valid_end, metadata, COALESCE(qr_token,''), created_at
 		FROM persons WHERE id=$1`, id)
 	p := &Person{}
 	err := row.Scan(&p.ID, &p.Name, &p.EmployeeNo, &p.Gender, &p.PersonType, &p.PersonRole,
 		&p.LongTerm, &p.AttendanceOnly, &p.DoorRight, &p.PlanTemplate,
-		&p.ValidBegin, &p.ValidEnd, &p.Metadata, &p.CreatedAt)
+		&p.ValidBegin, &p.ValidEnd, &p.Metadata, &p.QRToken, &p.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -520,7 +549,7 @@ func (s *Store) ListPersons(ctx context.Context) ([]Person, error) {
 	rows, err := s.PG.Query(ctx, `
 		SELECT id, name, employee_no, gender, person_type, person_role,
 		       long_term, attendance_only, door_right, plan_template,
-		       valid_begin, valid_end, metadata, created_at
+		       valid_begin, valid_end, metadata, COALESCE(qr_token,''), created_at
 		FROM persons ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -531,7 +560,7 @@ func (s *Store) ListPersons(ctx context.Context) ([]Person, error) {
 		var p Person
 		if err := rows.Scan(&p.ID, &p.Name, &p.EmployeeNo, &p.Gender, &p.PersonType, &p.PersonRole,
 			&p.LongTerm, &p.AttendanceOnly, &p.DoorRight, &p.PlanTemplate,
-			&p.ValidBegin, &p.ValidEnd, &p.Metadata, &p.CreatedAt); err != nil {
+			&p.ValidBegin, &p.ValidEnd, &p.Metadata, &p.QRToken, &p.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
