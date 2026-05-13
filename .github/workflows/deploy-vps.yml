@@ -1,0 +1,62 @@
+name: Deploy face_auth to VPS
+
+# CI/CD: SSH into the VPS, pull latest main, rebuild + recreate the docker
+# stack with the shared-reverse-proxy compose override. Triggers on push
+# to `main` and manual dispatch.
+#
+# Required GitHub secrets (Settings → Secrets and variables → Actions):
+#   VPS_HOST     — IP or hostname of the server
+#   VPS_USER     — SSH user with docker permission
+#   VPS_SSH_KEY  — private SSH key (PEM block, see qparking workflow for
+#                  the ssh-keygen recipe)
+#   VPS_PORT     — optional, defaults to 22
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: face_auth-vps
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          script_stop: true
+          command_timeout: 20m
+          script: |
+            set -e
+            cd /opt/face_auth
+
+            echo "==> Fetching origin"
+            git fetch --all --prune
+
+            echo "==> Hard-resetting to origin/main"
+            git reset --hard origin/main
+
+            echo "==> Current commit:"
+            git log -1 --pretty=format:"%h %s (%an, %ar)"
+
+            COMPOSE="docker compose -f docker-compose.yml -f docker-compose.vps.yml"
+
+            echo "==> Building images (no cache)"
+            $COMPOSE build --no-cache
+
+            echo "==> Recreating containers"
+            $COMPOSE up -d --force-recreate --remove-orphans
+
+            echo "==> Pruning dangling images"
+            docker image prune -f
+
+            echo "==> Stack status"
+            $COMPOSE ps
