@@ -2246,12 +2246,40 @@ type EndpointDef = {
   params?: { name: string; in: 'path' | 'query' | 'body' | 'form'; type?: string; required?: boolean; description?: string }[]
   bodyExample?: any
   responseType?: 'json' | 'image' | 'mjpeg' | 'sse' | 'text'
+  responses?: { status: number; description: string; example?: any }[]
 }
+
+const DEFAULT_OK_RESPONSE = (example?: any) => [
+  { status: 200, description: 'Success', example },
+  { status: 401, description: 'Missing or invalid API key', example: { error: 'missing api key' } },
+  { status: 500, description: 'Internal error', example: { error: 'reason…' } },
+]
 
 const ENDPOINTS: EndpointDef[] = [
   // v1 PUBLIC
-  { method: 'GET', path: '/api/v1/ping', group: 'v1 — Health', summary: 'Liveness check', auth: 'v1' },
-  { method: 'GET', path: '/api/v1/devices', group: 'v1 — Devices', summary: 'List devices (with effective QR mode)', auth: 'v1' },
+  {
+    method: 'GET', path: '/api/v1/ping', group: 'v1 — Health',
+    summary: 'Liveness check',
+    description: 'Returns 200 with the current server time. Use this from your monitoring to assert the public API surface is up and your API key is valid.',
+    auth: 'v1',
+    responses: [
+      { status: 200, description: 'OK', example: { ok: true, service: 'face_auth', time: '2026-06-03T08:00:00Z' } },
+      { status: 401, description: 'Missing/invalid API key', example: { error: 'missing api key' } },
+    ],
+  },
+  {
+    method: 'GET', path: '/api/v1/devices', group: 'v1 — Devices',
+    summary: 'List devices (with effective QR mode)',
+    description: 'Returns every device registered in face_auth, decorated with its effective `requireQR2FA` setting (per-device override, otherwise global default).',
+    auth: 'v1',
+    responses: [
+      {
+        status: 200, description: 'Device list', example: [
+          { deviceId: 'lobby-1', name: 'Lobby entry', model: 'DS-K1T804AEF', online: true, requireQR2FA: false, agentId: 'lobby-agent' },
+        ]
+      },
+    ],
+  },
   { method: 'POST', path: '/api/v1/devices/:id/probe', group: 'v1 — Devices', summary: 'Probe reachability + update status', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
   { method: 'GET', path: '/api/v1/devices/:id/snapshot', group: 'v1 — Devices', summary: 'Single JPEG frame', auth: 'v1', responseType: 'image', params: [{ name: 'id', in: 'path', required: true }] },
   { method: 'GET', path: '/api/v1/devices/:id/stream.mjpg', group: 'v1 — Devices', summary: 'Continuous MJPEG stream', auth: 'v1', responseType: 'mjpeg', params: [{ name: 'id', in: 'path', required: true }, { name: 'fps', in: 'query', type: 'int', description: '1-15, default 4' }, { name: 'seconds', in: 'query', type: 'int', description: 'auto-close after N sec, 0=forever' }] },
@@ -2271,10 +2299,61 @@ const ENDPOINTS: EndpointDef[] = [
   { method: 'POST', path: '/api/v1/devices/:id/faces', group: 'v1 — Faces', summary: 'Enrol a face (multipart upload)', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'file', in: 'form', required: true, description: 'JPEG' }, { name: 'personId', in: 'form' }, { name: 'name', in: 'form' }, { name: 'employeeNo', in: 'form' }] },
   { method: 'DELETE', path: '/api/v1/devices/:id/faces/:personId', group: 'v1 — Faces', summary: 'Delete a face from device', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'personId', in: 'path', required: true }] },
 
-  { method: 'POST', path: '/api/v1/auth/face/start', group: 'v1 — Face Auth', summary: 'Open a face-auth session ★', auth: 'v1', description: 'Behavior depends on the device requireQR2FA toggle. Provide qrToken / personId / employeeNo to identify a user. With face-only mode all three can be omitted.', bodyExample: { deviceId: 'lobby-1' } },
-  { method: 'GET', path: '/api/v1/auth/face/:id', group: 'v1 — Face Auth', summary: 'Get session status', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
-  { method: 'POST', path: '/api/v1/auth/face/:id/cancel', group: 'v1 — Face Auth', summary: 'Cancel an open session', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
-  { method: 'GET', path: '/api/v1/auth/face/stream', group: 'v1 — Face Auth', summary: 'SSE stream of every face match', auth: 'v1', responseType: 'sse' },
+  {
+    method: 'POST', path: '/api/v1/auth/face/start', group: 'v1 — Face Auth',
+    summary: 'Open a face-auth session ★',
+    description: 'The main third-party entry point. Behavior depends on the device\'s effective requireQR2FA toggle:\n\n• When the device requires QR (default), you MUST supply one of `qrToken`, `personId`, or `employeeNo` to identify which user is about to authenticate. The system briefly unlocks face mode for that user.\n\n• When the device is face-only, you can omit all three — the device is always armed and the session just waits for ANY enrolled user to present a face.\n\nThe call returns a session record. Poll `GET /api/v1/auth/face/{id}` or subscribe to the SSE stream until `status !== "open"`.',
+    auth: 'v1',
+    bodyExample: { deviceId: 'lobby-1', personId: 'optional', employeeNo: 'optional', qrToken: 'optional' },
+    responses: [
+      {
+        status: 200, description: 'Session opened', example: {
+          id: 'fa-9c3f1b8d04',
+          personId: 'p_1', employeeNo: '1001', name: 'Alice',
+          deviceId: 'lobby-1',
+          openedAt: '2026-06-03T08:00:00Z',
+          expiresAt: '2026-06-03T08:00:10Z',
+          mode: 'face-only', status: 'open', source: 'api',
+        }
+      },
+      { status: 400, description: 'Bad request (e.g. unknown QR token, missing deviceId)', example: { error: 'unknown QR token' } },
+      { status: 404, description: 'Device not found', example: { error: 'device not found' } },
+      { status: 409, description: 'Device requires QR — supply identifier', example: { error: 'qr_required', detail: 'this device requires QR scan before face — supply qrToken, personId, or employeeNo' } },
+      { status: 503, description: 'Public API disabled by admin', example: { error: 'public api disabled' } },
+    ],
+  },
+  {
+    method: 'GET', path: '/api/v1/auth/face/:id', group: 'v1 — Face Auth',
+    summary: 'Get session status',
+    description: 'Poll for the outcome. `status` is one of:\n\n  • `open` — still waiting for face\n  • `face_matched` — success; `matchedEmployeeNo` is set\n  • `timed_out` — window closed with no match\n  • `cancelled` — aborted by caller or admin',
+    auth: 'v1',
+    params: [{ name: 'id', in: 'path', required: true, description: 'Session id returned by /start' }],
+    responses: [
+      {
+        status: 200, description: 'Session record', example: {
+          id: 'fa-9c3f1b8d04',
+          status: 'face_matched', matchedEmployeeNo: '1001',
+          deviceId: 'lobby-1', openedAt: '2026-06-03T08:00:00Z', expiresAt: '2026-06-03T08:00:10Z',
+        }
+      },
+      { status: 404, description: 'Session not found (already evicted from history)' },
+    ],
+  },
+  {
+    method: 'POST', path: '/api/v1/auth/face/:id/cancel', group: 'v1 — Face Auth',
+    summary: 'Cancel an open session',
+    description: 'Aborts a session that is still `open`. No-op if the session has already ended.',
+    auth: 'v1',
+    params: [{ name: 'id', in: 'path', required: true }],
+    responses: [{ status: 200, description: 'OK', example: { ok: true } }],
+  },
+  {
+    method: 'GET', path: '/api/v1/auth/face/stream', group: 'v1 — Face Auth',
+    summary: 'SSE stream of every face match',
+    description: 'Server-Sent Events. Each `face_match` event payload contains `{ deviceId, employeeNo, receivedAt }`. Useful for attendance dashboards or door-open hooks without per-session polling.',
+    auth: 'v1', responseType: 'sse',
+    responses: [{ status: 200, description: 'Stream (text/event-stream)', example: 'event: face_match\ndata: {"deviceId":"lobby-1","employeeNo":"1001","receivedAt":"2026-06-03T08:00:08Z"}\n\n' }],
+  },
   { method: 'POST', path: '/api/v1/qr-auth/scan', group: 'v1 — Face Auth', summary: 'Submit a QR token (third-party agent emulation)', auth: 'v1', bodyExample: { qrToken: 'paste-here', agentId: '' } },
 
   { method: 'GET', path: '/api/v1/events', group: 'v1 — Events', summary: 'List recent device events', auth: 'v1', params: [{ name: 'limit', in: 'query', type: 'int' }, { name: 'deviceId', in: 'query' }] },
@@ -2304,7 +2383,27 @@ const ENDPOINTS: EndpointDef[] = [
   { method: 'GET', path: '/api/events/stream', group: 'admin — Events', summary: 'SSE stream', auth: 'admin', responseType: 'sse' },
 ]
 
-function ApiDocsTab() {
+const METHOD_COLOR: Record<string, string> = { GET: '#3b82f6', POST: '#10b981', PUT: '#f59e0b', DELETE: '#ef4444' }
+const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+
+function ApiDocsTab() { return <ApiDocsView showHeader /> }
+
+export function ApiDocsStandalone() {
+  return (
+    <div className="docs-app" style={{ background: 'var(--bg, #0c0c0e)', minHeight: '100vh', color: 'var(--fg, #e6e6e6)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 24px', borderBottom: '1px solid var(--border, #2a2a2a)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span className="logo-dot" />
+          <strong style={{ fontSize: 18 }}>face_auth — API Reference</strong>
+        </div>
+        <a href="/" style={{ color: 'inherit', opacity: 0.7, fontSize: 13 }}>← Back to dashboard</a>
+      </div>
+      <ApiDocsView />
+    </div>
+  )
+}
+
+function ApiDocsView({ showHeader = false }: { showHeader?: boolean }) {
   const [filter, setFilter] = useState('')
   const [groupFilter, setGroupFilter] = useState<'all' | 'v1' | 'admin'>('all')
   const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem('face_auth.testApiKey') || '')
@@ -2330,46 +2429,95 @@ function ApiDocsTab() {
     return m
   }, [filtered])
 
+  const origin = typeof location !== 'undefined' ? location.origin : ''
+  const standaloneUrl = origin + '/docs'
+
   return (
-    <>
-      <div className="page-toolbar">
-        <div className="toolbar-left">
-          <h1 className="page-title">API docs <span className="muted">· {ENDPOINTS.length} endpoints</span></h1>
-        </div>
-        <div className="toolbar-right" style={{ gap: 8 }}>
-          <select value={groupFilter} onChange={(e) => setGroupFilter(e.target.value as any)}>
-            <option value="all">All</option>
-            <option value="v1">v1 (third-party)</option>
-            <option value="admin">admin (UI)</option>
-          </select>
-          <input className="search" placeholder="Filter…" value={filter} onChange={(e) => setFilter(e.target.value)} />
-        </div>
-      </div>
-
-      <Card title="Authentication">
-        <p className="muted small" style={{ marginBottom: 8 }}>
-          v1 endpoints require an API key. Admin endpoints share this browser session. Paste a key once — it's used for every Try-it below.
-        </p>
-        <Field label="API key (used by Try it)">
-          <input type="password" placeholder="fa_xxxxxxxxxxxx" value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
-        </Field>
-      </Card>
-
-      {Object.keys(grouped).length === 0
-        ? <div className="empty">No endpoints match.</div>
-        : Object.entries(grouped).map(([group, items]) => (
-          <Card key={group} title={group}>
-            <div className="endpoint-list" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {items.map((e) => <EndpointRow key={e.method + e.path} ep={e} apiKey={apiKey} />)}
-            </div>
-          </Card>
+    <div className="docs-shell" style={{ display: 'grid', gridTemplateColumns: '260px 1fr', gap: 0, alignItems: 'start' }}>
+      <aside className="docs-sidebar" style={{ position: 'sticky', top: 0, maxHeight: '100vh', overflowY: 'auto', borderRight: '1px solid var(--border, #2a2a2a)', padding: '16px 12px' }}>
+        <input
+          className="search"
+          placeholder="Filter endpoints…"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          style={{ width: '100%', marginBottom: 12 }}
+        />
+        <select value={groupFilter} onChange={(e) => setGroupFilter(e.target.value as any)} style={{ width: '100%', marginBottom: 16 }}>
+          <option value="all">All endpoints ({ENDPOINTS.length})</option>
+          <option value="v1">v1 — third-party</option>
+          <option value="admin">admin — UI</option>
+        </select>
+        {Object.entries(grouped).map(([group, items]) => (
+          <div key={group} style={{ marginBottom: 14 }}>
+            <div className="muted small" style={{ textTransform: 'uppercase', letterSpacing: 0.5, padding: '2px 6px', fontSize: 11, fontWeight: 600 }}>{group}</div>
+            {items.map((e) => (
+              <a
+                key={e.method + e.path}
+                href={`#${slug(e.method + '-' + e.path)}`}
+                style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '4px 6px', borderRadius: 4, color: 'inherit', textDecoration: 'none', fontSize: 12 }}
+              >
+                <span style={{ background: METHOD_COLOR[e.method], color: '#fff', padding: '0 6px', borderRadius: 3, fontFamily: 'monospace', fontSize: 10, fontWeight: 700, minWidth: 50, textAlign: 'center' }}>{e.method}</span>
+                <span className="mono" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.path.replace(/^\/api\/?(v1\/)?/, '')}</span>
+              </a>
+            ))}
+          </div>
         ))}
-    </>
+      </aside>
+
+      <main className="docs-main" style={{ padding: '24px 32px', maxWidth: 1080 }}>
+        {showHeader && (
+          <div className="page-toolbar">
+            <div className="toolbar-left">
+              <h1 className="page-title">API docs <span className="muted">· {ENDPOINTS.length} endpoints</span></h1>
+            </div>
+            <div className="toolbar-right">
+              <a className="btn-ghost" href={standaloneUrl} target="_blank" rel="noreferrer">Open standalone view ↗</a>
+            </div>
+          </div>
+        )}
+
+        <section style={{ marginBottom: 32 }}>
+          <h2>Introduction</h2>
+          <p>face_auth exposes two HTTP surfaces:</p>
+          <ul>
+            <li><strong><code>/api/v1/*</code></strong> — public, versioned API for third-party software. API key required.</li>
+            <li><strong><code>/api/*</code></strong> — admin surface backing this dashboard. Same-origin only.</li>
+          </ul>
+          <p>Base URL: <code>{origin}</code></p>
+        </section>
+
+        <section style={{ marginBottom: 32 }}>
+          <h2 id="auth">Authentication</h2>
+          <p>Create an API key in <strong>Settings → API keys</strong> (value shown once). Then send it on every <code>/api/v1/*</code> call:</p>
+          <pre className="result mono small">{`# Header (recommended)
+Authorization: Bearer fa_xxxxxxxxxxxxxxxxxxxxxxxx
+
+# Or custom header
+X-API-Key: fa_xxxxxxxxxxxxxxxxxxxxxxxx
+
+# Or query string (avoid for sensitive endpoints — ends up in logs)
+?apiKey=fa_xxxxxxxxxxxxxxxxxxxxxxxx`}</pre>
+          <Field label="API key (saved locally — used by every Try it below)">
+            <input type="password" placeholder="fa_xxxxxxxxxxxx" value={apiKey} onChange={(e) => setApiKey(e.target.value)} style={{ width: '100%' }} />
+          </Field>
+        </section>
+
+        {Object.keys(grouped).length === 0
+          ? <div className="empty">No endpoints match.</div>
+          : Object.entries(grouped).map(([group, items]) => (
+            <section key={group} style={{ marginBottom: 28 }}>
+              <h2 id={slug(group)} style={{ borderBottom: '1px solid var(--border, #2a2a2a)', paddingBottom: 8, marginBottom: 16 }}>{group}</h2>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 32 }}>
+                {items.map((e) => <EndpointBlock key={e.method + e.path} ep={e} apiKey={apiKey} />)}
+              </div>
+            </section>
+          ))}
+      </main>
+    </div>
   )
 }
 
-function EndpointRow({ ep, apiKey }: { ep: EndpointDef; apiKey: string }) {
-  const [open, setOpen] = useState(false)
+function EndpointBlock({ ep, apiKey }: { ep: EndpointDef; apiKey: string }) {
   const [pathParams, setPathParams] = useState<Record<string, string>>({})
   const [queryParams, setQueryParams] = useState<Record<string, string>>({})
   const [bodyText, setBodyText] = useState<string>(() => ep.bodyExample ? JSON.stringify(ep.bodyExample, null, 2) : '')
@@ -2377,12 +2525,15 @@ function EndpointRow({ ep, apiKey }: { ep: EndpointDef; apiKey: string }) {
   const [formFields, setFormFields] = useState<Record<string, string>>({})
   const [running, setRunning] = useState(false)
   const [result, setResult] = useState<any | null>(null)
+  const [copied, setCopied] = useState(false)
 
   const isMultipart = (ep.params || []).some((p) => p.in === 'form')
+  const origin = typeof location !== 'undefined' ? location.origin : ''
+  const anchor = slug(ep.method + '-' + ep.path)
 
   const buildPath = (): string => {
     let path = ep.path
-    Object.entries(pathParams).forEach(([k, v]) => { path = path.replace(`:${k}`, encodeURIComponent(v)) })
+    Object.entries(pathParams).forEach(([k, v]) => { if (v) path = path.replace(`:${k}`, encodeURIComponent(v)) })
     const qp = Object.entries(queryParams).filter(([_, v]) => v !== '').map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&')
     if (qp) path += (path.includes('?') ? '&' : '?') + qp
     return path
@@ -2411,40 +2562,74 @@ function EndpointRow({ ep, apiKey }: { ep: EndpointDef; apiKey: string }) {
     } finally { setRunning(false) }
   }
 
-  const methodColor: Record<string, string> = { GET: '#3b82f6', POST: '#10b981', PUT: '#f59e0b', DELETE: '#ef4444' }
+  const curlText = useMemo(() => {
+    const lines: string[] = [`curl -X ${ep.method} '${origin}${buildPath()}'`]
+    if (ep.auth === 'v1') lines.push(`  -H 'X-API-Key: $KEY'`)
+    if (ep.method !== 'GET' && !isMultipart && bodyText.trim()) {
+      lines.push(`  -H 'Content-Type: application/json'`)
+      const escaped = bodyText.replace(/'/g, `'\\''`)
+      lines.push(`  --data '${escaped}'`)
+    }
+    if (isMultipart) {
+      lines.push(`  -F 'file=@/path/to/image.jpg'`)
+      ;(ep.params || []).filter((p) => p.in === 'form' && p.name !== 'file').forEach((p) => {
+        const v = formFields[p.name] || `<${p.name}>`
+        lines.push(`  -F '${p.name}=${v}'`)
+      })
+    }
+    return lines.join(' \\\n')
+  }, [ep, bodyText, formFields, origin, isMultipart, pathParams, queryParams])
+
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(curlText); setCopied(true); setTimeout(() => setCopied(false), 1500) } catch {}
+  }
+
+  const fullUrl = origin + buildPath()
+  const responses = ep.responses && ep.responses.length > 0 ? ep.responses : DEFAULT_OK_RESPONSE()
 
   return (
-    <div className={`endpoint-row ${open ? 'open' : ''}`} style={{ border: '1px solid var(--border, #2a2a2a)', borderRadius: 8 }}>
-      <div className="endpoint-head" onClick={() => setOpen(!open)} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px' }}>
-        <span style={{ background: methodColor[ep.method], color: '#fff', padding: '2px 8px', borderRadius: 4, fontFamily: 'monospace', fontSize: 12, minWidth: 56, textAlign: 'center' }}>{ep.method}</span>
-        <code style={{ flex: '0 0 auto' }}>{ep.path}</code>
-        <span className="endpoint-summary muted" style={{ flex: 1, fontSize: 13 }}>{ep.summary}</span>
-        {ep.auth === 'v1' && <span className="badge ok">v1</span>}
-        <span style={{ width: 16, textAlign: 'center', opacity: 0.6 }}>{open ? '▾' : '▸'}</span>
-      </div>
-      {open && (
-        <div className="endpoint-body" style={{ padding: '8px 12px 12px', borderTop: '1px solid var(--border, #2a2a2a)' }}>
-          {ep.description && <p>{ep.description}</p>}
+    <article id={anchor} style={{ border: '1px solid var(--border, #2a2a2a)', borderRadius: 12, overflow: 'hidden', scrollMarginTop: 12 }}>
+      <header style={{ padding: '16px 20px', background: 'rgba(255,255,255,0.02)', borderBottom: '1px solid var(--border, #2a2a2a)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 6, flexWrap: 'wrap' }}>
+          <span style={{ background: METHOD_COLOR[ep.method], color: '#fff', padding: '4px 10px', borderRadius: 5, fontFamily: 'monospace', fontSize: 13, fontWeight: 700, minWidth: 64, textAlign: 'center' }}>{ep.method}</span>
+          <code style={{ fontSize: 15, fontWeight: 600 }}>{ep.path}</code>
+          {ep.auth === 'v1' && <span className="badge ok">requires API key</span>}
+          <a href={`#${anchor}`} style={{ marginLeft: 'auto', opacity: 0.5, color: 'inherit', textDecoration: 'none', fontSize: 14 }} title="link to endpoint">#</a>
+        </div>
+        <div style={{ fontSize: 15 }}>{ep.summary}</div>
+      </header>
+
+      <div className="docs-endpoint-grid" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: 0 }}>
+        <div style={{ padding: '16px 20px', borderRight: '1px solid var(--border, #2a2a2a)' }}>
+          {ep.description && (
+            <div style={{ marginBottom: 16 }}>
+              {ep.description.split('\n\n').map((para, i) => <p key={i} style={{ whiteSpace: 'pre-wrap', margin: '0 0 8px' }}>{para}</p>)}
+            </div>
+          )}
+
+          {ep.auth === 'v1' && (
+            <div style={{ marginBottom: 16 }}>
+              <h4 style={{ margin: '0 0 6px' }}>Authorization</h4>
+              <pre className="result mono small" style={{ margin: 0 }}>{`Authorization: Bearer fa_xxx
+# or
+X-API-Key: fa_xxx`}</pre>
+            </div>
+          )}
+
           {(ep.params && ep.params.length > 0) && (
-            <div className="params">
-              <h4>Parameters</h4>
+            <div style={{ marginBottom: 16 }}>
+              <h4 style={{ margin: '0 0 6px' }}>Parameters</h4>
               <div className="table-wrap">
-                <table className="data-table">
-                  <thead><tr><th>Name</th><th>In</th><th>Type</th><th>Req?</th><th>Description</th><th>Value</th></tr></thead>
+                <table className="data-table" style={{ fontSize: 13 }}>
+                  <thead><tr><th>Name</th><th>In</th><th>Type</th><th>Required</th><th>Description</th></tr></thead>
                   <tbody>
                     {ep.params.map((p) => (
                       <tr key={p.name + p.in}>
                         <td><code>{p.name}</code></td>
-                        <td>{p.in}</td>
-                        <td>{p.type || 'string'}</td>
+                        <td><span className="muted small">{p.in}</span></td>
+                        <td><span className="muted small">{p.type || 'string'}</span></td>
                         <td>{p.required ? <span className="badge err">yes</span> : <span className="muted small">no</span>}</td>
-                        <td className="muted small">{p.description}</td>
-                        <td>
-                          {p.in === 'path' && <input value={pathParams[p.name] || ''} onChange={(e) => setPathParams({ ...pathParams, [p.name]: e.target.value })} />}
-                          {p.in === 'query' && <input value={queryParams[p.name] || ''} onChange={(e) => setQueryParams({ ...queryParams, [p.name]: e.target.value })} />}
-                          {p.in === 'form' && p.name === 'file' && <input type="file" onChange={(e) => setFormFile(e.target.files?.[0] || null)} />}
-                          {p.in === 'form' && p.name !== 'file' && <input value={formFields[p.name] || ''} onChange={(e) => setFormFields({ ...formFields, [p.name]: e.target.value })} />}
-                        </td>
+                        <td className="muted small">{p.description || ''}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -2452,32 +2637,126 @@ function EndpointRow({ ep, apiKey }: { ep: EndpointDef; apiKey: string }) {
               </div>
             </div>
           )}
-          {ep.method !== 'GET' && !isMultipart && (
-            <Field label="Request body (JSON)">
-              <textarea value={bodyText} onChange={(e) => setBodyText(e.target.value)} rows={Math.min(10, Math.max(3, (bodyText.match(/\n/g) || []).length + 2))} className="mono small" style={{ width: '100%', fontFamily: 'monospace' }} />
-            </Field>
+
+          {ep.bodyExample && !isMultipart && (
+            <div style={{ marginBottom: 16 }}>
+              <h4 style={{ margin: '0 0 6px' }}>Request body</h4>
+              <div className="muted small" style={{ marginBottom: 4 }}>Content-Type: <code>application/json</code></div>
+              <pre className="result mono small" style={{ margin: 0 }}>{JSON.stringify(ep.bodyExample, null, 2)}</pre>
+            </div>
           )}
-          <div className="form-actions" style={{ alignItems: 'center', gap: 12 }}>
-            <button className="btn-primary" onClick={run} disabled={running}>{running ? 'Running…' : 'Try it'}</button>
+
+          {isMultipart && (
+            <div style={{ marginBottom: 16 }}>
+              <h4 style={{ margin: '0 0 6px' }}>Request body</h4>
+              <div className="muted small">Content-Type: <code>multipart/form-data</code></div>
+            </div>
+          )}
+
+          <div style={{ marginBottom: 16 }}>
+            <h4 style={{ margin: '0 0 6px' }}>Responses</h4>
+            {responses.map((r) => (
+              <div key={r.status} style={{ marginBottom: 8 }}>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
+                  <code style={{ color: r.status >= 200 && r.status < 300 ? '#10b981' : (r.status >= 400 ? '#ef4444' : '#f59e0b'), fontWeight: 700 }}>{r.status}</code>
+                  <span className="muted small">{r.description}</span>
+                </div>
+                {r.example !== undefined && (
+                  <pre className="result mono small" style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap' }}>{typeof r.example === 'string' ? r.example : JSON.stringify(r.example, null, 2)}</pre>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ padding: '16px 20px', background: 'rgba(0,0,0,0.18)' }}>
+          <h4 style={{ margin: '0 0 8px' }}>Try it</h4>
+
+          {(ep.params || []).filter((p) => p.in === 'path').length > 0 && (
+            <div style={{ marginBottom: 10 }}>
+              <div className="muted small" style={{ marginBottom: 4 }}>Path parameters</div>
+              {(ep.params || []).filter((p) => p.in === 'path').map((p) => (
+                <div key={p.name} style={{ marginBottom: 6 }}>
+                  <label className="muted small">{p.name}{p.required && <span style={{ color: '#ef4444' }}> *</span>}</label>
+                  <input value={pathParams[p.name] || ''} onChange={(e) => setPathParams({ ...pathParams, [p.name]: e.target.value })} placeholder={p.description || p.name} style={{ width: '100%' }} />
+                </div>
+              ))}
+            </div>
+          )}
+
+          {(ep.params || []).filter((p) => p.in === 'query').length > 0 && (
+            <div style={{ marginBottom: 10 }}>
+              <div className="muted small" style={{ marginBottom: 4 }}>Query parameters</div>
+              {(ep.params || []).filter((p) => p.in === 'query').map((p) => (
+                <div key={p.name} style={{ marginBottom: 6 }}>
+                  <label className="muted small">{p.name}</label>
+                  <input value={queryParams[p.name] || ''} onChange={(e) => setQueryParams({ ...queryParams, [p.name]: e.target.value })} placeholder={p.description || p.name} style={{ width: '100%' }} />
+                </div>
+              ))}
+            </div>
+          )}
+
+          {isMultipart && (
+            <div style={{ marginBottom: 10 }}>
+              <div className="muted small" style={{ marginBottom: 4 }}>Multipart fields</div>
+              {(ep.params || []).filter((p) => p.in === 'form').map((p) => (
+                <div key={p.name} style={{ marginBottom: 6 }}>
+                  <label className="muted small">{p.name}{p.required && <span style={{ color: '#ef4444' }}> *</span>}</label>
+                  {p.name === 'file'
+                    ? <input type="file" onChange={(e) => setFormFile(e.target.files?.[0] || null)} style={{ width: '100%' }} />
+                    : <input value={formFields[p.name] || ''} onChange={(e) => setFormFields({ ...formFields, [p.name]: e.target.value })} placeholder={p.description || p.name} style={{ width: '100%' }} />}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {ep.method !== 'GET' && !isMultipart && (
+            <div style={{ marginBottom: 10 }}>
+              <div className="muted small" style={{ marginBottom: 4 }}>Request body (JSON)</div>
+              <textarea
+                value={bodyText}
+                onChange={(e) => setBodyText(e.target.value)}
+                rows={Math.min(14, Math.max(4, (bodyText.match(/\n/g) || []).length + 2))}
+                className="mono small"
+                style={{ width: '100%', fontFamily: 'monospace', fontSize: 12 }}
+                spellCheck={false}
+              />
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
+            <button className="btn-primary" onClick={run} disabled={running}>{running ? 'Running…' : 'Try it ▶'}</button>
             {ep.responseType === 'image' && (
-              <a className="btn-ghost" href={apiUrl(buildPath()) + (ep.auth === 'v1' && apiKey ? (buildPath().includes('?') ? '&' : '?') + 'apiKey=' + encodeURIComponent(apiKey) : '')} target="_blank" rel="noreferrer">Open image</a>
+              <a className="btn-ghost" href={fullUrl + (ep.auth === 'v1' && apiKey ? (fullUrl.includes('?') ? '&' : '?') + 'apiKey=' + encodeURIComponent(apiKey) : '')} target="_blank" rel="noreferrer">Open image ↗</a>
             )}
             {ep.responseType === 'mjpeg' && (
-              <a className="btn-ghost" href={apiUrl(buildPath()) + (ep.auth === 'v1' && apiKey ? (buildPath().includes('?') ? '&' : '?') + 'apiKey=' + encodeURIComponent(apiKey) : '')} target="_blank" rel="noreferrer">Open MJPEG</a>
+              <a className="btn-ghost" href={fullUrl + (ep.auth === 'v1' && apiKey ? (fullUrl.includes('?') ? '&' : '?') + 'apiKey=' + encodeURIComponent(apiKey) : '')} target="_blank" rel="noreferrer">Open MJPEG ↗</a>
+            )}
+            {ep.responseType === 'sse' && (
+              <span className="muted small">SSE stream — use curl to see live events</span>
             )}
           </div>
-          <details style={{ marginTop: 8 }}>
-            <summary className="muted small">Show curl example</summary>
-            <pre className="result mono small">{`curl -X ${ep.method} ${ep.auth === 'v1' ? `-H "X-API-Key: $KEY" ` : ''}${ep.method !== 'GET' && !isMultipart ? `-H 'Content-Type: application/json' ` : ''}${ep.method !== 'GET' && !isMultipart && bodyText.trim() ? `-d '${bodyText.replace(/\n/g, ' ').replace(/\s+/g, ' ')}' ` : ''}${typeof location !== 'undefined' ? location.origin : ''}${buildPath()}`}</pre>
-          </details>
+
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+              <div className="muted small">cURL</div>
+              <button className="btn-ghost" style={{ fontSize: 11, padding: '2px 8px' }} onClick={copy}>{copied ? 'copied!' : 'copy'}</button>
+            </div>
+            <pre className="result mono small" style={{ margin: 0, whiteSpace: 'pre-wrap', fontSize: 12 }}>{curlText}</pre>
+          </div>
+
           {result && (
-            <div className="result-block" style={{ marginTop: 8 }}>
-              <div><strong>Status:</strong> <code className={result.ok ? 'ok' : 'err'}>{result.status}</code> <span className="muted small">{result.contentType}</span></div>
-              <pre className="result">{typeof result.body === 'string' ? result.body : JSON.stringify(result.body, null, 2)}</pre>
+            <div style={{ marginTop: 12 }}>
+              <div className="muted small" style={{ marginBottom: 4 }}>Response</div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', marginBottom: 4 }}>
+                <code style={{ color: result.ok ? '#10b981' : '#ef4444', fontWeight: 700 }}>{result.status}</code>
+                <span className="muted small">{result.contentType}</span>
+              </div>
+              <pre className="result mono small" style={{ margin: 0, maxHeight: 280, overflow: 'auto' }}>{typeof result.body === 'string' ? result.body : JSON.stringify(result.body, null, 2)}</pre>
             </div>
           )}
         </div>
-      )}
-    </div>
+      </div>
+    </article>
   )
 }
