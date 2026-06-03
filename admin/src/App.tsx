@@ -2435,6 +2435,21 @@ function ApiDocsView({ showHeader = false }: { showHeader?: boolean }) {
   return (
     <div className="docs-shell" style={{ display: 'grid', gridTemplateColumns: '260px 1fr', gap: 0, alignItems: 'start' }}>
       <aside className="docs-sidebar" style={{ position: 'sticky', top: 0, maxHeight: '100vh', overflowY: 'auto', borderRight: '1px solid var(--border, #2a2a2a)', padding: '16px 12px' }}>
+        <div style={{ marginBottom: 14, padding: 10, background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border, #2a2a2a)', borderRadius: 6 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+            <strong style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: 0.5 }}>API key</strong>
+            <span className={apiKey ? 'badge ok' : 'badge err'} style={{ fontSize: 10 }}>{apiKey ? 'set' : 'missing'}</span>
+          </div>
+          <input
+            type="password"
+            placeholder="fa_xxxxxxxxxxxx"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            style={{ width: '100%', fontFamily: 'monospace', fontSize: 12 }}
+            autoComplete="off"
+          />
+          <div className="muted" style={{ fontSize: 10, marginTop: 4 }}>Used by every <em>Try it</em>. Create one in Settings → API keys.</div>
+        </div>
         <input
           className="search"
           placeholder="Filter endpoints…"
@@ -2508,7 +2523,7 @@ X-API-Key: fa_xxxxxxxxxxxxxxxxxxxxxxxx
             <section key={group} style={{ marginBottom: 28 }}>
               <h2 id={slug(group)} style={{ borderBottom: '1px solid var(--border, #2a2a2a)', paddingBottom: 8, marginBottom: 16 }}>{group}</h2>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 32 }}>
-                {items.map((e) => <EndpointBlock key={e.method + e.path} ep={e} apiKey={apiKey} />)}
+                {items.map((e) => <EndpointBlock key={e.method + e.path} ep={e} apiKey={apiKey} onApiKey={setApiKey} />)}
               </div>
             </section>
           ))}
@@ -2517,7 +2532,7 @@ X-API-Key: fa_xxxxxxxxxxxxxxxxxxxxxxxx
   )
 }
 
-function EndpointBlock({ ep, apiKey }: { ep: EndpointDef; apiKey: string }) {
+function EndpointBlock({ ep, apiKey, onApiKey }: { ep: EndpointDef; apiKey: string; onApiKey: (v: string) => void }) {
   const [pathParams, setPathParams] = useState<Record<string, string>>({})
   const [queryParams, setQueryParams] = useState<Record<string, string>>({})
   const [bodyText, setBodyText] = useState<string>(() => ep.bodyExample ? JSON.stringify(ep.bodyExample, null, 2) : '')
@@ -2540,6 +2555,10 @@ function EndpointBlock({ ep, apiKey }: { ep: EndpointDef; apiKey: string }) {
   }
 
   const run = async () => {
+    if (ep.auth === 'v1' && !apiKey) {
+      setResult({ status: 0, ok: false, body: 'No API key set. Paste one in the field above, or create one in Settings → API keys.' })
+      return
+    }
     setRunning(true); setResult(null)
     try {
       const path = buildPath()
@@ -2671,6 +2690,28 @@ X-API-Key: fa_xxx`}</pre>
 
         <div style={{ padding: '16px 20px', background: 'rgba(0,0,0,0.18)' }}>
           <h4 style={{ margin: '0 0 8px' }}>Try it</h4>
+
+          {ep.auth === 'v1' && (
+            <div style={{ marginBottom: 12, padding: 8, border: `1px solid ${apiKey ? 'var(--border, #2a2a2a)' : '#ef4444'}`, borderRadius: 6, background: apiKey ? 'transparent' : 'rgba(239,68,68,0.08)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                <label className="muted small" style={{ fontWeight: 600 }}>API key {!apiKey && <span style={{ color: '#ef4444' }}>(required)</span>}</label>
+                <span className={apiKey ? 'badge ok' : 'badge err'} style={{ fontSize: 10 }}>{apiKey ? 'set' : 'missing'}</span>
+              </div>
+              <input
+                type="password"
+                placeholder="fa_xxxxxxxxxxxx — paste your API key"
+                value={apiKey}
+                onChange={(e) => onApiKey(e.target.value)}
+                style={{ width: '100%', fontFamily: 'monospace', fontSize: 12 }}
+                autoComplete="off"
+              />
+              {!apiKey && (
+                <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
+                  Don't have one? Go to <a href="/" style={{ color: 'inherit' }}>Settings → API keys</a> in the dashboard to create one.
+                </div>
+              )}
+            </div>
+          )}
 
           {(ep.params || []).filter((p) => p.in === 'path').length > 0 && (
             <div style={{ marginBottom: 10 }}>
