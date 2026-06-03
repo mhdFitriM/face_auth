@@ -1,0 +1,7 @@
+scripts/build-agents.sh.tmp
+agents/
+dist/
+*.exe
+*.test
+.env
+.env.local
