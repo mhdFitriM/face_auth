@@ -31,43 +31,64 @@ const (
 )
 
 type QRSession struct {
-	ID          string    `json:"id"`
-	PersonID    string    `json:"personId"`
-	EmployeeNo  string    `json:"employeeNo"`
-	Name        string    `json:"name"`
-	DeviceID    string    `json:"deviceId"`
-	OpenedAt    time.Time `json:"openedAt"`
-	ExpiresAt   time.Time `json:"expiresAt"`
-	Status      string    `json:"status"` // open | face_matched | timed_out | cancelled
-	cancel      context.CancelFunc
+	ID         string    `json:"id"`
+	PersonID   string    `json:"personId"`
+	EmployeeNo string    `json:"employeeNo"`
+	Name       string    `json:"name"`
+	DeviceID   string    `json:"deviceId"`
+	OpenedAt   time.Time `json:"openedAt"`
+	ExpiresAt  time.Time `json:"expiresAt"`
+	// Mode describes how the session was opened.
+	//   qr        — user scanned a QR code that mapped to a person
+	//   face-only — caller asked us to allow face for a specific person without QR
+	//   face-any  — caller asked us to allow face for ANY enrolled person on the device
+	Mode   string `json:"mode"`
+	Status string `json:"status"` // open | face_matched | timed_out | cancelled
+	// MatchedEmployeeNo is set when Mode=="face-any" and the device reports
+	// which user authenticated. For person-scoped sessions it equals EmployeeNo.
+	MatchedEmployeeNo string `json:"matchedEmployeeNo,omitempty"`
+	Source            string `json:"source,omitempty"` // ui | api | agent
+
+	cancel context.CancelFunc
 }
 
 type QRAuth struct {
-	store  *Store
-	cfg    Config
-	hub    *AgentHub
-	window time.Duration
+	store    *Store
+	cfg      Config
+	hub      *AgentHub
+	settings *SettingsStore
 
 	mu       sync.Mutex
-	sessions map[string]*QRSession // by employeeNo (one active session per user)
+	sessions map[string]*QRSession // by sessionID
 	history  []QRSession           // ring buffer for the live panel
 }
 
-func NewQRAuth(store *Store, cfg Config, hub *AgentHub) *QRAuth {
+func NewQRAuth(store *Store, cfg Config, hub *AgentHub, settings *SettingsStore) *QRAuth {
 	return &QRAuth{
 		store:    store,
 		cfg:      cfg,
 		hub:      hub,
-		window:   5 * time.Second,
+		settings: settings,
 		sessions: map[string]*QRSession{},
 	}
 }
 
-// Scan is the entry point — agent posts QR payload here.
-// We find the person, unlock face on the device(s), spawn watchdog.
+// window returns the configured face-auth window (settings-controlled).
+func (q *QRAuth) window() time.Duration {
+	sec := 10
+	if q.settings != nil {
+		sec = q.settings.Get().FaceAuthWindowSec
+	}
+	if sec <= 0 {
+		sec = 10
+	}
+	return time.Duration(sec) * time.Second
+}
+
+// Scan is the legacy QR entry point — agent posts QR payload here.
+// Maps QR token → Person → calls openSession(qr) on every device linked to
+// the agent.
 func (q *QRAuth) Scan(ctx context.Context, qrToken, agentID string) (*QRSession, error) {
-	// Normalize: strip whitespace + control chars; try a few common scanner
-	// prefix conventions if the exact token doesn't match.
 	candidates := tokenCandidates(qrToken)
 	var p *Person
 	for _, t := range candidates {
@@ -86,7 +107,6 @@ func (q *QRAuth) Scan(ctx context.Context, qrToken, agentID string) (*QRSession,
 	if p.EmployeeNo == "" {
 		return nil, errors.New("person has no employeeNo to authenticate against the device")
 	}
-
 	devices, err := q.devicesForAgent(ctx, agentID)
 	if err != nil {
 		return nil, err
@@ -94,41 +114,191 @@ func (q *QRAuth) Scan(ctx context.Context, qrToken, agentID string) (*QRSession,
 	if len(devices) == 0 {
 		return nil, errors.New("no devices linked to this agent")
 	}
+	return q.openSession(ctx, p, devices, "qr", "agent")
+}
 
-	// Cancel any existing session for this user
-	q.mu.Lock()
-	if old, ok := q.sessions[p.EmployeeNo]; ok && old.cancel != nil {
-		old.cancel()
+// StartFaceAuth opens a face-auth window on a specific device. Behavior depends
+// on the QR-required toggle:
+//
+//   - If the device requires QR (global or per-device override): the caller
+//     MUST supply qrToken OR (personId/employeeNo) so we know which user to
+//     unlock. If only a device is given, we refuse with ErrQRRequired so the
+//     caller knows to prompt for QR.
+//   - If the device does NOT require QR: anyone enrolled on the device can
+//     authenticate. We open a "face-any" session that just watches for the
+//     next face-match event on that device.
+//
+// If a specific personId/employeeNo is provided we open a "face-only" session
+// scoped to that user, regardless of toggle (third parties may want strict
+// identity binding).
+func (q *QRAuth) StartFaceAuth(ctx context.Context, req FaceAuthRequest) (*QRSession, error) {
+	if req.DeviceID == "" {
+		return nil, errors.New("deviceId required")
 	}
-	q.mu.Unlock()
+	d, err := q.store.GetDevice(ctx, req.DeviceID)
+	if err != nil || d == nil {
+		return nil, errors.New("device not found")
+	}
+	if d.IP == "" {
+		return nil, errors.New("device has no LAN address")
+	}
 
-	// Unlock on every device served by the agent
-	for _, d := range devices {
-		if err := q.setUserVerifyMode(ctx, &d, p, unlockedVerifyMode); err != nil {
-			log.Printf("[qr-auth] unlock %s on %s: %v", p.EmployeeNo, d.DeviceID, err)
-			return nil, fmt.Errorf("unlock failed: %w", err)
+	needsQR, _ := q.settings.DeviceRequiresQR(ctx, req.DeviceID)
+
+	// Resolve a person if any identifier was supplied.
+	var p *Person
+	switch {
+	case strings.TrimSpace(req.QRToken) != "":
+		for _, t := range tokenCandidates(req.QRToken) {
+			if pp, _ := q.store.GetPersonByQRToken(ctx, t); pp != nil {
+				p = pp
+				break
+			}
+		}
+		if p == nil {
+			return nil, errors.New("unknown QR token")
+		}
+	case req.PersonID != "":
+		p, _ = q.store.GetPerson(ctx, req.PersonID)
+		if p == nil {
+			return nil, errors.New("person not found")
+		}
+	case req.EmployeeNo != "":
+		p, _ = q.store.GetPersonByEmployeeNo(ctx, req.EmployeeNo)
+		if p == nil {
+			return nil, errors.New("employeeNo not found")
 		}
 	}
 
-	sessCtx, cancel := context.WithTimeout(context.Background(), q.window)
+	if p != nil && p.EmployeeNo == "" {
+		return nil, errors.New("person has no employeeNo")
+	}
+
+	if p == nil && needsQR {
+		return nil, ErrQRRequired
+	}
+
+	mode := "face-only"
+	if p == nil {
+		mode = "face-any"
+	} else if req.QRToken != "" {
+		mode = "qr"
+	}
+
+	src := req.Source
+	if src == "" {
+		src = "api"
+	}
+	return q.openSessionTagged(ctx, p, []Device{*d}, mode, src)
+}
+
+// FaceAuthRequest is the inbound payload for StartFaceAuth.
+type FaceAuthRequest struct {
+	DeviceID   string `json:"deviceId"`
+	PersonID   string `json:"personId,omitempty"`
+	EmployeeNo string `json:"employeeNo,omitempty"`
+	QRToken    string `json:"qrToken,omitempty"`
+	Source     string `json:"-"` // "ui" | "api" | "agent"
+}
+
+// ErrQRRequired signals to the caller that this device requires a QR scan
+// before face auth can start.
+var ErrQRRequired = errors.New("QR scan required before face auth on this device")
+
+// openSession (legacy) used by Scan() — keeps the historic name.
+func (q *QRAuth) openSession(ctx context.Context, p *Person, devices []Device, mode, source string) (*QRSession, error) {
+	return q.openSessionTagged(ctx, p, devices, mode, source)
+}
+
+func (q *QRAuth) openSessionTagged(ctx context.Context, p *Person, devices []Device, mode, source string) (*QRSession, error) {
+	if len(devices) == 0 {
+		return nil, errors.New("no devices to open session on")
+	}
+
+	// Cancel any existing session covering the same person (avoids two
+	// concurrent watchdogs fighting over verify-mode).
+	if p != nil {
+		q.mu.Lock()
+		for k, old := range q.sessions {
+			if old.EmployeeNo == p.EmployeeNo && old.cancel != nil {
+				old.cancel()
+				delete(q.sessions, k)
+			}
+		}
+		q.mu.Unlock()
+	}
+
+	// For person-scoped sessions, switch that user's verify-mode to "face" on
+	// every device. For face-any sessions, we trust the device's existing
+	// per-user state (admin must have either toggled QR off globally OR pre-set
+	// the users to face mode).
+	if p != nil {
+		for _, d := range devices {
+			if err := q.setUserVerifyMode(ctx, &d, p, unlockedVerifyMode); err != nil {
+				log.Printf("[face-auth] unlock %s on %s: %v", p.EmployeeNo, d.DeviceID, err)
+				return nil, fmt.Errorf("unlock failed: %w", err)
+			}
+		}
+	}
+
+	win := q.window()
+	sessCtx, cancel := context.WithTimeout(context.Background(), win)
 	sess := &QRSession{
-		ID:         "qr-" + p.EmployeeNo + "-" + time.Now().Format("150405.000"),
-		PersonID:   p.ID,
-		EmployeeNo: p.EmployeeNo,
-		Name:       p.Name,
-		DeviceID:   devices[0].DeviceID,
-		OpenedAt:   time.Now(),
-		ExpiresAt:  time.Now().Add(q.window),
-		Status:     "open",
-		cancel:     cancel,
+		ID:        "fa-" + RandomString(10, hexCharset),
+		DeviceID:  devices[0].DeviceID,
+		OpenedAt:  time.Now(),
+		ExpiresAt: time.Now().Add(win),
+		Mode:      mode,
+		Status:    "open",
+		Source:    source,
+		cancel:    cancel,
+	}
+	if p != nil {
+		sess.PersonID = p.ID
+		sess.EmployeeNo = p.EmployeeNo
+		sess.Name = p.Name
 	}
 	q.mu.Lock()
-	q.sessions[p.EmployeeNo] = sess
+	q.sessions[sess.ID] = sess
 	q.mu.Unlock()
 
 	go q.watchdog(sessCtx, sess, p, devices)
-	log.Printf("[qr-auth] session %s OPENED for %s (%s) — window %s", sess.ID, p.EmployeeNo, p.Name, q.window)
+	if p != nil {
+		log.Printf("[face-auth] session %s OPENED for %s (%s) mode=%s window=%s", sess.ID, p.EmployeeNo, p.Name, mode, win)
+	} else {
+		log.Printf("[face-auth] session %s OPENED any-user on %s mode=%s window=%s", sess.ID, sess.DeviceID, mode, win)
+	}
 	return sess, nil
+}
+
+// GetSession returns a snapshot of a session (active or recently finished).
+func (q *QRAuth) GetSession(id string) *QRSession {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if s, ok := q.sessions[id]; ok {
+		cp := *s
+		return &cp
+	}
+	for i := len(q.history) - 1; i >= 0; i-- {
+		if q.history[i].ID == id {
+			cp := q.history[i]
+			return &cp
+		}
+	}
+	return nil
+}
+
+// CancelSession aborts an open session. Returns true if it was open.
+func (q *QRAuth) CancelSession(id string) bool {
+	q.mu.Lock()
+	s, ok := q.sessions[id]
+	if !ok || s.cancel == nil {
+		q.mu.Unlock()
+		return false
+	}
+	s.cancel()
+	q.mu.Unlock()
+	return true
 }
 
 // watchdog locks the user back as soon as a matching face event arrives,
@@ -138,6 +308,10 @@ func (q *QRAuth) watchdog(ctx context.Context, sess *QRSession, p *Person, devic
 	defer q.store.Unsubscribe(ch)
 
 	var status string
+	var matchedEmpNo string
+	wantDevice := sess.DeviceID
+	personScoped := p != nil
+
 	for {
 		select {
 		case e, ok := <-ch:
@@ -145,10 +319,26 @@ func (q *QRAuth) watchdog(ctx context.Context, sess *QRSession, p *Person, devic
 				status = "cancelled"
 				goto done
 			}
-			if q.eventMatchesPerson(e, p.EmployeeNo) {
-				status = "face_matched"
-				goto done
+			if wantDevice != "" && e.DeviceID != "" && e.DeviceID != wantDevice {
+				continue
 			}
+			emp, faceMatched := extractFaceMatchFromEvent(e)
+			if !faceMatched {
+				continue
+			}
+			if personScoped {
+				if emp == p.EmployeeNo {
+					matchedEmpNo = emp
+					status = "face_matched"
+					goto done
+				}
+				// Different user matched on the device — ignore, keep waiting
+				continue
+			}
+			// face-any: any successful match closes the session
+			matchedEmpNo = emp
+			status = "face_matched"
+			goto done
 		case <-ctx.Done():
 			if ctx.Err() == context.DeadlineExceeded {
 				status = "timed_out"
@@ -159,56 +349,66 @@ func (q *QRAuth) watchdog(ctx context.Context, sess *QRSession, p *Person, devic
 		}
 	}
 done:
-	// Re-lock the user on every device
-	bg := context.Background()
-	for _, d := range devices {
-		if err := q.setUserVerifyMode(bg, &d, p, lockedVerifyMode); err != nil {
-			log.Printf("[qr-auth] LOCK %s on %s failed: %v", p.EmployeeNo, d.DeviceID, err)
+	// Re-lock the person on every device (only meaningful when person-scoped
+	// — face-any mode trusts whatever default state the admin configured).
+	if personScoped {
+		bg := context.Background()
+		for _, d := range devices {
+			if err := q.setUserVerifyMode(bg, &d, p, lockedVerifyMode); err != nil {
+				log.Printf("[face-auth] LOCK %s on %s failed: %v", p.EmployeeNo, d.DeviceID, err)
+			}
 		}
 	}
 
 	q.mu.Lock()
 	sess.Status = status
+	sess.MatchedEmployeeNo = matchedEmpNo
 	q.history = append(q.history, *sess)
 	if len(q.history) > 200 {
 		q.history = q.history[len(q.history)-200:]
 	}
-	if cur, ok := q.sessions[p.EmployeeNo]; ok && cur.ID == sess.ID {
-		delete(q.sessions, p.EmployeeNo)
-	}
+	delete(q.sessions, sess.ID)
 	q.mu.Unlock()
-	log.Printf("[qr-auth] session %s -> %s", sess.ID, status)
+	log.Printf("[face-auth] session %s -> %s (matched=%q)", sess.ID, status, matchedEmpNo)
 }
 
-func (q *QRAuth) eventMatchesPerson(e Event, employeeNo string) bool {
-	// Find employeeNoString anywhere in the raw payload
+// extractFaceMatchFromEvent inspects a device event payload and returns
+// (employeeNo, isFaceMatch). It tolerates both Hikvision AccessControllerEvent
+// schemas and a few flatter variants emitted by older firmware.
+func extractFaceMatchFromEvent(e Event) (string, bool) {
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(e.Raw, &probe); err != nil {
-		return false
+		return "", false
 	}
 	if v, ok := probe["AccessControllerEvent"]; ok {
 		var ace struct {
 			EmployeeNoString string `json:"employeeNoString"`
 			MajorEventType   int    `json:"majorEventType"`
 			SubEventType     int    `json:"subEventType"`
+			Name             string `json:"name"`
+			CurrentVerifyMode string `json:"currentVerifyMode"`
 		}
 		if err := json.Unmarshal(v, &ace); err == nil {
-			if ace.EmployeeNoString == employeeNo {
-				return true
+			// Hik major=5 / sub=75-78 covers face-related access events. We also
+			// accept any event whose currentVerifyMode contains "face" — that's
+			// the firmware confirming a face was used to authenticate.
+			isFace := strings.Contains(strings.ToLower(ace.CurrentVerifyMode), "face") ||
+				(ace.MajorEventType == 5 && ace.SubEventType >= 75 && ace.SubEventType <= 78)
+			if ace.EmployeeNoString != "" && isFace {
+				return ace.EmployeeNoString, true
 			}
 		}
 	}
-	// Some firmware reports differently
 	for _, k := range []string{"employeeNoString", "EmployeeNoString"} {
 		if v, ok := probe[k]; ok {
 			var s string
 			_ = json.Unmarshal(v, &s)
-			if s == employeeNo {
-				return true
+			if s != "" {
+				return s, true
 			}
 		}
 	}
-	return false
+	return "", false
 }
 
 func (q *QRAuth) setUserVerifyMode(ctx context.Context, d *Device, p *Person, mode string) error {
@@ -292,7 +492,17 @@ func (q *QRAuth) ActiveSessions() []QRSession {
 	for _, s := range q.sessions {
 		out = append(out, *s)
 	}
+	// newest first
+	sortSessions(out)
 	return out
+}
+
+func sortSessions(s []QRSession) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j].OpenedAt.After(s[j-1].OpenedAt); j-- {
+			s[j], s[j-1] = s[j-1], s[j]
+		}
+	}
 }
 
 // History returns the recent finished sessions for audit.

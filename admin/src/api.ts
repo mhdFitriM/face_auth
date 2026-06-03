@@ -137,6 +137,80 @@ export const api = {
       body: JSON.stringify({ qrToken, agentId }),
     }),
   lockAllUsers: (deviceId: string) => req(`/api/devices/${encodeURIComponent(deviceId)}/lock-all-users`, { method: 'POST' }),
+
+  // Settings (admin) — controls global QR-2FA toggle + face-auth window
+  getSettings: () => req('/api/settings'),
+  saveSettings: (body: any) =>
+    req('/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  getDeviceRequireQR: (deviceId: string) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/require-qr`),
+  setDeviceRequireQR: (deviceId: string, value: boolean | null) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/require-qr`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value }),
+    }),
+
+  // API keys (admin)
+  listAPIKeys: () => req('/api/api-keys'),
+  createAPIKey: (name: string) =>
+    req('/api/api-keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    }),
+  deleteAPIKey: (id: string) => req(`/api/api-keys/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  // Test face-auth from the admin UI (admin endpoint mirrors v1 logic).
+  // We just call the public v1 start endpoint with an api key passed by the user.
+  startFaceAuth: (apiKey: string, body: { deviceId: string; personId?: string; employeeNo?: string; qrToken?: string }) =>
+    req('/api/v1/auth/face/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey },
+      body: JSON.stringify(body),
+    }),
+  getFaceAuthSession: (apiKey: string, sessionId: string) =>
+    req(`/api/v1/auth/face/${encodeURIComponent(sessionId)}`, {
+      headers: { 'X-API-Key': apiKey },
+    }),
+  cancelFaceAuthSession: (apiKey: string, sessionId: string) =>
+    req(`/api/v1/auth/face/${encodeURIComponent(sessionId)}/cancel`, {
+      method: 'POST',
+      headers: { 'X-API-Key': apiKey },
+    }),
+
+  mjpegUrl: (deviceId: string, fps = 4) =>
+    apiUrl(`/api/devices/${encodeURIComponent(deviceId)}/stream.mjpg?fps=${fps}`),
+
+  // Generic raw caller for API Docs "Try it" feature
+  raw: async (method: string, path: string, opts?: { apiKey?: string; body?: any; contentType?: string }) => {
+    const headers: Record<string, string> = {}
+    if (opts?.apiKey) headers['X-API-Key'] = opts.apiKey
+    let bodyToSend: any = undefined
+    if (opts?.body !== undefined && opts?.body !== null) {
+      if (opts.contentType === 'multipart/form-data' && opts.body instanceof FormData) {
+        bodyToSend = opts.body
+      } else {
+        headers['Content-Type'] = opts.contentType || 'application/json'
+        bodyToSend = typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body)
+      }
+    }
+    const res = await fetch(apiUrl(path), { method, headers, body: bodyToSend })
+    const ct = res.headers.get('content-type') || ''
+    let parsed: any
+    if (ct.includes('json')) {
+      try { parsed = await res.json() } catch { parsed = null }
+    } else if (ct.startsWith('image/')) {
+      parsed = `(${ct}, ${res.headers.get('content-length') || '?'} bytes — open in new tab to view)`
+    } else {
+      parsed = await res.text()
+    }
+    return { status: res.status, ok: res.ok, body: parsed, contentType: ct }
+  },
 }
 
 export function subscribeEvents(onEvent: (e: any) => void) {

@@ -216,6 +216,26 @@ CREATE TABLE IF NOT EXISTS agents (
 
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS agent_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_devices_agent ON devices(agent_id);
+
+-- Per-device override for the "require QR before face" toggle.
+-- NULL = follow the global setting; TRUE / FALSE = explicit override.
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS require_qr_2fa BOOLEAN;
+
+-- Global key/value config blob. Single row with key='global'.
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value JSONB NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- API keys for third-party callers of /api/v1/*.
+CREATE TABLE IF NOT EXISTS api_keys (
+    id TEXT PRIMARY KEY,
+    name TEXT DEFAULT '',
+    key TEXT NOT NULL UNIQUE,
+    last_used_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
 `
 
 // ---------- Device ops ----------

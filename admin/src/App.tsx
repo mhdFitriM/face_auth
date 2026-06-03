@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef, useMemo } from 'react'
 import { api, apiUrl, subscribeEvents, DeviceForm, PersonForm } from './api'
 
-type Tab = 'devices' | 'live' | 'persons' | 'enrol' | 'events' | 'qr-auth' | 'agents' | 'console'
+type Tab = 'devices' | 'live' | 'persons' | 'enrol' | 'events' | 'qr-auth' | 'agents' | 'console' | 'test' | 'settings' | 'guide' | 'api-docs'
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('devices')
@@ -32,6 +32,10 @@ export default function App() {
     { id: 'qr-auth', label: 'QR Auth' },
     { id: 'agents',  label: 'Agents' },
     { id: 'console', label: 'ISAPI' },
+    { id: 'test',    label: 'Test' },
+    { id: 'settings',label: 'Settings' },
+    { id: 'guide',   label: 'Setup Guide' },
+    { id: 'api-docs',label: 'API Docs' },
   ]
 
   // Lock body scroll when mobile sidebar drawer is open
@@ -98,6 +102,10 @@ export default function App() {
           {tab === 'qr-auth' && <QRAuthTab />}
           {tab === 'agents' && <AgentsTab />}
           {tab === 'console' && <ConsoleTab />}
+          {tab === 'test' && <TestTab />}
+          {tab === 'settings' && <SettingsTab />}
+          {tab === 'guide' && <GuideTab />}
+          {tab === 'api-docs' && <ApiDocsTab />}
         </main>
       </div>
     </div>
@@ -335,22 +343,58 @@ function SnapshotImg({ deviceId, pollMs = 1500 }: { deviceId: string; pollMs?: n
 
 function LiveTab() {
   const [devices, setDevices] = useState<any[]>([])
+  const [focused, setFocused] = useState<string>('')
+  const [mode, setMode] = useState<'snapshot' | 'stream'>('snapshot')
   useEffect(() => {
     const load = () => api.listDevices().then((d) => setDevices(d || [])).catch(() => {})
     load(); const t = setInterval(load, 10_000); return () => clearInterval(t)
   }, [])
   const online = devices.filter((d) => d.online)
+  const focusedDev = online.find((d) => d.deviceID === focused) || online[0]
   return (
     <>
       <div className="page-toolbar">
-        <h1 className="page-title">Live preview <span className="muted">· {online.length} online</span></h1>
+        <div className="toolbar-left">
+          <h1 className="page-title">Live preview <span className="muted">· {online.length} online</span></h1>
+        </div>
+        <div className="toolbar-right" style={{ gap: 8 }}>
+          <label className="muted small">Mode</label>
+          <select value={mode} onChange={(e) => setMode(e.target.value as any)}>
+            <option value="snapshot">Snapshot grid (light)</option>
+            <option value="stream">MJPEG stream (focused)</option>
+          </select>
+        </div>
       </div>
       {online.length === 0 ? (
         <div className="empty">No online devices to preview. Add and probe a device first.</div>
+      ) : mode === 'stream' && focusedDev ? (
+        <>
+          <Card title={focusedDev.name || focusedDev.deviceID}>
+            <div className="live-frame" style={{ minHeight: 360 }}>
+              <img className="snap-img" alt="" src={api.mjpegUrl(focusedDev.deviceID, 6)} />
+            </div>
+            <div className="muted small" style={{ marginTop: 8 }}>
+              Continuous JPEG multipart stream — works in any &lt;img&gt; tag, no plugin.
+            </div>
+          </Card>
+          <Card title="Switch camera">
+            <div className="live-grid">
+              {online.map((d) => (
+                <div key={d.deviceID} className={`live-tile ${focused === d.deviceID ? 'active' : ''}`} onClick={() => setFocused(d.deviceID)} style={{ cursor: 'pointer' }}>
+                  <div className="live-frame"><SnapshotImg deviceId={d.deviceID} pollMs={2500} /></div>
+                  <div className="live-meta">
+                    <strong>{d.name || d.deviceID}</strong>
+                    <span className="muted mono small">{d.ip}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Card>
+        </>
       ) : (
         <div className="live-grid">
           {online.map((d) => (
-            <div key={d.deviceID} className="live-tile">
+            <div key={d.deviceID} className="live-tile" onClick={() => { setFocused(d.deviceID); setMode('stream') }} style={{ cursor: 'pointer' }}>
               <div className="live-frame"><SnapshotImg deviceId={d.deviceID} pollMs={1200} /></div>
               <div className="live-meta">
                 <strong>{d.name || d.deviceID}</strong>
@@ -1576,6 +1620,864 @@ function Modal({ title, children, onClose }: { title: string; children: React.Re
         </div>
         <div className="modal-body">{children}</div>
       </div>
+    </div>
+  )
+}
+
+// ===================== Settings =====================
+
+function SettingsTab() {
+  const [settings, setSettings] = useState<any | null>(null)
+  const [devices, setDevices] = useState<any[]>([])
+  const [devOverrides, setDevOverrides] = useState<Record<string, any>>({})
+  const [keys, setKeys] = useState<any[]>([])
+  const [newKeyName, setNewKeyName] = useState('')
+  const [createdKey, setCreatedKey] = useState<any | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+
+  const load = async () => {
+    try {
+      const [s, ds, ks] = await Promise.all([api.getSettings(), api.listDevices(), api.listAPIKeys()])
+      setSettings(s); setDevices(ds || []); setKeys(ks || [])
+      const overrides: Record<string, any> = {}
+      await Promise.all((ds || []).map(async (d: any) => {
+        try { overrides[d.deviceID] = await api.getDeviceRequireQR(d.deviceID) } catch {}
+      }))
+      setDevOverrides(overrides)
+    } catch (e: any) { setErr(String(e)) }
+  }
+  useEffect(() => { load() }, [])
+
+  const save = async () => {
+    if (!settings) return
+    setBusy(true); setErr('')
+    try {
+      const next = await api.saveSettings(settings)
+      setSettings(next)
+    } catch (e: any) { setErr(String(e)) } finally { setBusy(false) }
+  }
+
+  const setDeviceOverride = async (deviceId: string, value: boolean | null) => {
+    try {
+      await api.setDeviceRequireQR(deviceId, value)
+      load()
+    } catch (e: any) { setErr(String(e)) }
+  }
+
+  const createKey = async () => {
+    setBusy(true); setErr('')
+    try {
+      const k = await api.createAPIKey(newKeyName || 'untitled')
+      setCreatedKey(k); setNewKeyName(''); load()
+    } catch (e: any) { setErr(String(e)) } finally { setBusy(false) }
+  }
+  const deleteKey = async (id: string) => {
+    if (!confirm(`Delete API key ${id}? Calls using it will start failing.`)) return
+    await api.deleteAPIKey(id); load()
+  }
+
+  if (!settings) return <div className="empty">Loading settings…</div>
+
+  return (
+    <>
+      <div className="page-toolbar">
+        <h1 className="page-title">Settings</h1>
+      </div>
+      {err && <div className="err">{err}</div>}
+
+      <Card title="Authentication policy">
+        <Field label="Require QR before face (global default)" hint="When ON, every user must scan a QR before face will work. When OFF, face matching alone unlocks the door.">
+          <label className="toggle">
+            <input type="checkbox" checked={!!settings.requireQR2FA} onChange={(e) => setSettings({ ...settings, requireQR2FA: e.target.checked })} />
+            <span>{settings.requireQR2FA ? 'QR required' : 'Face only'}</span>
+          </label>
+        </Field>
+        <Field label="Face-auth window (seconds)" hint="How long the device stays in face-verify mode after a session opens. 5–60 typical.">
+          <input
+            type="number"
+            min={3} max={120}
+            value={settings.faceAuthWindowSec || 10}
+            onChange={(e) => setSettings({ ...settings, faceAuthWindowSec: parseInt(e.target.value || '10', 10) })}
+          />
+        </Field>
+        <Field label="Public /api/v1 enabled" hint="Master kill-switch for third-party callers.">
+          <label className="toggle">
+            <input type="checkbox" checked={!!settings.publicApiEnabled} onChange={(e) => setSettings({ ...settings, publicApiEnabled: e.target.checked })} />
+            <span>{settings.publicApiEnabled ? 'enabled' : 'disabled'}</span>
+          </label>
+        </Field>
+        <div className="form-actions">
+          <button className="btn-primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save policy'}</button>
+        </div>
+      </Card>
+
+      <Card title="Per-device overrides">
+        <div className="muted small" style={{ marginBottom: 12 }}>
+          Per-device override wins over the global default. Choose "Inherit" to follow the global setting.
+        </div>
+        <div className="table-wrap">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Device</th>
+                <th>Effective</th>
+                <th className="ta-right">Override</th>
+              </tr>
+            </thead>
+            <tbody>
+              {devices.map((d) => {
+                const ov = devOverrides[d.deviceID] || {}
+                const current = ov.override === undefined || ov.override === null ? 'inherit' : (ov.override ? 'require' : 'face-only')
+                return (
+                  <tr key={d.deviceID}>
+                    <td>
+                      <div className="cell-stack">
+                        <strong>{d.name || d.deviceID}</strong>
+                        <span className="muted mono small">{d.deviceID}</span>
+                      </div>
+                    </td>
+                    <td>
+                      <span className={ov.effectiveRequireQR ? 'badge ok' : 'badge'}>
+                        {ov.effectiveRequireQR ? 'QR required' : 'Face only'}
+                      </span>
+                    </td>
+                    <td className="ta-right">
+                      <select value={current} onChange={(e) => {
+                        const v = e.target.value
+                        setDeviceOverride(d.deviceID, v === 'inherit' ? null : (v === 'require'))
+                      }}>
+                        <option value="inherit">Inherit global</option>
+                        <option value="require">Force require QR</option>
+                        <option value="face-only">Force face-only</option>
+                      </select>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      <Card title="API keys (for /api/v1/* third-party callers)">
+        <div className="form-row" style={{ marginBottom: 12 }}>
+          <input
+            placeholder="Key name (e.g. lobby kiosk, ERP integration)"
+            value={newKeyName}
+            onChange={(e) => setNewKeyName(e.target.value)}
+            style={{ flex: 1 }}
+          />
+          <button className="btn-primary" disabled={busy} onClick={createKey}>Create key</button>
+        </div>
+        {createdKey && (
+          <div className="result" style={{ background: 'var(--ok-bg, #14361f)', color: 'var(--ok, #6cffa6)', padding: 12, marginBottom: 12 }}>
+            <strong>New key — save this now, it will not be shown again:</strong>
+            <pre className="mono small" style={{ marginTop: 6, whiteSpace: 'pre-wrap' }}>{createdKey.key}</pre>
+          </div>
+        )}
+        <div className="table-wrap">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>ID</th>
+                <th>Last used</th>
+                <th>Created</th>
+                <th className="ta-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {keys.length === 0 ? (
+                <tr><td colSpan={5}><div className="empty" style={{ padding: 12 }}>No API keys yet.</div></td></tr>
+              ) : keys.map((k: any) => (
+                <tr key={k.id}>
+                  <td>{k.name || <span className="muted">—</span>}</td>
+                  <td><span className="mono small">{k.id}</span></td>
+                  <td>{k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleString() : <span className="muted">never</span>}</td>
+                  <td>{new Date(k.createdAt).toLocaleString()}</td>
+                  <td className="ta-right">
+                    <button className="btn-ghost danger" onClick={() => deleteKey(k.id)}>Delete</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </>
+  )
+}
+
+// ===================== Test =====================
+
+function TestTab() {
+  const [devices, setDevices] = useState<any[]>([])
+  const [persons, setPersons] = useState<any[]>([])
+  const [keys, setKeys] = useState<any[]>([])
+  const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem('face_auth.testApiKey') || '')
+  const [deviceId, setDeviceId] = useState('')
+  const [identifierType, setIdentifierType] = useState<'none' | 'personId' | 'employeeNo' | 'qrToken'>('none')
+  const [identifierValue, setIdentifierValue] = useState('')
+  const [session, setSession] = useState<any | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [log, setLog] = useState<string[]>([])
+  const pollRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    api.listDevices().then((d) => setDevices(d || [])).catch(() => {})
+    api.listPersons().then((p) => setPersons(p || [])).catch(() => {})
+    api.listAPIKeys().then((k) => setKeys(k || [])).catch(() => {})
+  }, [])
+  useEffect(() => { localStorage.setItem('face_auth.testApiKey', apiKey) }, [apiKey])
+
+  const append = (m: string) => setLog((prev) => [`${new Date().toLocaleTimeString()} · ${m}`, ...prev].slice(0, 200))
+
+  const start = async () => {
+    if (!apiKey) { append('ERROR: paste an API key first (create one in Settings)'); return }
+    if (!deviceId) { append('ERROR: pick a device'); return }
+    setBusy(true)
+    const body: any = { deviceId }
+    if (identifierType !== 'none' && identifierValue) body[identifierType] = identifierValue
+    append(`POST /api/v1/auth/face/start ${JSON.stringify(body)}`)
+    try {
+      const s = await api.startFaceAuth(apiKey, body)
+      setSession(s)
+      append(`session ${s.id} opened mode=${s.mode} expires=${s.expiresAt}`)
+      poll(s.id)
+    } catch (e: any) { append(`ERROR: ${String(e)}`) } finally { setBusy(false) }
+  }
+
+  const poll = (id: string) => {
+    if (pollRef.current) window.clearInterval(pollRef.current)
+    pollRef.current = window.setInterval(async () => {
+      try {
+        const s = await api.getFaceAuthSession(apiKey, id)
+        setSession(s)
+        if (s.status !== 'open') {
+          append(`session ${id} → ${s.status}${s.matchedEmployeeNo ? ` matched=${s.matchedEmployeeNo}` : ''}`)
+          if (pollRef.current) window.clearInterval(pollRef.current)
+        }
+      } catch (e: any) {
+        append(`poll ERROR: ${String(e)}`)
+        if (pollRef.current) window.clearInterval(pollRef.current)
+      }
+    }, 1000) as any
+  }
+  useEffect(() => () => { if (pollRef.current) window.clearInterval(pollRef.current) }, [])
+
+  const cancel = async () => {
+    if (!session) return
+    try { await api.cancelFaceAuthSession(apiKey, session.id); append(`cancel sent for ${session.id}`) } catch (e: any) { append(String(e)) }
+  }
+
+  const device = devices.find((d) => d.deviceID === deviceId)
+
+  return (
+    <>
+      <div className="page-toolbar"><h1 className="page-title">Test face auth</h1></div>
+      <Card title="Configuration">
+        <Field label="API key" hint="Created in Settings → API keys. Stored in this browser only.">
+          {keys.length > 0 && (
+            <select value="" onChange={(e) => { if (e.target.value) setApiKey(e.target.value) }} style={{ marginBottom: 6 }}>
+              <option value="">— pick a saved key (you'll need the secret) —</option>
+              {keys.map((k: any) => <option key={k.id} value={k.id}>{k.name || k.id}</option>)}
+            </select>
+          )}
+          <input type="password" placeholder="fa_xxxxxxxx" value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
+        </Field>
+        <Field label="Device">
+          <select value={deviceId} onChange={(e) => setDeviceId(e.target.value)}>
+            <option value="">— pick a device —</option>
+            {devices.map((d: any) => (
+              <option key={d.deviceID} value={d.deviceID}>{d.name || d.deviceID} {d.online ? '· online' : '· offline'}</option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Identify user by" hint="Leave on 'none' to allow any enrolled face (only works if device is face-only).">
+          <select value={identifierType} onChange={(e) => setIdentifierType(e.target.value as any)}>
+            <option value="none">None (face-any)</option>
+            <option value="personId">Person ID</option>
+            <option value="employeeNo">Employee No</option>
+            <option value="qrToken">QR token</option>
+          </select>
+        </Field>
+        {identifierType === 'personId' && (
+          <Field label="Person">
+            <select value={identifierValue} onChange={(e) => setIdentifierValue(e.target.value)}>
+              <option value="">— pick a person —</option>
+              {persons.map((p: any) => <option key={p.id} value={p.id}>{p.name} ({p.employeeNo})</option>)}
+            </select>
+          </Field>
+        )}
+        {identifierType === 'employeeNo' && (
+          <Field label="Employee No">
+            <input value={identifierValue} onChange={(e) => setIdentifierValue(e.target.value)} placeholder="e.g. 1042" />
+          </Field>
+        )}
+        {identifierType === 'qrToken' && (
+          <Field label="QR token">
+            <input value={identifierValue} onChange={(e) => setIdentifierValue(e.target.value)} placeholder="paste raw QR text" />
+          </Field>
+        )}
+        <div className="form-actions">
+          <button className="btn-primary" disabled={busy} onClick={start}>Start face auth</button>
+          {session && session.status === 'open' && (
+            <button className="btn-ghost" onClick={cancel}>Cancel session</button>
+          )}
+        </div>
+      </Card>
+
+      {device && (
+        <Card title="Live camera">
+          <div className="live-frame" style={{ minHeight: 320 }}>
+            <img className="snap-img" alt="" src={api.mjpegUrl(device.deviceID, 6)} />
+          </div>
+          <div className="muted small" style={{ marginTop: 6 }}>Present a face to the camera while the session is open.</div>
+        </Card>
+      )}
+
+      {session && (
+        <Card title={`Session ${session.id}`}>
+          <pre className="result">{JSON.stringify(session, null, 2)}</pre>
+        </Card>
+      )}
+
+      <Card title="Log">
+        <pre className="result" style={{ maxHeight: 240, overflow: 'auto' }}>{log.join('\n') || '(empty)'}</pre>
+      </Card>
+    </>
+  )
+}
+
+// ===================== Setup Guide =====================
+
+function GuideTab() {
+  const [step, setStep] = useState<number>(() => parseInt(localStorage.getItem('face_auth.guideStep') || '0', 10))
+  const [downloads, setDownloads] = useState<any[]>([])
+  const [status, setStatus] = useState<any | null>(null)
+  const [devices, setDevices] = useState<any[]>([])
+  const [agents, setAgents] = useState<any[]>([])
+
+  useEffect(() => {
+    api.agentDownloads().then((d) => setDownloads(Array.isArray(d) ? d : [])).catch(() => setDownloads([]))
+    api.status().then(setStatus).catch(() => {})
+    api.listDevices().then((d) => setDevices(d || [])).catch(() => {})
+    api.listAgents().then((a) => setAgents(a || [])).catch(() => {})
+  }, [])
+  useEffect(() => { localStorage.setItem('face_auth.guideStep', String(step)) }, [step])
+
+  const steps: { id: string; title: string; render: () => React.ReactNode }[] = [
+    {
+      id: 'overview',
+      title: '1. Overview — how face_auth fits together',
+      render: () => (
+        <>
+          <p>face_auth is a bridge between your Hikvision face-recognition cameras and any third-party software (kiosks, POS, ERP, attendance). It does three things:</p>
+          <ul>
+            <li><strong>Stores enrolled people + faces</strong> centrally so you push faces to one device, copy to many.</li>
+            <li><strong>Watches device events</strong> over HTTP alarm-host push so face matches show up live.</li>
+            <li><strong>Exposes a public API</strong> under <code>/api/v1/*</code> so third-party software can trigger face auth, listen for matches, open doors.</li>
+          </ul>
+          <h4>Two operating modes</h4>
+          <ul>
+            <li><strong>QR + Face (2FA)</strong> — user scans a QR (lanyard or app), system briefly unlocks face mode, user shows face.</li>
+            <li><strong>Face only</strong> — device is always armed; face match alone authenticates.</li>
+          </ul>
+          <p>Toggle in <em>Settings → Authentication policy</em>; per-device overrides also live there.</p>
+          <h4>You'll do these steps</h4>
+          <ol>
+            <li>Add a Hikvision device.</li>
+            <li>(Optional) Install an on-prem agent to reach the device through NAT.</li>
+            <li>(Optional, for QR-2FA) Install AutoHotkey on the kiosk PC so the USB QR scanner works even when idle.</li>
+            <li>Enrol people + faces.</li>
+            <li>Create an API key and integrate third-party software.</li>
+          </ol>
+        </>
+      ),
+    },
+    {
+      id: 'device',
+      title: '2. Add your Hikvision device',
+      render: () => (
+        <>
+          <p>You'll need the device's LAN IP, ISAPI port (usually 80), and admin username + password from the device's web UI.</p>
+          <ol>
+            <li>Open <strong>Devices → Add device</strong>.</li>
+            <li>Enter a unique device ID (e.g. <code>lobby-1</code>), the IP, ISAPI credentials.</li>
+            <li>If face_auth runs on the same LAN as the device, pick <em>Direct ISAPI</em>. Otherwise leave the agent blank for now — you'll attach one in step 3.</li>
+            <li>Click <strong>Save &amp; probe</strong>. Probe should show <code>reachable: true</code>.</li>
+            <li>Once it's online, click <strong>Events</strong> on the device row to register face_auth as the alarm host. Face matches will then stream live.</li>
+          </ol>
+          <Card title="Your devices">
+            {devices.length === 0 ? <div className="empty">No devices yet.</div> : (
+              <div className="table-wrap">
+                <table className="data-table">
+                  <thead><tr><th>Device</th><th>Address</th><th>Status</th></tr></thead>
+                  <tbody>
+                    {devices.map((d) => (
+                      <tr key={d.deviceID}>
+                        <td><strong>{d.name || d.deviceID}</strong></td>
+                        <td><span className="mono small">{d.ip}:{d.port}</span></td>
+                        <td>{d.online ? <span className="badge ok">online</span> : <span className="badge">offline</span>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Card>
+        </>
+      ),
+    },
+    {
+      id: 'agent',
+      title: '3. (Optional) Install the on-prem agent',
+      render: () => (
+        <>
+          <p>The agent is a tiny binary that runs on any always-on machine on the same LAN as your camera. It opens a WebSocket to face_auth and tunnels ISAPI calls + QR scans through it — no port forwarding needed.</p>
+          <p><strong>Skip this step if</strong> face_auth itself is on the same LAN as the camera.</p>
+          <h4>Steps</h4>
+          <ol>
+            <li>Open <strong>Agents → Add agent</strong>. Pick an ID (e.g. <code>lobby-agent</code>). Copy the token — it's shown only once.</li>
+            <li>Download the binary for your machine's OS below.</li>
+            <li>Run on the LAN machine:
+              <pre className="result mono small" style={{ marginTop: 6 }}>{`# Windows PowerShell:
+$env:CLOUD_URL  = "https://face_auth.example.com"
+$env:AGENT_ID   = "lobby-agent"
+$env:AGENT_TOKEN= "paste-token"
+.\\face_auth-agent-windows-amd64.exe
+
+# Linux / macOS:
+CLOUD_URL=https://face_auth.example.com \\
+AGENT_ID=lobby-agent \\
+AGENT_TOKEN=paste-token \\
+./face_auth-agent-linux-amd64`}</pre>
+            </li>
+            <li>Back in <strong>Agents</strong>, the agent flips to <code>online</code> within ~5s.</li>
+            <li>Edit your device and set <em>Reach via</em> to this agent. Probe should still pass.</li>
+            <li>For production: install as a service.
+              <ul>
+                <li><strong>Windows</strong>: <code>nssm install face_auth-agent C:\\path\\to\\face_auth-agent.exe</code></li>
+                <li><strong>Linux</strong>: drop a systemd unit (sample in agent ZIP).</li>
+              </ul>
+            </li>
+          </ol>
+          <Card title="Download the agent">
+            {downloads.length === 0 ? (
+              <div className="empty">No agent binaries available on this server.</div>
+            ) : (
+              <div className="download-grid">
+                {downloads.map((d) => (
+                  <a key={d.file} className="download-tile" href={apiUrl(`/api/agents/downloads/${encodeURIComponent(d.file)}`)} download>
+                    <strong>{d.label}</strong>
+                    <span className="muted mono small">{d.file}</span>
+                    <span className="muted small">{Math.round(d.size / (1024 * 1024) * 10) / 10} MB</span>
+                  </a>
+                ))}
+              </div>
+            )}
+          </Card>
+          <Card title="Your agents">
+            {agents.length === 0 ? <div className="empty">No agents yet.</div> : (
+              <div className="table-wrap">
+                <table className="data-table">
+                  <thead><tr><th>Agent</th><th>Status</th></tr></thead>
+                  <tbody>
+                    {agents.map((a: any) => (
+                      <tr key={a.id}>
+                        <td><strong>{a.name || a.id}</strong> <span className="mono small muted">· {a.id}</span></td>
+                        <td>{a.online ? <span className="badge ok">online</span> : <span className="badge">offline</span>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Card>
+        </>
+      ),
+    },
+    {
+      id: 'qr-scanner',
+      title: '4. (QR-2FA only) Install the AutoHotkey QR watcher',
+      render: () => (
+        <>
+          <p>For QR + Face mode you need a way to capture USB QR scans even when the kiosk's foreground app is idle or showing a screensaver. We use AutoHotkey because it can listen globally to USB-keyboard-style scanners without stealing keystrokes from the user.</p>
+          <h4>One-time setup on the kiosk PC</h4>
+          <ol>
+            <li>Install AutoHotkey v2: <a href="https://www.autohotkey.com/" target="_blank" rel="noreferrer">autohotkey.com</a> → Download v2 → run installer.</li>
+            <li>Download the watcher: <a href={apiUrl('/api/agents/scripts/qr-watcher.ahk')} download><code>qr-watcher.ahk</code></a>.</li>
+            <li>Open it in Notepad. Check the <code>AGENT_URL</code> line near the top — default <code>http://127.0.0.1:7771/scan</code> works when the agent runs on the same machine. Change it if the agent is elsewhere.</li>
+            <li>Double-click <code>qr-watcher.ahk</code> to run. A tray icon appears.</li>
+            <li>Auto-start on boot: <kbd>Win+R</kbd> → <code>shell:startup</code> → drop a shortcut to the script in there.</li>
+            <li>Test: scan any QR (or right-click tray → <em>Send a test scan</em>). Tray tooltip counts up.</li>
+          </ol>
+          <h4>Why AutoHotkey vs. the agent's built-in keyboard listener?</h4>
+          <p>The agent's keyboard mode (Linux <code>/dev/input/*</code> or Windows raw HID) needs the agent process to own the keyboard. AutoHotkey v2's <code>InputHook</code> works <strong>system-wide and non-intrusively</strong> — your normal typing keeps working everywhere; only strings arriving faster than human typing are forwarded as scans. That's what makes a kiosk usable even when idle.</p>
+          <Card title="Downloads">
+            <div className="download-grid">
+              <a className="download-tile" href="https://www.autohotkey.com/" target="_blank" rel="noreferrer">
+                <strong>AutoHotkey v2</strong>
+                <span className="muted small">autohotkey.com</span>
+              </a>
+              <a className="download-tile" href={apiUrl('/api/agents/scripts/qr-watcher.ahk')} download>
+                <strong>qr-watcher.ahk</strong>
+                <span className="muted small">QR forwarder script</span>
+              </a>
+            </div>
+          </Card>
+        </>
+      ),
+    },
+    {
+      id: 'enrol',
+      title: '5. Enrol people and faces',
+      render: () => (
+        <>
+          <p>Two ways to populate the system:</p>
+          <h4>Option A — Pull existing faces from the device</h4>
+          <ol>
+            <li>Go to <strong>Persons</strong>, pick the device filter, click <strong>Sync from device</strong>.</li>
+            <li>face_auth pulls users, cards, and face JPEGs into its own database.</li>
+          </ol>
+          <h4>Option B — Enrol from scratch</h4>
+          <ol>
+            <li><strong>Persons → Add person</strong>. Fill name + employee number (this is the device's key for the user — short and unique).</li>
+            <li><strong>Enrol</strong>: pick device + person, upload a JPEG or capture from the webcam modal.</li>
+            <li>The face is pushed to the device with the user record.</li>
+          </ol>
+          <h4>QR mode — rotate a token per user</h4>
+          <ol>
+            <li>Open a person via <strong>Persons → ⋯ → View</strong>.</li>
+            <li>Click <strong>Rotate QR</strong>. The PNG renders — print or screenshot for the user.</li>
+          </ol>
+        </>
+      ),
+    },
+    {
+      id: 'integrate',
+      title: '6. Connect your third-party software',
+      render: () => (
+        <>
+          <p>Anything that can speak HTTP can drive face_auth. Full reference is in the <strong>API Docs</strong> tab.</p>
+          <h4>Steps</h4>
+          <ol>
+            <li><strong>Settings → API keys → Create key</strong>. Save the value — shown once.</li>
+            <li>In your software, send <code>X-API-Key: fa_xxx</code> (or <code>Authorization: Bearer fa_xxx</code>) on every <code>/api/v1/*</code> request.</li>
+            <li>To trigger face auth, POST <code>/api/v1/auth/face/start</code> with <code>deviceId</code> (and optionally <code>qrToken</code> / <code>personId</code> / <code>employeeNo</code>). Poll <code>GET /api/v1/auth/face/&#123;id&#125;</code> or subscribe to SSE.</li>
+            <li>To embed live camera, drop an <code>&lt;img&gt;</code> tag with <code>src="/api/v1/devices/&#123;id&#125;/stream.mjpg"</code>.</li>
+          </ol>
+          <p>Try it now: head to <strong>Test</strong> and run a session, then open <strong>API Docs</strong> and click <em>Try it</em> on any endpoint.</p>
+        </>
+      ),
+    },
+    {
+      id: 'done',
+      title: "7. You're done",
+      render: () => (
+        <>
+          <p>System is healthy when all of these are true:</p>
+          <ul>
+            <li>Devices show as <code>online</code>.</li>
+            <li>Face matches appear live in <strong>Events</strong>.</li>
+            <li>A <strong>Test</strong> session flips to <code>face_matched</code>.</li>
+            <li><strong>API Docs → /api/v1/devices → Try it</strong> returns your devices with the API key.</li>
+          </ul>
+          <p>Hand the API key + base URL to your third-party developer and you're shipped.</p>
+          <p>Diagnostics: <strong>QR Auth</strong> (session history), <strong>Events</strong> (raw payloads), <strong>Agents → Bridge log</strong>, <strong>ISAPI</strong> (raw calls).</p>
+        </>
+      ),
+    },
+  ]
+
+  const goto = (n: number) => setStep(Math.max(0, Math.min(steps.length - 1, n)))
+  const currentStatus = status ? (status.devicesOnline > 0 ? 'devices reachable' : 'no devices online yet') : 'unknown'
+
+  return (
+    <>
+      <div className="page-toolbar">
+        <h1 className="page-title">Setup guide</h1>
+        <div className="muted small">System status: {currentStatus}</div>
+      </div>
+
+      <div className="step-nav" style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
+        {steps.map((s, i) => (
+          <button
+            key={s.id}
+            className={`step-pill ${i === step ? 'active' : ''} ${i < step ? 'done' : ''}`}
+            onClick={() => goto(i)}
+            style={{
+              padding: '6px 10px',
+              borderRadius: 6,
+              border: '1px solid var(--border, #2a2a2a)',
+              background: i === step ? 'var(--accent, #3b82f6)' : 'transparent',
+              color: i === step ? '#fff' : 'inherit',
+              cursor: 'pointer',
+              fontSize: 13,
+            }}
+          >
+            {i + 1}
+          </button>
+        ))}
+      </div>
+
+      <Card>
+        <h2 style={{ marginTop: 0 }}>{steps[step].title}</h2>
+        <div className="step-body">{steps[step].render()}</div>
+        <div className="form-actions" style={{ marginTop: 16 }}>
+          <button className="btn-ghost" disabled={step === 0} onClick={() => goto(step - 1)}>← Previous</button>
+          <button className="btn-primary" disabled={step >= steps.length - 1} onClick={() => goto(step + 1)}>Next →</button>
+        </div>
+      </Card>
+    </>
+  )
+}
+
+// ===================== API Docs =====================
+
+type EndpointDef = {
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE'
+  path: string
+  group: string
+  summary: string
+  description?: string
+  auth: 'v1' | 'admin'
+  params?: { name: string; in: 'path' | 'query' | 'body' | 'form'; type?: string; required?: boolean; description?: string }[]
+  bodyExample?: any
+  responseType?: 'json' | 'image' | 'mjpeg' | 'sse' | 'text'
+}
+
+const ENDPOINTS: EndpointDef[] = [
+  // v1 PUBLIC
+  { method: 'GET', path: '/api/v1/ping', group: 'v1 — Health', summary: 'Liveness check', auth: 'v1' },
+  { method: 'GET', path: '/api/v1/devices', group: 'v1 — Devices', summary: 'List devices (with effective QR mode)', auth: 'v1' },
+  { method: 'POST', path: '/api/v1/devices/:id/probe', group: 'v1 — Devices', summary: 'Probe reachability + update status', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'GET', path: '/api/v1/devices/:id/snapshot', group: 'v1 — Devices', summary: 'Single JPEG frame', auth: 'v1', responseType: 'image', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'GET', path: '/api/v1/devices/:id/stream.mjpg', group: 'v1 — Devices', summary: 'Continuous MJPEG stream', auth: 'v1', responseType: 'mjpeg', params: [{ name: 'id', in: 'path', required: true }, { name: 'fps', in: 'query', type: 'int', description: '1-15, default 4' }, { name: 'seconds', in: 'query', type: 'int', description: 'auto-close after N sec, 0=forever' }] },
+  { method: 'POST', path: '/api/v1/devices/:id/open-door', group: 'v1 — Devices', summary: 'Trigger door unlock', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'door', in: 'query', type: 'int', description: 'door number, default 1' }] },
+  { method: 'POST', path: '/api/v1/devices/:id/sync-persons', group: 'v1 — Devices', summary: 'Pull users from device → local DB', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'GET', path: '/api/v1/devices/:id/face-lib', group: 'v1 — Devices', summary: 'List faces stored on the device', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'POST', path: '/api/v1/devices/:id/isapi', group: 'v1 — Devices', summary: 'Raw ISAPI passthrough (advanced)', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { method: 'GET', path: '/ISAPI/System/deviceInfo', body: '' } },
+
+  { method: 'GET', path: '/api/v1/persons', group: 'v1 — Persons', summary: 'List people', auth: 'v1' },
+  { method: 'POST', path: '/api/v1/persons', group: 'v1 — Persons', summary: 'Create a person', auth: 'v1', bodyExample: { name: 'Alice', employeeNo: '1001', personType: 'normal', personRole: 'basic' } },
+  { method: 'GET', path: '/api/v1/persons/:id', group: 'v1 — Persons', summary: 'Get person + enrolled faces', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'DELETE', path: '/api/v1/persons/:id', group: 'v1 — Persons', summary: 'Delete a person', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'syncDevice', in: 'query', description: 'also delete from device' }] },
+  { method: 'POST', path: '/api/v1/persons/:id/qr/rotate', group: 'v1 — Persons', summary: 'Generate/rotate QR token', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'GET', path: '/api/v1/persons/:id/qr.png', group: 'v1 — Persons', summary: 'Render QR as PNG', auth: 'v1', responseType: 'image', params: [{ name: 'id', in: 'path', required: true }, { name: 'size', in: 'query', type: 'int', description: '96-1024, default 256' }] },
+
+  { method: 'GET', path: '/api/v1/devices/:id/faces', group: 'v1 — Faces', summary: 'List enrolled faces (local DB)', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'personId', in: 'query' }] },
+  { method: 'POST', path: '/api/v1/devices/:id/faces', group: 'v1 — Faces', summary: 'Enrol a face (multipart upload)', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'file', in: 'form', required: true, description: 'JPEG' }, { name: 'personId', in: 'form' }, { name: 'name', in: 'form' }, { name: 'employeeNo', in: 'form' }] },
+  { method: 'DELETE', path: '/api/v1/devices/:id/faces/:personId', group: 'v1 — Faces', summary: 'Delete a face from device', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'personId', in: 'path', required: true }] },
+
+  { method: 'POST', path: '/api/v1/auth/face/start', group: 'v1 — Face Auth', summary: 'Open a face-auth session ★', auth: 'v1', description: 'Behavior depends on the device requireQR2FA toggle. Provide qrToken / personId / employeeNo to identify a user. With face-only mode all three can be omitted.', bodyExample: { deviceId: 'lobby-1' } },
+  { method: 'GET', path: '/api/v1/auth/face/:id', group: 'v1 — Face Auth', summary: 'Get session status', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'POST', path: '/api/v1/auth/face/:id/cancel', group: 'v1 — Face Auth', summary: 'Cancel an open session', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'GET', path: '/api/v1/auth/face/stream', group: 'v1 — Face Auth', summary: 'SSE stream of every face match', auth: 'v1', responseType: 'sse' },
+  { method: 'POST', path: '/api/v1/qr-auth/scan', group: 'v1 — Face Auth', summary: 'Submit a QR token (third-party agent emulation)', auth: 'v1', bodyExample: { qrToken: 'paste-here', agentId: '' } },
+
+  { method: 'GET', path: '/api/v1/events', group: 'v1 — Events', summary: 'List recent device events', auth: 'v1', params: [{ name: 'limit', in: 'query', type: 'int' }, { name: 'deviceId', in: 'query' }] },
+  { method: 'GET', path: '/api/v1/events/stream', group: 'v1 — Events', summary: 'SSE event stream', auth: 'v1', responseType: 'sse' },
+
+  // ADMIN
+  { method: 'GET', path: '/api/status', group: 'admin — System', summary: 'System status summary', auth: 'admin' },
+  { method: 'GET', path: '/api/settings', group: 'admin — Settings', summary: 'Get global settings', auth: 'admin' },
+  { method: 'PUT', path: '/api/settings', group: 'admin — Settings', summary: 'Save global settings', auth: 'admin', bodyExample: { requireQR2FA: true, faceAuthWindowSec: 10, publicApiEnabled: true } },
+  { method: 'PUT', path: '/api/devices/:id/require-qr', group: 'admin — Settings', summary: 'Per-device QR override', auth: 'admin', bodyExample: { value: true } },
+  { method: 'GET', path: '/api/api-keys', group: 'admin — API Keys', summary: 'List API keys', auth: 'admin' },
+  { method: 'POST', path: '/api/api-keys', group: 'admin — API Keys', summary: 'Create API key (returns plaintext once)', auth: 'admin', bodyExample: { name: 'kiosk' } },
+  { method: 'DELETE', path: '/api/api-keys/:id', group: 'admin — API Keys', summary: 'Revoke API key', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'GET', path: '/api/devices', group: 'admin — Devices', summary: 'List devices (full)', auth: 'admin' },
+  { method: 'POST', path: '/api/devices', group: 'admin — Devices', summary: 'Register a device', auth: 'admin', bodyExample: { deviceId: 'lobby-1', name: 'Lobby', ip: '192.168.1.50', port: 80, isapiUsername: 'admin', isapiPassword: 'pass' } },
+  { method: 'DELETE', path: '/api/devices/:id', group: 'admin — Devices', summary: 'Delete a device', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'POST', path: '/api/devices/:id/setup-alarm-host', group: 'admin — Devices', summary: 'Register face_auth as alarm host on device', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'GET', path: '/api/agents', group: 'admin — Agents', summary: 'List agents', auth: 'admin' },
+  { method: 'POST', path: '/api/agents', group: 'admin — Agents', summary: 'Register agent (token shown once)', auth: 'admin', bodyExample: { id: 'lobby-agent', name: 'Lobby Agent' } },
+  { method: 'DELETE', path: '/api/agents/:id', group: 'admin — Agents', summary: 'Delete an agent', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'POST', path: '/api/agents/:id/regen-token', group: 'admin — Agents', summary: 'Rotate agent token', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'GET', path: '/api/agents/downloads', group: 'admin — Agents', summary: 'List available agent binaries', auth: 'admin' },
+  { method: 'GET', path: '/api/qr-auth/sessions', group: 'admin — QR Auth', summary: 'Active + historical sessions', auth: 'admin' },
+  { method: 'POST', path: '/api/qr-auth/scan', group: 'admin — QR Auth', summary: 'Agent-style QR scan (admin)', auth: 'admin', bodyExample: { qrToken: 'paste-here', agentId: '' } },
+  { method: 'POST', path: '/api/devices/:id/lock-all-users', group: 'admin — QR Auth', summary: 'Lock every device user into baseline', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'GET', path: '/api/events', group: 'admin — Events', summary: 'List events', auth: 'admin' },
+  { method: 'GET', path: '/api/events/stream', group: 'admin — Events', summary: 'SSE stream', auth: 'admin', responseType: 'sse' },
+]
+
+function ApiDocsTab() {
+  const [filter, setFilter] = useState('')
+  const [groupFilter, setGroupFilter] = useState<'all' | 'v1' | 'admin'>('all')
+  const [apiKey, setApiKey] = useState<string>(() => localStorage.getItem('face_auth.testApiKey') || '')
+  useEffect(() => { localStorage.setItem('face_auth.testApiKey', apiKey) }, [apiKey])
+
+  const filtered = useMemo(() => {
+    const f = filter.trim().toLowerCase()
+    return ENDPOINTS.filter((e) => {
+      if (groupFilter !== 'all' && e.auth !== groupFilter) return false
+      if (!f) return true
+      return (
+        e.path.toLowerCase().includes(f) ||
+        e.summary.toLowerCase().includes(f) ||
+        e.group.toLowerCase().includes(f) ||
+        e.method.toLowerCase().includes(f)
+      )
+    })
+  }, [filter, groupFilter])
+
+  const grouped = useMemo(() => {
+    const m: Record<string, EndpointDef[]> = {}
+    filtered.forEach((e) => { (m[e.group] = m[e.group] || []).push(e) })
+    return m
+  }, [filtered])
+
+  return (
+    <>
+      <div className="page-toolbar">
+        <div className="toolbar-left">
+          <h1 className="page-title">API docs <span className="muted">· {ENDPOINTS.length} endpoints</span></h1>
+        </div>
+        <div className="toolbar-right" style={{ gap: 8 }}>
+          <select value={groupFilter} onChange={(e) => setGroupFilter(e.target.value as any)}>
+            <option value="all">All</option>
+            <option value="v1">v1 (third-party)</option>
+            <option value="admin">admin (UI)</option>
+          </select>
+          <input className="search" placeholder="Filter…" value={filter} onChange={(e) => setFilter(e.target.value)} />
+        </div>
+      </div>
+
+      <Card title="Authentication">
+        <p className="muted small" style={{ marginBottom: 8 }}>
+          v1 endpoints require an API key. Admin endpoints share this browser session. Paste a key once — it's used for every Try-it below.
+        </p>
+        <Field label="API key (used by Try it)">
+          <input type="password" placeholder="fa_xxxxxxxxxxxx" value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
+        </Field>
+      </Card>
+
+      {Object.keys(grouped).length === 0
+        ? <div className="empty">No endpoints match.</div>
+        : Object.entries(grouped).map(([group, items]) => (
+          <Card key={group} title={group}>
+            <div className="endpoint-list" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {items.map((e) => <EndpointRow key={e.method + e.path} ep={e} apiKey={apiKey} />)}
+            </div>
+          </Card>
+        ))}
+    </>
+  )
+}
+
+function EndpointRow({ ep, apiKey }: { ep: EndpointDef; apiKey: string }) {
+  const [open, setOpen] = useState(false)
+  const [pathParams, setPathParams] = useState<Record<string, string>>({})
+  const [queryParams, setQueryParams] = useState<Record<string, string>>({})
+  const [bodyText, setBodyText] = useState<string>(() => ep.bodyExample ? JSON.stringify(ep.bodyExample, null, 2) : '')
+  const [formFile, setFormFile] = useState<File | null>(null)
+  const [formFields, setFormFields] = useState<Record<string, string>>({})
+  const [running, setRunning] = useState(false)
+  const [result, setResult] = useState<any | null>(null)
+
+  const isMultipart = (ep.params || []).some((p) => p.in === 'form')
+
+  const buildPath = (): string => {
+    let path = ep.path
+    Object.entries(pathParams).forEach(([k, v]) => { path = path.replace(`:${k}`, encodeURIComponent(v)) })
+    const qp = Object.entries(queryParams).filter(([_, v]) => v !== '').map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&')
+    if (qp) path += (path.includes('?') ? '&' : '?') + qp
+    return path
+  }
+
+  const run = async () => {
+    setRunning(true); setResult(null)
+    try {
+      const path = buildPath()
+      if (isMultipart) {
+        const fd = new FormData()
+        if (formFile) fd.append('file', formFile)
+        Object.entries(formFields).forEach(([k, v]) => { if (v) fd.append(k, v) })
+        const r = await api.raw(ep.method, path, { apiKey: ep.auth === 'v1' ? apiKey : undefined, body: fd, contentType: 'multipart/form-data' })
+        setResult(r)
+      } else {
+        const opts: any = { apiKey: ep.auth === 'v1' ? apiKey : undefined }
+        if (ep.method !== 'GET' && bodyText.trim()) {
+          try { opts.body = JSON.parse(bodyText) } catch { opts.body = bodyText; opts.contentType = 'text/plain' }
+        }
+        const r = await api.raw(ep.method, path, opts)
+        setResult(r)
+      }
+    } catch (e: any) {
+      setResult({ status: 0, ok: false, body: String(e) })
+    } finally { setRunning(false) }
+  }
+
+  const methodColor: Record<string, string> = { GET: '#3b82f6', POST: '#10b981', PUT: '#f59e0b', DELETE: '#ef4444' }
+
+  return (
+    <div className={`endpoint-row ${open ? 'open' : ''}`} style={{ border: '1px solid var(--border, #2a2a2a)', borderRadius: 8 }}>
+      <div className="endpoint-head" onClick={() => setOpen(!open)} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px' }}>
+        <span style={{ background: methodColor[ep.method], color: '#fff', padding: '2px 8px', borderRadius: 4, fontFamily: 'monospace', fontSize: 12, minWidth: 56, textAlign: 'center' }}>{ep.method}</span>
+        <code style={{ flex: '0 0 auto' }}>{ep.path}</code>
+        <span className="endpoint-summary muted" style={{ flex: 1, fontSize: 13 }}>{ep.summary}</span>
+        {ep.auth === 'v1' && <span className="badge ok">v1</span>}
+        <span style={{ width: 16, textAlign: 'center', opacity: 0.6 }}>{open ? '▾' : '▸'}</span>
+      </div>
+      {open && (
+        <div className="endpoint-body" style={{ padding: '8px 12px 12px', borderTop: '1px solid var(--border, #2a2a2a)' }}>
+          {ep.description && <p>{ep.description}</p>}
+          {(ep.params && ep.params.length > 0) && (
+            <div className="params">
+              <h4>Parameters</h4>
+              <div className="table-wrap">
+                <table className="data-table">
+                  <thead><tr><th>Name</th><th>In</th><th>Type</th><th>Req?</th><th>Description</th><th>Value</th></tr></thead>
+                  <tbody>
+                    {ep.params.map((p) => (
+                      <tr key={p.name + p.in}>
+                        <td><code>{p.name}</code></td>
+                        <td>{p.in}</td>
+                        <td>{p.type || 'string'}</td>
+                        <td>{p.required ? <span className="badge err">yes</span> : <span className="muted small">no</span>}</td>
+                        <td className="muted small">{p.description}</td>
+                        <td>
+                          {p.in === 'path' && <input value={pathParams[p.name] || ''} onChange={(e) => setPathParams({ ...pathParams, [p.name]: e.target.value })} />}
+                          {p.in === 'query' && <input value={queryParams[p.name] || ''} onChange={(e) => setQueryParams({ ...queryParams, [p.name]: e.target.value })} />}
+                          {p.in === 'form' && p.name === 'file' && <input type="file" onChange={(e) => setFormFile(e.target.files?.[0] || null)} />}
+                          {p.in === 'form' && p.name !== 'file' && <input value={formFields[p.name] || ''} onChange={(e) => setFormFields({ ...formFields, [p.name]: e.target.value })} />}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+          {ep.method !== 'GET' && !isMultipart && (
+            <Field label="Request body (JSON)">
+              <textarea value={bodyText} onChange={(e) => setBodyText(e.target.value)} rows={Math.min(10, Math.max(3, (bodyText.match(/\n/g) || []).length + 2))} className="mono small" style={{ width: '100%', fontFamily: 'monospace' }} />
+            </Field>
+          )}
+          <div className="form-actions" style={{ alignItems: 'center', gap: 12 }}>
+            <button className="btn-primary" onClick={run} disabled={running}>{running ? 'Running…' : 'Try it'}</button>
+            {ep.responseType === 'image' && (
+              <a className="btn-ghost" href={apiUrl(buildPath()) + (ep.auth === 'v1' && apiKey ? (buildPath().includes('?') ? '&' : '?') + 'apiKey=' + encodeURIComponent(apiKey) : '')} target="_blank" rel="noreferrer">Open image</a>
+            )}
+            {ep.responseType === 'mjpeg' && (
+              <a className="btn-ghost" href={apiUrl(buildPath()) + (ep.auth === 'v1' && apiKey ? (buildPath().includes('?') ? '&' : '?') + 'apiKey=' + encodeURIComponent(apiKey) : '')} target="_blank" rel="noreferrer">Open MJPEG</a>
+            )}
+          </div>
+          <details style={{ marginTop: 8 }}>
+            <summary className="muted small">Show curl example</summary>
+            <pre className="result mono small">{`curl -X ${ep.method} ${ep.auth === 'v1' ? `-H "X-API-Key: $KEY" ` : ''}${ep.method !== 'GET' && !isMultipart ? `-H 'Content-Type: application/json' ` : ''}${ep.method !== 'GET' && !isMultipart && bodyText.trim() ? `-d '${bodyText.replace(/\n/g, ' ').replace(/\s+/g, ' ')}' ` : ''}${typeof location !== 'undefined' ? location.origin : ''}${buildPath()}`}</pre>
+          </details>
+          {result && (
+            <div className="result-block" style={{ marginTop: 8 }}>
+              <div><strong>Status:</strong> <code className={result.ok ? 'ok' : 'err'}>{result.status}</code> <span className="muted small">{result.contentType}</span></div>
+              <pre className="result">{typeof result.body === 'string' ? result.body : JSON.stringify(result.body, null, 2)}</pre>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
