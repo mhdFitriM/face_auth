@@ -228,12 +228,16 @@ func (q *QRAuth) openSessionTagged(ctx context.Context, p *Person, devices []Dev
 		q.mu.Unlock()
 	}
 
-	// For person-scoped sessions, switch that user's verify-mode to "face" on
-	// every device. For face-any sessions, we trust the device's existing
-	// per-user state (admin must have either toggled QR off globally OR pre-set
-	// the users to face mode).
+	// For person-scoped sessions on devices that REQUIRE QR (toggle ON), we
+	// briefly flip that user's verify-mode to "face" so the camera will accept
+	// a face match. On devices that don't require QR, users are already in
+	// "face" mode permanently — we leave them alone.
 	if p != nil {
 		for _, d := range devices {
+			needsQR, _ := q.settings.DeviceRequiresQR(ctx, d.DeviceID)
+			if !needsQR {
+				continue
+			}
 			if err := q.setUserVerifyMode(ctx, &d, p, unlockedVerifyMode); err != nil {
 				log.Printf("[face-auth] unlock %s on %s: %v", p.EmployeeNo, d.DeviceID, err)
 				return nil, fmt.Errorf("unlock failed: %w", err)
@@ -349,11 +353,16 @@ func (q *QRAuth) watchdog(ctx context.Context, sess *QRSession, p *Person, devic
 		}
 	}
 done:
-	// Re-lock the person on every device (only meaningful when person-scoped
-	// — face-any mode trusts whatever default state the admin configured).
+	// Re-lock the person — but only on devices that require QR. Devices in
+	// face-only mode keep their users permanently armed; we never touched them
+	// when opening the session, so don't touch them on close either.
 	if personScoped {
 		bg := context.Background()
 		for _, d := range devices {
+			needsQR, _ := q.settings.DeviceRequiresQR(bg, d.DeviceID)
+			if !needsQR {
+				continue
+			}
 			if err := q.setUserVerifyMode(bg, &d, p, lockedVerifyMode); err != nil {
 				log.Printf("[face-auth] LOCK %s on %s failed: %v", p.EmployeeNo, d.DeviceID, err)
 			}
@@ -444,11 +453,22 @@ func (q *QRAuth) setUserVerifyMode(ctx context.Context, d *Device, p *Person, mo
 }
 
 // LockAllUsersOnDevice sweeps every user on a device into the locked state.
-// Run once when first enabling QR-auth on an existing site.
+// Kept for backwards-compatible /api/devices/:id/lock-all-users.
 func (q *QRAuth) LockAllUsersOnDevice(ctx context.Context, deviceID string) (int, error) {
+	return q.SetAllUsersVerifyMode(ctx, deviceID, lockedVerifyMode)
+}
+
+// SetAllUsersVerifyMode bulk-updates every user record on a device to the
+// given verify mode. Used to enforce the QR-2FA toggle at device level:
+//   - mode = "cardAndPw"  → device requires QR + face (toggle ON)
+//   - mode = "face"       → device accepts face alone   (toggle OFF)
+func (q *QRAuth) SetAllUsersVerifyMode(ctx context.Context, deviceID, mode string) (int, error) {
 	d, err := q.store.GetDevice(ctx, deviceID)
 	if err != nil || d == nil {
 		return 0, fmt.Errorf("device not found")
+	}
+	if d.IP == "" {
+		return 0, fmt.Errorf("device has no LAN address")
 	}
 	client := NewISAPIClientForDevice(d, q.hub)
 	users, err := client.ListUsers()
@@ -457,14 +477,13 @@ func (q *QRAuth) LockAllUsersOnDevice(ctx context.Context, deviceID string) (int
 	}
 	n := 0
 	for _, u := range users {
-		// Build minimum body keeping device-side fields
 		body, _ := json.Marshal(map[string]any{
 			"UserInfo": map[string]any{
 				"employeeNo":     u.EmployeeNo,
 				"name":           u.Name,
 				"userType":       firstNonEmpty(u.UserType, "normal"),
-				"localUIRight":   false,
-				"userVerifyMode": lockedVerifyMode,
+				"localUIRight":   u.LocalUIRight,
+				"userVerifyMode": mode,
 				"gender":         firstNonEmpty(u.Gender, "unknown"),
 				"doorRight":      firstNonEmpty(u.DoorRight, "1"),
 				"RightPlan":      []map[string]any{{"doorNo": 1, "planTemplateNo": "1"}},
@@ -482,6 +501,54 @@ func (q *QRAuth) LockAllUsersOnDevice(ctx context.Context, deviceID string) (int
 		}
 	}
 	return n, nil
+}
+
+// ApplyDeviceMode reads the effective requireQR2FA setting for a device and
+// pushes the corresponding verify mode to every user on it. Idempotent.
+func (q *QRAuth) ApplyDeviceMode(ctx context.Context, deviceID string) (int, string, error) {
+	needsQR, err := q.settings.DeviceRequiresQR(ctx, deviceID)
+	if err != nil {
+		return 0, "", err
+	}
+	mode := unlockedVerifyMode
+	if needsQR {
+		mode = lockedVerifyMode
+	}
+	n, err := q.SetAllUsersVerifyMode(ctx, deviceID, mode)
+	return n, mode, err
+}
+
+// ApplyAllDeviceModes loops over every registered device and calls
+// ApplyDeviceMode. Used right after the global settings toggle changes so the
+// new behavior takes effect on all devices.
+func (q *QRAuth) ApplyAllDeviceModes(ctx context.Context) []map[string]any {
+	out := []map[string]any{}
+	devices, err := q.store.ListDevices(ctx)
+	if err != nil {
+		return out
+	}
+	for _, d := range devices {
+		if d.IP == "" {
+			continue
+		}
+		n, mode, err := q.ApplyDeviceMode(ctx, d.DeviceID)
+		entry := map[string]any{"deviceId": d.DeviceID, "updated": n, "mode": mode}
+		if err != nil {
+			entry["error"] = err.Error()
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+// ModeForDevice returns the baseline verify mode that should be on the device
+// right now (used by enrolment paths so new users land in the right state).
+func (q *QRAuth) ModeForDevice(ctx context.Context, deviceID string) string {
+	needsQR, _ := q.settings.DeviceRequiresQR(ctx, deviceID)
+	if needsQR {
+		return lockedVerifyMode
+	}
+	return unlockedVerifyMode
 }
 
 // ActiveSessions returns currently-open windows for the live panel.

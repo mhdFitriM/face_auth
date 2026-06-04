@@ -1649,20 +1649,52 @@ function SettingsTab() {
   }
   useEffect(() => { load() }, [])
 
+  const [applyMsg, setApplyMsg] = useState('')
+
   const save = async () => {
     if (!settings) return
-    setBusy(true); setErr('')
+    setBusy(true); setErr(''); setApplyMsg('')
     try {
-      const next = await api.saveSettings(settings)
+      const resp: any = await api.saveSettings(settings)
+      // Backend now returns { settings, applied? }. Stay backwards-compatible.
+      const next = resp?.settings || resp
       setSettings(next)
+      if (Array.isArray(resp?.applied) && resp.applied.length > 0) {
+        const total = resp.applied.reduce((a: number, r: any) => a + (r.updated || 0), 0)
+        setApplyMsg(`Policy saved. Pushed verify mode to ${resp.applied.length} device(s), updating ${total} user record(s).`)
+      } else {
+        setApplyMsg('Policy saved. (Toggle unchanged → no device sync needed.)')
+      }
+      load()
     } catch (e: any) { setErr(String(e)) } finally { setBusy(false) }
   }
 
   const setDeviceOverride = async (deviceId: string, value: boolean | null) => {
+    setApplyMsg('')
     try {
-      await api.setDeviceRequireQR(deviceId, value)
+      const r: any = await api.setDeviceRequireQR(deviceId, value)
+      if (typeof r?.appliedToUsers === 'number') {
+        setApplyMsg(`${deviceId}: pushed ${r.appliedMode} to ${r.appliedToUsers} user(s).`)
+      }
       load()
     } catch (e: any) { setErr(String(e)) }
+  }
+
+  const applyOne = async (deviceId: string) => {
+    setApplyMsg('')
+    try {
+      const r: any = await api.applyDeviceMode(deviceId)
+      setApplyMsg(`${deviceId}: re-applied ${r.mode} to ${r.users} user(s).`)
+    } catch (e: any) { setErr(String(e)) }
+  }
+  const applyAll = async () => {
+    setApplyMsg('')
+    setBusy(true)
+    try {
+      const r: any = await api.applyAllDeviceModes()
+      const total = (r?.results || []).reduce((a: number, x: any) => a + (x.updated || 0), 0)
+      setApplyMsg(`Re-applied mode to ${(r?.results || []).length} device(s), ${total} user record(s) updated.`)
+    } catch (e: any) { setErr(String(e)) } finally { setBusy(false) }
   }
 
   const createKey = async () => {
@@ -1687,6 +1719,13 @@ function SettingsTab() {
       {err && <div className="err">{err}</div>}
 
       <Card title="Authentication policy">
+        <div className="muted small" style={{ marginBottom: 12, lineHeight: 1.5 }}>
+          <strong>How it works:</strong><br />
+          <strong>QR required (ON)</strong> — every user is parked in <code>cardAndPw</code> mode on the device, which is unsatisfiable, so face alone does nothing. The system briefly flips the user to <code>face</code> mode only after a QR scan identifies them.<br />
+          <strong>Face only (OFF)</strong> — every user sits in <code>face</code> mode permanently; walking up and showing a face unlocks the door without any QR.
+          <br /><br />
+          Saving this card pushes the new mode to every device that follows the global setting. Per-device overrides below are unaffected.
+        </div>
         <Field label="Require QR before face (global default)" hint="When ON, every user must scan a QR before face will work. When OFF, face matching alone unlocks the door.">
           <label className="toggle">
             <input type="checkbox" checked={!!settings.requireQR2FA} onChange={(e) => setSettings({ ...settings, requireQR2FA: e.target.checked })} />
@@ -1707,9 +1746,11 @@ function SettingsTab() {
             <span>{settings.publicApiEnabled ? 'enabled' : 'disabled'}</span>
           </label>
         </Field>
-        <div className="form-actions">
+        <div className="form-actions" style={{ gap: 8 }}>
           <button className="btn-primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save policy'}</button>
+          <button className="btn-ghost" disabled={busy} onClick={applyAll} title="Re-push current verify mode to every device, without changing the toggle">Re-apply to all devices</button>
         </div>
+        {applyMsg && <div className="muted small" style={{ marginTop: 8 }}>{applyMsg}</div>}
       </Card>
 
       <Card title="Per-device overrides">
@@ -1743,14 +1784,17 @@ function SettingsTab() {
                       </span>
                     </td>
                     <td className="ta-right">
-                      <select value={current} onChange={(e) => {
-                        const v = e.target.value
-                        setDeviceOverride(d.deviceID, v === 'inherit' ? null : (v === 'require'))
-                      }}>
-                        <option value="inherit">Inherit global</option>
-                        <option value="require">Force require QR</option>
-                        <option value="face-only">Force face-only</option>
-                      </select>
+                      <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                        <select value={current} onChange={(e) => {
+                          const v = e.target.value
+                          setDeviceOverride(d.deviceID, v === 'inherit' ? null : (v === 'require'))
+                        }}>
+                          <option value="inherit">Inherit global</option>
+                          <option value="require">Force require QR</option>
+                          <option value="face-only">Force face-only</option>
+                        </select>
+                        <button className="btn-ghost" onClick={() => applyOne(d.deviceID)} title="Re-push the effective mode to this device now">Apply</button>
+                      </div>
                     </td>
                   </tr>
                 )
@@ -2435,21 +2479,7 @@ function ApiDocsView({ showHeader = false }: { showHeader?: boolean }) {
   return (
     <div className="docs-shell" style={{ display: 'grid', gridTemplateColumns: '260px 1fr', gap: 0, alignItems: 'start' }}>
       <aside className="docs-sidebar" style={{ position: 'sticky', top: 0, maxHeight: '100vh', overflowY: 'auto', borderRight: '1px solid var(--border, #2a2a2a)', padding: '16px 12px' }}>
-        <div style={{ marginBottom: 14, padding: 10, background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border, #2a2a2a)', borderRadius: 6 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-            <strong style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: 0.5 }}>API key</strong>
-            <span className={apiKey ? 'badge ok' : 'badge err'} style={{ fontSize: 10 }}>{apiKey ? 'set' : 'missing'}</span>
-          </div>
-          <input
-            type="password"
-            placeholder="fa_xxxxxxxxxxxx"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            style={{ width: '100%', fontFamily: 'monospace', fontSize: 12 }}
-            autoComplete="off"
-          />
-          <div className="muted" style={{ fontSize: 10, marginTop: 4 }}>Used by every <em>Try it</em>. Create one in Settings → API keys.</div>
-        </div>
+        <ApiKeyPanel apiKey={apiKey} onApiKey={setApiKey} />
         <input
           className="search"
           placeholder="Filter endpoints…"
@@ -2503,7 +2533,13 @@ function ApiDocsView({ showHeader = false }: { showHeader?: boolean }) {
 
         <section style={{ marginBottom: 32 }}>
           <h2 id="auth">Authentication</h2>
-          <p>Create an API key in <strong>Settings → API keys</strong> (value shown once). Then send it on every <code>/api/v1/*</code> call:</p>
+          <p>
+            API keys live in face_auth's database — you cannot use random strings.
+            Either click <strong>+ Create new key</strong> in the sidebar on the left,
+            or go to the dashboard's <strong>Settings → API keys</strong>. The plaintext
+            value is shown <strong>once</strong> on creation; copy it immediately.
+          </p>
+          <p>Then send it on every <code>/api/v1/*</code> call:</p>
           <pre className="result mono small">{`# Header (recommended)
 Authorization: Bearer fa_xxxxxxxxxxxxxxxxxxxxxxxx
 
@@ -2528,6 +2564,89 @@ X-API-Key: fa_xxxxxxxxxxxxxxxxxxxxxxxx
             </section>
           ))}
       </main>
+    </div>
+  )
+}
+
+function ApiKeyPanel({ apiKey, onApiKey }: { apiKey: string; onApiKey: (v: string) => void }) {
+  const [keys, setKeys] = useState<any[]>([])
+  const [creating, setCreating] = useState(false)
+  const [newName, setNewName] = useState('')
+  const [createdKey, setCreatedKey] = useState<string>('')
+  const [err, setErr] = useState('')
+
+  const loadKeys = () => api.listAPIKeys().then((k) => setKeys(k || [])).catch(() => setKeys([]))
+  useEffect(() => { loadKeys() }, [])
+
+  const create = async () => {
+    setErr('')
+    try {
+      const k = await api.createAPIKey(newName || 'docs-try')
+      setCreatedKey(k.key)
+      onApiKey(k.key)
+      setNewName('')
+      setCreating(false)
+      loadKeys()
+    } catch (e: any) {
+      setErr(String(e))
+    }
+  }
+
+  return (
+    <div style={{ marginBottom: 14, padding: 10, background: 'rgba(255,255,255,0.03)', border: `1px solid ${apiKey ? 'var(--border, #2a2a2a)' : '#ef4444'}`, borderRadius: 6 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+        <strong style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: 0.5 }}>API key</strong>
+        <span className={apiKey ? 'badge ok' : 'badge err'} style={{ fontSize: 10 }}>{apiKey ? 'set' : 'missing'}</span>
+      </div>
+      <input
+        type="password"
+        placeholder="fa_xxxxxxxxxxxx"
+        value={apiKey}
+        onChange={(e) => onApiKey(e.target.value)}
+        style={{ width: '100%', fontFamily: 'monospace', fontSize: 12 }}
+        autoComplete="off"
+      />
+      {createdKey && (
+        <div style={{ marginTop: 6, padding: 8, background: 'rgba(16,185,129,0.15)', border: '1px solid #10b981', borderRadius: 4 }}>
+          <div className="small" style={{ marginBottom: 4, fontWeight: 600, color: '#10b981' }}>New key — saved & shown once:</div>
+          <code style={{ wordBreak: 'break-all', fontSize: 11 }}>{createdKey}</code>
+        </div>
+      )}
+      {!creating ? (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 6, gap: 6 }}>
+          <button className="btn-primary" style={{ fontSize: 11, padding: '4px 8px', flex: 1 }} onClick={() => setCreating(true)}>+ Create new key</button>
+          {keys.length > 0 && (
+            <select
+              onChange={(e) => { if (e.target.value === '__new__') { setCreating(true); return } }}
+              style={{ fontSize: 11, flex: 1 }}
+              defaultValue=""
+            >
+              <option value="" disabled>Saved keys ({keys.length})</option>
+              {keys.map((k: any) => (
+                <option key={k.id} value={k.id} disabled>{k.name || k.id}</option>
+              ))}
+              <option value="__new__">+ create another</option>
+            </select>
+          )}
+        </div>
+      ) : (
+        <div style={{ marginTop: 6 }}>
+          <input
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            placeholder="name (e.g. test-kiosk)"
+            style={{ width: '100%', fontSize: 12, marginBottom: 4 }}
+          />
+          <div style={{ display: 'flex', gap: 4 }}>
+            <button className="btn-primary" style={{ fontSize: 11, padding: '4px 8px', flex: 1 }} onClick={create}>Create</button>
+            <button className="btn-ghost" style={{ fontSize: 11, padding: '4px 8px' }} onClick={() => { setCreating(false); setErr('') }}>Cancel</button>
+          </div>
+        </div>
+      )}
+      {err && <div className="err small" style={{ marginTop: 4, fontSize: 11 }}>{err}</div>}
+      <div className="muted" style={{ fontSize: 10, marginTop: 6 }}>
+        Keys live in the database. Random strings won't work — create one here or in Settings → API keys.
+      </div>
     </div>
   )
 }
@@ -2707,7 +2826,7 @@ X-API-Key: fa_xxx`}</pre>
               />
               {!apiKey && (
                 <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>
-                  Don't have one? Go to <a href="/" style={{ color: 'inherit' }}>Settings → API keys</a> in the dashboard to create one.
+                  Random strings won't work — keys must exist in the database. Use the sidebar's <strong>+ Create new key</strong> button, or go to <a href="/" style={{ color: 'inherit' }}>Settings → API keys</a> in the dashboard.
                 </div>
               )}
             </div>

@@ -155,6 +155,10 @@ export const api = {
       body: JSON.stringify({ value }),
     }),
 
+  applyDeviceMode: (deviceId: string) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/apply-mode`, { method: 'POST' }),
+  applyAllDeviceModes: () => req('/api/settings/apply-all', { method: 'POST' }),
+
   // API keys (admin)
   listAPIKeys: () => req('/api/api-keys'),
   createAPIKey: (name: string) =>

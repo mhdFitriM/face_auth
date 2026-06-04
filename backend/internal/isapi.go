@@ -326,6 +326,7 @@ type HikUserInfo struct {
 	PlanTemplate  string // e.g. "1"
 	LocalUIRight  bool   // true = administrator on the device touchscreen
 	CheckUser     bool   // attendance-only mode
+	UserVerifyMode string // e.g. "face" | "cardAndPw" | "" (leave device default)
 }
 
 // UpsertUserOnDevice creates the user on the device, or modifies if exists.
@@ -644,26 +645,28 @@ func buildUserInfoBody(u HikUserInfo) []byte {
 		u.ValidEnd = "2037-12-31T23:59:59"
 	}
 
-	info := map[string]any{
-		"UserInfo": map[string]any{
-			"employeeNo":   u.EmployeeNo,
-			"name":         u.Name,
-			"userType":     u.UserType,
-			"gender":       u.Gender,
-			"localUIRight": u.LocalUIRight,
-			"checkUser":    u.CheckUser,
-			"doorRight":    u.DoorRight,
-			"RightPlan": []map[string]any{
-				{"doorNo": 1, "planTemplateNo": u.PlanTemplate},
-			},
-			"Valid": map[string]any{
-				"enable":    !u.LongTerm,
-				"beginTime": u.ValidBegin,
-				"endTime":   u.ValidEnd,
-				"timeType":  "local",
-			},
+	userInfo := map[string]any{
+		"employeeNo":   u.EmployeeNo,
+		"name":         u.Name,
+		"userType":     u.UserType,
+		"gender":       u.Gender,
+		"localUIRight": u.LocalUIRight,
+		"checkUser":    u.CheckUser,
+		"doorRight":    u.DoorRight,
+		"RightPlan": []map[string]any{
+			{"doorNo": 1, "planTemplateNo": u.PlanTemplate},
+		},
+		"Valid": map[string]any{
+			"enable":    !u.LongTerm,
+			"beginTime": u.ValidBegin,
+			"endTime":   u.ValidEnd,
+			"timeType":  "local",
 		},
 	}
+	if u.UserVerifyMode != "" {
+		userInfo["userVerifyMode"] = u.UserVerifyMode
+	}
+	info := map[string]any{"UserInfo": userInfo}
 	out, _ := json.Marshal(info)
 	return out
 }

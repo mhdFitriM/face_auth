@@ -618,17 +618,20 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 
 		client := NewISAPIClientForDevice(d, hub)
 
-		// Step 1: upsert UserInfo on the device with full role/validity
+		// Step 1: upsert UserInfo on the device with full role/validity.
+		// Verify mode follows the current QR-2FA toggle so the new user lands in
+		// the correct state without a separate sync step.
 		hikUser := HikUserInfo{
-			EmployeeNo:   person.EmployeeNo,
-			Name:         person.Name,
-			UserType:     person.PersonType,
-			Gender:       person.Gender,
-			LongTerm:     person.LongTerm,
-			DoorRight:    person.DoorRight,
-			PlanTemplate: person.PlanTemplate,
-			LocalUIRight: person.PersonRole == "administrator",
-			CheckUser:    person.AttendanceOnly,
+			EmployeeNo:    person.EmployeeNo,
+			Name:          person.Name,
+			UserType:      person.PersonType,
+			Gender:        person.Gender,
+			LongTerm:      person.LongTerm,
+			DoorRight:     person.DoorRight,
+			PlanTemplate:  person.PlanTemplate,
+			LocalUIRight:  person.PersonRole == "administrator",
+			CheckUser:     person.AttendanceOnly,
+			UserVerifyMode: qrAuth.ModeForDevice(ctx, d.DeviceID),
 		}
 		if person.ValidBegin != nil {
 			hikUser.ValidBegin = person.ValidBegin.Format("2006-01-02T15:04:05")
@@ -917,6 +920,7 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		return c.JSON(settings.Get())
 	})
 	api.Put("/settings", func(c *fiber.Ctx) error {
+		prev := settings.Get()
 		var body Settings
 		if err := json.Unmarshal(c.Body(), &body); err != nil {
 			return c.Status(400).JSON(fiber.Map{"error": "bad body"})
@@ -924,7 +928,15 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if err := settings.Save(c.Context(), body); err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
-		return c.JSON(settings.Get())
+		// If the global QR-2FA toggle actually changed, push the new verify mode
+		// to every device that follows the global setting. This is what makes
+		// the toggle do something at device level — without it the device keeps
+		// the previous user verify mode and the toggle has no real effect.
+		applied := []map[string]any{}
+		if prev.RequireQR2FA != body.RequireQR2FA {
+			applied = qrAuth.ApplyAllDeviceModes(c.Context())
+		}
+		return c.JSON(fiber.Map{"settings": settings.Get(), "applied": applied})
 	})
 
 	// Per-device QR override:
@@ -937,8 +949,35 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if err := settings.SetDeviceRequireQR(c.Context(), c.Params("id"), body.Value); err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
+		// Push the new mode to the device so the change actually takes effect.
+		n, mode, err := qrAuth.ApplyDeviceMode(c.Context(), c.Params("id"))
 		eff, _ := settings.DeviceRequiresQR(c.Context(), c.Params("id"))
-		return c.JSON(fiber.Map{"ok": true, "effectiveRequireQR": eff, "override": body.Value})
+		out := fiber.Map{
+			"ok":                 err == nil,
+			"effectiveRequireQR": eff,
+			"override":           body.Value,
+			"appliedToUsers":     n,
+			"appliedMode":        mode,
+		}
+		if err != nil {
+			out["applyError"] = err.Error()
+		}
+		return c.JSON(out)
+	})
+
+	// Manual "apply now" — re-pushes the effective mode to one device.
+	api.Post("/devices/:id/apply-mode", func(c *fiber.Ctx) error {
+		n, mode, err := qrAuth.ApplyDeviceMode(c.Context(), c.Params("id"))
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"ok": false, "error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"ok": true, "users": n, "mode": mode})
+	})
+
+	// Manual "apply to all" — re-pushes the effective mode to every device.
+	api.Post("/settings/apply-all", func(c *fiber.Ctx) error {
+		results := qrAuth.ApplyAllDeviceModes(c.Context())
+		return c.JSON(fiber.Map{"ok": true, "results": results})
 	})
 	api.Get("/devices/:id/require-qr", func(c *fiber.Ctx) error {
 		eff, err := settings.DeviceRequiresQR(c.Context(), c.Params("id"))
@@ -1262,15 +1301,16 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		_ = store.CreateFace(ctx, face)
 		client := NewISAPIClientForDevice(d, hub)
 		hikUser := HikUserInfo{
-			EmployeeNo:   person.EmployeeNo,
-			Name:         person.Name,
-			UserType:     person.PersonType,
-			Gender:       person.Gender,
-			LongTerm:     person.LongTerm,
-			DoorRight:    person.DoorRight,
-			PlanTemplate: person.PlanTemplate,
-			LocalUIRight: person.PersonRole == "administrator",
-			CheckUser:    person.AttendanceOnly,
+			EmployeeNo:    person.EmployeeNo,
+			Name:          person.Name,
+			UserType:      person.PersonType,
+			Gender:        person.Gender,
+			LongTerm:      person.LongTerm,
+			DoorRight:     person.DoorRight,
+			PlanTemplate:  person.PlanTemplate,
+			LocalUIRight:  person.PersonRole == "administrator",
+			CheckUser:     person.AttendanceOnly,
+			UserVerifyMode: qrAuth.ModeForDevice(ctx, d.DeviceID),
 		}
 		_, _ = client.UpsertUserOnDevice(hikUser)
 		resp, err := client.EnrolFace(fdid, faceLibType, person.EmployeeNo, person.Name, jpeg)
