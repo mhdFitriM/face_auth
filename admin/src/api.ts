@@ -190,6 +190,38 @@ export const api = {
   mjpegUrl: (deviceId: string, fps = 4) =>
     apiUrl(`/api/devices/${encodeURIComponent(deviceId)}/stream.mjpg?fps=${fps}`),
 
+  // ---- FaceApp plugin ----
+  faceappGetConfig: () => req('/api/plugins/faceapp/config'),
+  faceappSaveConfig: (body: any) =>
+    req('/api/plugins/faceapp/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  faceappHealth: () => req('/api/plugins/faceapp/health'),
+  faceappDeviceStatus: () => req('/api/plugins/faceapp/device-status'),
+  faceappPeople: () => req('/api/plugins/faceapp/people'),
+  faceappEnroll: (body: any) =>
+    req('/api/plugins/faceapp/enroll', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  faceappBulkEnroll: (people: any[]) =>
+    req('/api/plugins/faceapp/enroll/bulk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ people }),
+    }),
+  faceappOpenGate: (body?: any) =>
+    req('/api/plugins/faceapp/open-gate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    }),
+  faceappEnrollmentStatus: (publicId: string) =>
+    req(`/api/plugins/faceapp/enrollments/${encodeURIComponent(publicId)}`),
+
   // Generic raw caller for API Docs "Try it" feature
   raw: async (method: string, path: string, opts?: { apiKey?: string; body?: any; contentType?: string }) => {
     const headers: Record<string, string> = {}

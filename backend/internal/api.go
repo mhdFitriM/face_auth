@@ -1025,6 +1025,11 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 
 	v1 := app.Group("/api/v1", apiKeyAuth(settings))
 
+	// Plugins — each plugin's RegisterX call mounts its own routes under
+	// /api/plugins/<name>/* (admin) and /api/v1/plugins/<name>/* (public).
+	// Removing a plugin = delete its file and these two lines.
+	RegisterFaceApp(api, v1, settings)
+
 	v1.Get("/ping", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"ok": true, "service": "face_auth", "time": time.Now().UTC()})
 	})

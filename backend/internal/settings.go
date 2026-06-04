@@ -33,7 +33,42 @@ type Settings struct {
 	// it yet.
 	PublicAPIEnabled bool `json:"publicApiEnabled"`
 
+	// Plugins is a free-form bag of plugin-specific config blobs. Each plugin
+	// owns its key and unmarshals into its own struct. Deletable by simply
+	// dropping the plugin file + key here.
+	Plugins map[string]json.RawMessage `json:"plugins,omitempty"`
+
 	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// PluginConfig fetches a typed config blob from the plugins map. Returns
+// (config, found, err). When `found` is false the caller should fall back
+// to defaults.
+func (s *SettingsStore) PluginConfig(key string, into any) (bool, error) {
+	s.mu.RLock()
+	raw, ok := s.cache.Plugins[key]
+	s.mu.RUnlock()
+	if !ok || len(raw) == 0 {
+		return false, nil
+	}
+	if err := json.Unmarshal(raw, into); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// SavePluginConfig persists a plugin's config under its key.
+func (s *SettingsStore) SavePluginConfig(ctx context.Context, key string, value any) error {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	cur := s.Get()
+	if cur.Plugins == nil {
+		cur.Plugins = map[string]json.RawMessage{}
+	}
+	cur.Plugins[key] = raw
+	return s.Save(ctx, cur)
 }
 
 func defaultSettings() Settings {

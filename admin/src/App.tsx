@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef, useMemo } from 'react'
 import { api, apiUrl, subscribeEvents, DeviceForm, PersonForm } from './api'
 
-type Tab = 'devices' | 'live' | 'persons' | 'enrol' | 'events' | 'qr-auth' | 'agents' | 'console' | 'test' | 'settings' | 'guide' | 'api-docs'
+type Tab = 'devices' | 'live' | 'persons' | 'enrol' | 'events' | 'qr-auth' | 'agents' | 'console' | 'test' | 'settings' | 'guide' | 'api-docs' | 'plugin-faceapp'
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('devices')
@@ -36,6 +36,7 @@ export default function App() {
     { id: 'settings',label: 'Settings' },
     { id: 'guide',   label: 'Setup Guide' },
     { id: 'api-docs',label: 'API Docs' },
+    { id: 'plugin-faceapp', label: 'FaceApp Plugin' },
   ]
 
   // Lock body scroll when mobile sidebar drawer is open
@@ -106,6 +107,7 @@ export default function App() {
           {tab === 'settings' && <SettingsTab />}
           {tab === 'guide' && <GuideTab />}
           {tab === 'api-docs' && <ApiDocsTab />}
+          {tab === 'plugin-faceapp' && <FaceAppTab />}
         </main>
       </div>
     </div>
@@ -2918,5 +2920,432 @@ X-API-Key: fa_xxx`}</pre>
         </div>
       </div>
     </article>
+  )
+}
+
+// ===================== FaceApp Plugin =====================
+//
+// Single-page plugin for the standalone faceapp_main system. Manages config,
+// status, people list, and bulk seeding. To remove this plugin: delete this
+// component + its tab entry + the FaceApp api.ts wrappers + the backend
+// faceapp_plugin.go file. Nothing else depends on it.
+
+function FaceAppTab() {
+  const [cfg, setCfg] = useState<any | null>(null)
+  const [draft, setDraft] = useState<any>({ enabled: false, baseUrl: '', apiToken: '', deviceId: 0, timeoutSeconds: 10 })
+  const [health, setHealth] = useState<any | null>(null)
+  const [deviceStatus, setDeviceStatus] = useState<any | null>(null)
+  const [people, setPeople] = useState<any[]>([])
+  const [search, setSearch] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const [msg, setMsg] = useState('')
+
+  const loadConfig = async () => {
+    try {
+      const c = await api.faceappGetConfig()
+      setCfg(c)
+      setDraft({
+        enabled: !!c.enabled,
+        baseUrl: c.baseUrl || '',
+        apiToken: '',
+        deviceId: c.deviceId || 0,
+        timeoutSeconds: c.timeoutSeconds || 10,
+      })
+    } catch (e: any) { setErr(String(e)) }
+  }
+
+  const refreshLive = async () => {
+    setErr(''); setMsg('')
+    try {
+      const [h, d, p] = await Promise.allSettled([
+        api.faceappHealth(),
+        api.faceappDeviceStatus(),
+        api.faceappPeople(),
+      ])
+      setHealth(h.status === 'fulfilled' ? h.value : { error: String((h as any).reason) })
+      setDeviceStatus(d.status === 'fulfilled' ? d.value : { error: String((d as any).reason) })
+      setPeople(p.status === 'fulfilled' ? (p.value?.users || []) : [])
+    } catch (e: any) { setErr(String(e)) }
+  }
+
+  useEffect(() => { loadConfig() }, [])
+  useEffect(() => {
+    if (cfg?.enabled) refreshLive()
+  }, [cfg?.enabled])
+
+  const saveConfig = async () => {
+    setBusy(true); setErr(''); setMsg('')
+    try {
+      await api.faceappSaveConfig(draft)
+      setMsg('Saved.')
+      await loadConfig()
+      if (draft.enabled) refreshLive()
+    } catch (e: any) { setErr(String(e)) } finally { setBusy(false) }
+  }
+
+  const filtered = useMemo(() => {
+    if (!search) return people
+    const s = search.toLowerCase()
+    return people.filter((p: any) =>
+      (p.name || '').toLowerCase().includes(s) ||
+      (p.employee_id || '').toLowerCase().includes(s) ||
+      (p.department || '').toLowerCase().includes(s) ||
+      (p.role || '').toLowerCase().includes(s)
+    )
+  }, [people, search])
+
+  return (
+    <>
+      <div className="page-toolbar">
+        <div className="toolbar-left">
+          <h1 className="page-title">FaceApp <span className="muted">· plugin</span></h1>
+        </div>
+        <div className="toolbar-right" style={{ gap: 8 }}>
+          {cfg?.enabled && <button className="btn-ghost" onClick={refreshLive}>↻ Refresh</button>}
+          <span className={cfg?.enabled ? 'badge ok' : 'badge'}>
+            <span className="status-dot" />
+            {cfg?.enabled ? 'enabled' : 'disabled'}
+          </span>
+        </div>
+      </div>
+
+      {err && <div className="err">{err}</div>}
+      {msg && <div className="muted small" style={{ marginBottom: 12 }}>{msg}</div>}
+
+      <Card title="What this plugin does">
+        <p className="muted" style={{ margin: 0, lineHeight: 1.6 }}>
+          Bridges face_auth to a standalone <strong>faceapp_main</strong> instance (Laravel + Java gateway + Newland-style devices).
+          Third-party callers hit <code>/api/v1/plugins/faceapp/*</code> with their face_auth API key — face_auth forwards to FaceApp using the bearer token stored here. The token never leaves the server.
+        </p>
+      </Card>
+
+      <Card title="Configuration">
+        <Field label="Enabled" hint="Turn the plugin on after you've filled in the URL + token.">
+          <label className="toggle">
+            <input type="checkbox" checked={!!draft.enabled} onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })} />
+            <span>{draft.enabled ? 'on' : 'off'}</span>
+          </label>
+        </Field>
+        <Field label="Base URL" hint="Where FaceApp's Laravel API lives. No trailing slash.">
+          <input
+            placeholder="https://face.qbot.now"
+            value={draft.baseUrl}
+            onChange={(e) => setDraft({ ...draft, baseUrl: e.target.value })}
+          />
+        </Field>
+        <Field label="API token" hint={cfg?.apiTokenSet ? 'A token is already saved. Leave blank to keep it, or paste a new one to rotate.' : 'FACEAPP_EXTERNAL_API_TOKEN value from the FaceApp env.'}>
+          <input
+            type="password"
+            placeholder={cfg?.apiTokenSet ? '•••••••• (saved)' : 'paste FACEAPP_EXTERNAL_API_TOKEN'}
+            value={draft.apiToken}
+            onChange={(e) => setDraft({ ...draft, apiToken: e.target.value })}
+            autoComplete="off"
+          />
+        </Field>
+        <div className="form-row">
+          <Field label="Device ID" hint="Managed device id on the FaceApp side. 0 = default.">
+            <input
+              type="number"
+              min={0}
+              value={draft.deviceId}
+              onChange={(e) => setDraft({ ...draft, deviceId: parseInt(e.target.value || '0', 10) })}
+            />
+          </Field>
+          <Field label="Timeout (sec)">
+            <input
+              type="number"
+              min={2} max={60}
+              value={draft.timeoutSeconds}
+              onChange={(e) => setDraft({ ...draft, timeoutSeconds: parseInt(e.target.value || '10', 10) })}
+            />
+          </Field>
+        </div>
+        <div className="form-actions">
+          <button className="btn-primary" disabled={busy} onClick={saveConfig}>{busy ? 'Saving…' : 'Save configuration'}</button>
+          <button className="btn-ghost" disabled={busy || !cfg?.enabled} onClick={refreshLive}>Test connection</button>
+        </div>
+      </Card>
+
+      {cfg?.enabled && (
+        <>
+          <div className="stat-grid">
+            <StatTile
+              label="FaceApp health"
+              value={health?.ok ? 'Online' : (health?.error ? 'Error' : 'Unknown')}
+              tone={health?.ok ? 'ok' : (health?.error ? 'err' : 'muted')}
+              sub={health?.error || (health?.service ? `service: ${health.service}` : '')}
+            />
+            <StatTile
+              label="Device"
+              value={deviceStatus?.online ? 'Online' : (deviceStatus?.error ? 'Error' : 'Offline')}
+              tone={deviceStatus?.online ? 'ok' : (deviceStatus?.error ? 'err' : 'muted')}
+              sub={deviceStatus?.error || (deviceStatus?.name ? deviceStatus.name : '')}
+            />
+            <StatTile
+              label="Enrolled people"
+              value={String(people.length)}
+              tone="muted"
+              sub={people.length ? `${people.filter((p: any) => p.status === 'active').length} active` : ''}
+            />
+            <StatTile
+              label="Device ID"
+              value={cfg?.deviceId ? String(cfg.deviceId) : 'default'}
+              tone="muted"
+            />
+          </div>
+
+          <FaceAppGateCard />
+          <FaceAppBulkSeedCard onDone={refreshLive} />
+
+          <Card
+            title={`Enrolled people (${people.length})`}
+            header={
+              <input
+                className="search"
+                placeholder="Search name, employee, role…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                style={{ maxWidth: 280 }}
+              />
+            }
+          >
+            {people.length === 0 ? (
+              <div className="empty">No people loaded. Click ↻ Refresh, or seed some via Bulk seed above.</div>
+            ) : (
+              <div className="table-wrap">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Photo</th>
+                      <th>Name</th>
+                      <th>Employee</th>
+                      <th>Role / Dept</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filtered.map((p: any) => (
+                      <tr key={p.id || p.employee_id}>
+                        <td data-label="Photo">
+                          <div className="snap-box small">
+                            {p.face_photo
+                              ? <img className="snap-img" src={p.face_photo} alt="" />
+                              : <div className="snap-placeholder">—</div>}
+                          </div>
+                        </td>
+                        <td data-label="Name"><strong>{p.name || '—'}</strong></td>
+                        <td data-label="Employee"><span className="mono small">{p.employee_id || '—'}</span></td>
+                        <td data-label="Role">
+                          <div className="cell-stack">
+                            <span>{p.role || '—'}</span>
+                            {p.department && <span className="muted small">{p.department}</span>}
+                          </div>
+                        </td>
+                        <td data-label="Status">
+                          <span className={`badge ${p.status === 'active' ? 'ok' : p.status === 'pending' ? '' : 'err'}`}>{p.status || 'unknown'}</span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Card>
+        </>
+      )}
+
+      {!cfg?.enabled && (
+        <div className="empty" style={{ padding: 32 }}>
+          The plugin is disabled. Fill in <strong>Base URL</strong> + <strong>API token</strong> above, flip <strong>Enabled</strong>, then save.
+        </div>
+      )}
+    </>
+  )
+}
+
+function FaceAppGateCard() {
+  const [plate, setPlate] = useState('')
+  const [reason, setReason] = useState('admin-test')
+  const [running, setRunning] = useState(false)
+  const [result, setResult] = useState<any | null>(null)
+
+  const fire = async () => {
+    setRunning(true); setResult(null)
+    try {
+      const r = await api.faceappOpenGate({ plate, reason })
+      setResult(r)
+    } catch (e: any) {
+      setResult({ ok: false, error: String(e) })
+    } finally { setRunning(false) }
+  }
+
+  return (
+    <Card title="Open gate (test)">
+      <div className="muted small" style={{ marginBottom: 8 }}>
+        Calls FaceApp's <code>/api/external/open-gate</code> with an optional plate + reason. Useful to verify wiring without enrolling anyone.
+      </div>
+      <div className="form-row">
+        <Field label="Plate" grow={2}>
+          <input value={plate} onChange={(e) => setPlate(e.target.value)} placeholder="ABC1234" />
+        </Field>
+        <Field label="Reason" grow={1}>
+          <input value={reason} onChange={(e) => setReason(e.target.value)} />
+        </Field>
+      </div>
+      <div className="form-actions">
+        <button className="btn-primary" onClick={fire} disabled={running}>{running ? 'Opening…' : 'Open gate'}</button>
+      </div>
+      {result && (
+        <pre className="result mono small" style={{ marginTop: 8 }}>{typeof result === 'string' ? result : JSON.stringify(result, null, 2)}</pre>
+      )}
+    </Card>
+  )
+}
+
+function FaceAppBulkSeedCard({ onDone }: { onDone: () => void }) {
+  const [items, setItems] = useState<{ name: string; employee_id: string; file?: File; preview?: string }[]>([])
+  const [running, setRunning] = useState(false)
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
+  const [result, setResult] = useState<any | null>(null)
+
+  const onFiles = (files: FileList | null) => {
+    if (!files) return
+    const next: typeof items = []
+    Array.from(files).forEach((f) => {
+      const base = f.name.replace(/\.[^.]+$/, '')
+      // Use filename pattern "name__employee.jpg" for auto-fill, otherwise just name.
+      const parts = base.split('__')
+      next.push({
+        name: parts[0]?.trim() || base,
+        employee_id: parts[1]?.trim() || '',
+        file: f,
+        preview: URL.createObjectURL(f),
+      })
+    })
+    setItems([...items, ...next])
+  }
+
+  const updateItem = (i: number, patch: Partial<typeof items[0]>) => {
+    setItems(items.map((it, idx) => (idx === i ? { ...it, ...patch } : it)))
+  }
+  const removeItem = (i: number) => setItems(items.filter((_, idx) => idx !== i))
+
+  const seed = async () => {
+    if (items.length === 0) return
+    setRunning(true); setResult(null)
+    const payloads: any[] = []
+    let i = 0
+    setProgress({ done: 0, total: items.length })
+    for (const it of items) {
+      i++
+      try {
+        if (!it.file) continue
+        // file → base64 data URL
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const r = new FileReader()
+          r.onload = () => resolve(r.result as string)
+          r.onerror = () => reject(r.error)
+          r.readAsDataURL(it.file!)
+        })
+        payloads.push({
+          name: it.name,
+          employee_id: it.employee_id || it.name.replace(/\s+/g, '').slice(0, 16),
+          photo_data_url: dataUrl,
+        })
+      } catch (e: any) {
+        payloads.push({ name: it.name, employee_id: it.employee_id, error: String(e) })
+      }
+      setProgress({ done: i, total: items.length })
+    }
+    try {
+      const r = await api.faceappBulkEnroll(payloads)
+      setResult(r)
+      onDone()
+    } catch (e: any) {
+      setResult({ ok: false, error: String(e) })
+    } finally {
+      setRunning(false); setProgress(null)
+    }
+  }
+
+  return (
+    <Card title="Bulk seed faces">
+      <div className="muted small" style={{ marginBottom: 8 }}>
+        Drop multiple JPEG/PNG photos. Name/employee fields are pre-filled from the filename
+        (use <code>Alice__1001.jpg</code> to auto-set both, or just <code>Alice.jpg</code>).
+        Each file becomes a base64 data-URL and is POSTed to <code>/api/enrollments</code> sequentially.
+      </div>
+      <div
+        className="dropzone"
+        onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('over') }}
+        onDragLeave={(e) => e.currentTarget.classList.remove('over')}
+        onDrop={(e) => {
+          e.preventDefault()
+          e.currentTarget.classList.remove('over')
+          onFiles(e.dataTransfer.files)
+        }}
+      >
+        <label style={{ cursor: 'pointer', display: 'block', padding: 24, textAlign: 'center' }}>
+          <strong>Drop photos here</strong> or click to choose
+          <input type="file" accept="image/*" multiple style={{ display: 'none' }} onChange={(e) => onFiles(e.target.files)} />
+          <div className="muted small" style={{ marginTop: 6 }}>Tip: name files <code>Name__EmpId.jpg</code> to auto-fill</div>
+        </label>
+      </div>
+
+      {items.length > 0 && (
+        <div className="table-wrap" style={{ marginTop: 12 }}>
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Preview</th>
+                <th>Name</th>
+                <th>Employee ID</th>
+                <th className="ta-right">Remove</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((it, i) => (
+                <tr key={i}>
+                  <td><div className="snap-box small">{it.preview ? <img className="snap-img" src={it.preview} alt="" /> : <div className="snap-placeholder">—</div>}</div></td>
+                  <td><input value={it.name} onChange={(e) => updateItem(i, { name: e.target.value })} /></td>
+                  <td><input value={it.employee_id} onChange={(e) => updateItem(i, { employee_id: e.target.value })} placeholder="auto" /></td>
+                  <td className="ta-right"><button className="btn-ghost danger" onClick={() => removeItem(i)}>×</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="form-actions" style={{ marginTop: 12 }}>
+        <button className="btn-primary" onClick={seed} disabled={running || items.length === 0}>
+          {running
+            ? (progress ? `Seeding ${progress.done}/${progress.total}…` : 'Seeding…')
+            : `Seed ${items.length} face${items.length === 1 ? '' : 's'}`}
+        </button>
+        <button className="btn-ghost" onClick={() => setItems([])} disabled={running || items.length === 0}>Clear</button>
+      </div>
+
+      {result && (
+        <div style={{ marginTop: 12 }}>
+          <div className={result.ok ? 'badge ok' : 'badge err'} style={{ marginBottom: 6 }}>
+            {result.ok ? 'All succeeded' : `${result.success}/${result.total} succeeded`}
+          </div>
+          <pre className="result mono small" style={{ maxHeight: 240, overflow: 'auto' }}>{JSON.stringify(result, null, 2)}</pre>
+        </div>
+      )}
+    </Card>
+  )
+}
+
+function StatTile({ label, value, sub, tone = 'muted' }: { label: string; value: string; sub?: string; tone?: 'ok' | 'err' | 'muted' }) {
+  const color = tone === 'ok' ? '#10b981' : tone === 'err' ? '#ef4444' : 'inherit'
+  return (
+    <div className="stat-tile">
+      <div className="stat-label">{label}</div>
+      <div className="stat-value" style={{ color }}>{value}</div>
+      {sub && <div className="stat-sub muted small">{sub}</div>}
+    </div>
   )
 }
