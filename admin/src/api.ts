@@ -4,8 +4,44 @@ const API = (import.meta.env.VITE_API_URL as string) ?? ''
 
 export const apiUrl = (path: string) => `${API}${path}`
 
+// ----- Session token + tenant context plumbing -----
+// Token is stored in localStorage; it's added to every request below.
+// HQ users may pick an "active tenant" — that value travels in X-Tenant-Id
+// so tenant-scoped endpoints know which tenant to operate on.
+export const auth = {
+  get token() { return localStorage.getItem('face_auth.session') || '' },
+  set token(v: string) { v ? localStorage.setItem('face_auth.session', v) : localStorage.removeItem('face_auth.session') },
+  get activeTenantId() { return localStorage.getItem('face_auth.activeTenant') || '' },
+  set activeTenantId(v: string) { v ? localStorage.setItem('face_auth.activeTenant', v) : localStorage.removeItem('face_auth.activeTenant') },
+  clear() { localStorage.removeItem('face_auth.session'); localStorage.removeItem('face_auth.activeTenant') },
+}
+
 async function req<T = any>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(apiUrl(path), init)
+  const headers: Record<string, string> = {
+    ...((init?.headers as Record<string, string>) || {}),
+  }
+  if (auth.token) headers['Authorization'] = `Bearer ${auth.token}`
+  // Don't leak tenant context onto unauthenticated endpoints — strips a
+  // common cause of "silent CORS failure" when a stale localStorage value
+  // would otherwise add an unexpected header to /api/auth/login.
+  if (auth.activeTenantId && !path.startsWith('/api/auth/')) {
+    headers['X-Tenant-Id'] = auth.activeTenantId
+  }
+  let res: Response
+  try {
+    res = await fetch(apiUrl(path), { ...init, headers })
+  } catch (e: any) {
+    // Network failure, CORS rejection, DNS error, server down — fetch rejects
+    // with a TypeError. Surface a real, readable message instead of letting
+    // the UI hang on "Signing in…".
+    throw new Error(
+      `Cannot reach the backend at ${apiUrl(path)}. ${String(e?.message || e)}`
+    )
+  }
+  if (res.status === 401 && path !== '/api/auth/login') {
+    auth.clear()
+    window.dispatchEvent(new Event('face_auth:unauthorized'))
+  }
   if (!res.ok) {
     let msg = res.statusText
     try {
@@ -221,6 +257,78 @@ export const api = {
     }),
   faceappEnrollmentStatus: (publicId: string) =>
     req(`/api/plugins/faceapp/enrollments/${encodeURIComponent(publicId)}`),
+
+  healthz: () => req('/healthz'),
+
+  // ---- Auth / multi-tenant ----
+  login: (email: string, password: string) =>
+    req('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    }),
+  logout: () => req('/api/auth/logout', { method: 'POST' }),
+  me: () => req('/api/auth/me'),
+
+  // ---- HQ ----
+  hqListTenants: () => req('/api/hq/tenants'),
+  hqCreateTenant: (body: { name: string; slug?: string; premiseType?: string; timezone?: string; contactEmail?: string; contactPhone?: string; address?: string; installPresets?: boolean }) =>
+    req('/api/hq/tenants', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  hqUpdateTenant: (id: string, body: any) =>
+    req(`/api/hq/tenants/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  premiseTypes: () => req('/api/premise-types'),
+  installPresets: (premiseType?: string) =>
+    req('/api/plans/install-presets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ premiseType: premiseType || '' }),
+    }),
+  hqDeleteTenant: (id: string) => req(`/api/hq/tenants/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  hqListUsers: (tenantId?: string) => req(`/api/hq/users${tenantId ? `?tenantId=${encodeURIComponent(tenantId)}` : ''}`),
+  hqCreateUser: (body: any) =>
+    req('/api/hq/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  hqDeleteUser: (id: string) => req(`/api/hq/users/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  // ---- Plans ----
+  listPlans: () => req('/api/plans'),
+  createPlan: (body: any) =>
+    req('/api/plans', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  updatePlan: (id: string, body: any) =>
+    req(`/api/plans/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  deletePlan: (id: string) => req(`/api/plans/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  assignPersonPlan: (personId: string, planId: string, credits?: number) =>
+    req(`/api/persons/${encodeURIComponent(personId)}/plan`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ planId, credits }),
+    }),
+  getPersonPlan: (personId: string) => req(`/api/persons/${encodeURIComponent(personId)}/plan`),
+  listDevicePlans: (deviceId: string) => req(`/api/devices/${encodeURIComponent(deviceId)}/plans`),
+  assignDevicePlan: (deviceId: string, planId: string) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/plans/${encodeURIComponent(planId)}`, { method: 'POST' }),
+  unassignDevicePlan: (deviceId: string, planId: string) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/plans/${encodeURIComponent(planId)}`, { method: 'DELETE' }),
+  accessLog: (limit = 200) => req(`/api/access-log?limit=${limit}`),
 
   // Generic raw caller for API Docs "Try it" feature
   raw: async (method: string, path: string, opts?: { apiKey?: string; body?: any; contentType?: string }) => {

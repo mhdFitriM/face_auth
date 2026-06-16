@@ -5,6 +5,85 @@ import (
 	"time"
 )
 
+// ---------- Multi-tenant + auth ----------
+
+type Tenant struct {
+	ID           string          `json:"id"`
+	Slug         string          `json:"slug"`
+	Name         string          `json:"name"`
+	PremiseType  string          `json:"premiseType"` // gym | property | office | parking | club | school | hotel | generic
+	Timezone     string          `json:"timezone"`
+	ContactEmail string          `json:"contactEmail,omitempty"`
+	ContactPhone string          `json:"contactPhone,omitempty"`
+	Address      string          `json:"address,omitempty"`
+	Settings     json.RawMessage `json:"settings,omitempty"`
+	Active       bool            `json:"active"`
+	CreatedAt    time.Time       `json:"createdAt"`
+}
+
+type User struct {
+	ID           string     `json:"id"`
+	TenantID     *string    `json:"tenantId,omitempty"` // nil = HQ
+	Email        string     `json:"email"`
+	PasswordHash string     `json:"-"`
+	Role         string     `json:"role"` // hq_admin | tenant_admin | tenant_operator
+	Name         string     `json:"name,omitempty"`
+	Active       bool       `json:"active"`
+	LastLoginAt  *time.Time `json:"lastLoginAt,omitempty"`
+	CreatedAt    time.Time  `json:"createdAt"`
+}
+
+type Session struct {
+	Token     string    `json:"token"`
+	UserID    string    `json:"userId"`
+	ExpiresAt time.Time `json:"expiresAt"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// ---------- Membership plans ----------
+
+type Plan struct {
+	ID                       string     `json:"id"`
+	TenantID                 string     `json:"tenantId"`
+	Name                     string     `json:"name"`
+	Type                     string     `json:"type"`         // unlimited | credit | rule
+	DefaultCredits           int        `json:"defaultCredits"`
+	MustExitBeforeReentry    bool       `json:"mustExitBeforeReentry"`
+	Active                   bool       `json:"active"`
+	CreatedAt                time.Time  `json:"createdAt"`
+	Rules                    []PlanRule `json:"rules,omitempty"`
+}
+
+type PlanRule struct {
+	ID        string `json:"id"`
+	PlanID    string `json:"planId"`
+	Weekdays  int    `json:"weekdays"`  // bitmask: bit0=Mon .. bit6=Sun (127 = every day)
+	StartTime string `json:"startTime"` // HH:MM
+	EndTime   string `json:"endTime"`   // HH:MM
+	Label     string `json:"label,omitempty"`
+}
+
+type PersonPlan struct {
+	PersonID         string     `json:"personId"`
+	PlanID           string     `json:"planId,omitempty"`
+	CreditsRemaining int        `json:"creditsRemaining"`
+	Inside           bool       `json:"inside"`
+	LastEventAt      *time.Time `json:"lastEventAt,omitempty"`
+	AssignedAt       time.Time  `json:"assignedAt"`
+}
+
+type AccessLog struct {
+	ID         int64     `json:"id"`
+	TenantID   string    `json:"tenantId"`
+	PersonID   string    `json:"personId,omitempty"`
+	EmployeeNo string    `json:"employeeNo,omitempty"`
+	DeviceID   string    `json:"deviceId,omitempty"`
+	Decision   string    `json:"decision"` // allow | deny | observed
+	Reason     string    `json:"reason,omitempty"`
+	Direction  string    `json:"direction,omitempty"`
+	CreatedAt  time.Time `json:"createdAt"`
+}
+
 type Agent struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`

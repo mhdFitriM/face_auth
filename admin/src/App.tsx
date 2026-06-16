@@ -1,43 +1,186 @@
 import { useEffect, useState, useRef, useMemo } from 'react'
-import { api, apiUrl, subscribeEvents, DeviceForm, PersonForm } from './api'
+import { api, apiUrl, auth, subscribeEvents, DeviceForm, PersonForm } from './api'
 
-type Tab = 'devices' | 'live' | 'persons' | 'enrol' | 'events' | 'qr-auth' | 'agents' | 'console' | 'test' | 'settings' | 'guide' | 'api-docs' | 'plugin-faceapp'
+type Tab = 'devices' | 'live' | 'persons' | 'enrol' | 'events' | 'qr-auth' | 'agents' | 'console' | 'test' | 'settings' | 'guide' | 'api-docs' | 'plugin-faceapp' | 'plans' | 'access-log' | 'hq'
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>('devices')
-  const [status, setStatus] = useState<any>(null)
+  const [me, setMe] = useState<any>(null)
+  const [authReady, setAuthReady] = useState(false)
   const [theme, setTheme] = useState<'light' | 'dark'>(
     (localStorage.getItem('face_auth.theme') as 'light' | 'dark') || 'dark'
   )
-  const [navOpen, setNavOpen] = useState(false)
 
+  // Apply the theme at the App level so CSS variables are set even on the
+  // login screen (before the Dashboard mounts).
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
     localStorage.setItem('face_auth.theme', theme)
   }, [theme])
+
+  const loadMe = async () => {
+    if (!auth.token) { setAuthReady(true); setMe(null); return }
+    try { setMe(await api.me()) } catch { auth.clear(); setMe(null) }
+    finally { setAuthReady(true) }
+  }
+  useEffect(() => { loadMe() }, [])
+  useEffect(() => {
+    const handler = () => { setMe(null); setAuthReady(true) }
+    window.addEventListener('face_auth:unauthorized', handler)
+    return () => window.removeEventListener('face_auth:unauthorized', handler)
+  }, [])
+
+  if (!authReady) return <div className="auth-splash">Loading…</div>
+  if (!me?.user) return <LoginScreen onLoggedIn={loadMe} />
+
+  return <Dashboard me={me} onMe={setMe} onLogout={() => { auth.clear(); setMe(null) }} theme={theme} setTheme={setTheme} />
+}
+
+function LoginScreen({ onLoggedIn }: { onLoggedIn: () => void }) {
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const [backend, setBackend] = useState<'checking' | 'ok' | 'down'>('checking')
+
+  // Probe the backend on mount so the user sees instantly whether the API is
+  // reachable. If this fails the login form is pointless until they fix the
+  // backend.
+  useEffect(() => {
+    let cancelled = false
+    api.healthz()
+      .then(() => { if (!cancelled) setBackend('ok') })
+      .catch(() => { if (!cancelled) setBackend('down') })
+    return () => { cancelled = true }
+  }, [])
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setBusy(true); setErr('')
+    try {
+      const r = await api.login(email, password)
+      auth.token = r.token
+      if (r.tenant?.id) auth.activeTenantId = r.tenant.id
+      onLoggedIn()
+    } catch (e: any) {
+      // Strip the "Error: " prefix react adds + the leading status code if
+      // present so the user reads a normal sentence.
+      setErr(String(e?.message || e).replace(/^Error:\s*/, '').replace(/^\d+:\s*/, ''))
+    } finally { setBusy(false) }
+  }
+
+  return (
+    <div className="login-shell">
+      <form className="login-card" onSubmit={submit}>
+        <div className="login-brand">
+          <span className="logo-dot" /> <strong>face_auth</strong>
+        </div>
+        <h1>Sign in</h1>
+        <p className="login-sub">
+          Use your HQ or tenant admin email and password.
+        </p>
+
+        <div className={`backend-status ${backend}`}>
+          <span className="status-dot" />
+          {backend === 'checking' && 'Checking backend…'}
+          {backend === 'ok' && 'Backend reachable'}
+          {backend === 'down' && (
+            <>
+              Cannot reach the backend at <code>{apiUrl('/healthz')}</code>. Check that the API container is running and the URL is right.
+            </>
+          )}
+        </div>
+
+        <label className="login-field">
+          <span>Email</span>
+          <input
+            type="email"
+            autoFocus
+            autoComplete="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            required
+          />
+        </label>
+        <label className="login-field">
+          <span>Password</span>
+          <input
+            type="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            required
+          />
+        </label>
+        {err && <div className="login-error">{err}</div>}
+        <button className="btn-primary login-submit" type="submit" disabled={busy || backend === 'down'}>
+          {busy ? 'Signing in…' : backend === 'down' ? 'Backend unreachable' : 'Sign in'}
+        </button>
+      </form>
+    </div>
+  )
+}
+
+function Dashboard({ me, onMe, onLogout, theme, setTheme }: { me: any; onMe: (m: any) => void; onLogout: () => void; theme: 'light' | 'dark'; setTheme: (t: 'light' | 'dark') => void }) {
+  const isHQ = me.user?.role === 'hq_admin'
+  const [tab, setTab] = useState<Tab>(isHQ ? 'hq' : 'devices')
+
+  // Hard guard: if the role changed mid-session (e.g. HQ admin logs out and a
+  // tenant admin logs in on the same browser), force the active tab back to a
+  // role-appropriate default. Without this, a leftover tab='hq' selection
+  // would render HQTab for a tenant_admin and trigger the 403 banner.
+  useEffect(() => {
+    if (!isHQ && tab === 'hq') setTab('devices')
+  }, [isHQ, tab])
+  const [status, setStatus] = useState<any>(null)
+  const [navOpen, setNavOpen] = useState(false)
+  const [tenants, setTenants] = useState<any[]>([])
+  const [activeTenantId, setActiveTenantId] = useState<string>(auth.activeTenantId)
+
+  useEffect(() => {
+    if (isHQ) api.hqListTenants().then((t) => setTenants(t || [])).catch(() => {})
+  }, [isHQ])
+
+  useEffect(() => {
+    auth.activeTenantId = activeTenantId
+    if (isHQ && activeTenantId) {
+      // Refresh "me" so the topbar shows the active tenant label
+      api.me().then(onMe).catch(() => {})
+    }
+  }, [activeTenantId, isHQ])
 
   useEffect(() => {
     const tick = () => api.status().then(setStatus).catch(() => setStatus(null))
     tick()
     const t = setInterval(tick, 5000)
     return () => clearInterval(t)
-  }, [])
+  }, [activeTenantId])
 
-  const tabs: { id: Tab; label: string }[] = [
-    { id: 'devices', label: 'Devices' },
-    { id: 'live',    label: 'Live' },
-    { id: 'persons', label: 'Persons' },
-    { id: 'enrol',   label: 'Enrol' },
-    { id: 'events',  label: 'Events' },
-    { id: 'qr-auth', label: 'QR Auth' },
-    { id: 'agents',  label: 'Agents' },
-    { id: 'console', label: 'ISAPI' },
-    { id: 'test',    label: 'Test' },
-    { id: 'settings',label: 'Settings' },
-    { id: 'guide',   label: 'Setup Guide' },
-    { id: 'api-docs',label: 'API Docs' },
-    { id: 'plugin-faceapp', label: 'FaceApp Plugin' },
+  const allTabs: { id: Tab; label: string; group?: string; hq?: boolean }[] = [
+    { id: 'hq',      label: 'HQ overview', group: 'HQ', hq: true },
+    { id: 'devices', label: 'Devices', group: 'Operate' },
+    { id: 'live',    label: 'Live cameras', group: 'Operate' },
+    { id: 'persons', label: 'Members', group: 'Operate' },
+    { id: 'enrol',   label: 'Enrol', group: 'Operate' },
+    { id: 'plans',   label: 'Plans & rules', group: 'Operate' },
+    { id: 'access-log', label: 'Access log', group: 'Operate' },
+    { id: 'events',  label: 'Raw events', group: 'Diagnostics' },
+    { id: 'qr-auth', label: 'QR Auth', group: 'Diagnostics' },
+    { id: 'agents',  label: 'Agents', group: 'Diagnostics' },
+    { id: 'console', label: 'ISAPI console', group: 'Diagnostics' },
+    { id: 'test',    label: 'Test face-auth', group: 'Diagnostics' },
+    { id: 'settings',label: 'Settings', group: 'Admin' },
+    { id: 'plugin-faceapp', label: 'FaceApp plugin', group: 'Admin' },
+    { id: 'guide',   label: 'Setup guide', group: 'Help' },
+    { id: 'api-docs',label: 'API docs', group: 'Help' },
   ]
+  // HQ users see all tabs; tenant users hide HQ-only tabs and need a chosen
+  // tenant before operating endpoints work.
+  const tabs = allTabs.filter((t) => isHQ || !t.hq)
+  const grouped = useMemo(() => {
+    const m: Record<string, typeof tabs> = {}
+    tabs.forEach((t) => { (m[t.group || 'Other'] = m[t.group || 'Other'] || []).push(t) })
+    return m
+  }, [tabs])
 
   // Lock body scroll when mobile sidebar drawer is open
   useEffect(() => {
@@ -57,14 +200,26 @@ export default function App() {
           <button className="sidebar-close" onClick={() => setNavOpen(false)} aria-label="close menu">×</button>
         </div>
         <nav className="sidebar-nav">
-          {tabs.map((t) => (
-            <button
-              key={t.id}
-              className={`sidebar-item ${tab === t.id ? 'active' : ''}`}
-              onClick={() => { setTab(t.id); setNavOpen(false) }}
-            >{t.label}</button>
+          {Object.entries(grouped).map(([group, items]) => (
+            <div key={group} className="sidebar-group">
+              <div className="sidebar-group-label">{group}</div>
+              {items.map((t) => (
+                <button
+                  key={t.id}
+                  className={`sidebar-item ${tab === t.id ? 'active' : ''}`}
+                  onClick={() => { setTab(t.id); setNavOpen(false) }}
+                >{t.label}</button>
+              ))}
+            </div>
           ))}
         </nav>
+        <div className="sidebar-footer">
+          <div className="muted small" style={{ marginBottom: 6 }}>
+            <strong>{me.user?.name || me.user?.email}</strong>
+            <div className="muted small">{me.user?.role}{me.tenant?.name ? ` · ${me.tenant.name}` : ''}</div>
+          </div>
+          <button className="btn-ghost" style={{ width: '100%' }} onClick={async () => { try { await api.logout() } catch {}; onLogout() }}>Sign out</button>
+        </div>
       </aside>
 
       <div className={`sidebar-backdrop ${navOpen ? 'visible' : ''}`} onClick={() => setNavOpen(false)} />
@@ -79,6 +234,19 @@ export default function App() {
             <span className="brand-text">{tabs.find((t) => t.id === tab)?.label}</span>
           </div>
           <div className="topbar-right">
+            {isHQ && (
+              <select
+                className="tenant-switcher"
+                value={activeTenantId}
+                onChange={(e) => setActiveTenantId(e.target.value)}
+                title="Active tenant for tenant-scoped pages"
+              >
+                <option value="">— pick a tenant —</option>
+                {tenants.map((row: any) => (
+                  <option key={row.tenant.id} value={row.tenant.id}>{row.tenant.name}</option>
+                ))}
+              </select>
+            )}
             {status ? (
               <span className={status.devicesOnline > 0 ? 'badge ok' : 'badge'}>
                 <span className="status-dot" />
@@ -108,6 +276,9 @@ export default function App() {
           {tab === 'guide' && <GuideTab />}
           {tab === 'api-docs' && <ApiDocsTab />}
           {tab === 'plugin-faceapp' && <FaceAppTab />}
+          {tab === 'hq' && <HQTab />}
+          {tab === 'plans' && <PlansTab />}
+          {tab === 'access-log' && <AccessLogTab />}
         </main>
       </div>
     </div>
@@ -3347,5 +3518,561 @@ function StatTile({ label, value, sub, tone = 'muted' }: { label: string; value:
       <div className="stat-value" style={{ color }}>{value}</div>
       {sub && <div className="stat-sub muted small">{sub}</div>}
     </div>
+  )
+}
+
+// ===================== HQ overview =====================
+
+function HQTab() {
+  const [me, setMeState] = useState<any>(null)
+  useEffect(() => { api.me().then(setMeState).catch(() => {}) }, [])
+  const isHQ = me?.user?.role === 'hq_admin'
+
+  const [rows, setRows] = useState<any[]>([])
+  const [creating, setCreating] = useState(false)
+  const [err, setErr] = useState('')
+  const [users, setUsers] = useState<any[]>([])
+  const [newUser, setNewUser] = useState({ email: '', password: '', name: '', role: 'tenant_admin', tenantId: '' })
+
+  const load = () => {
+    if (!isHQ) return
+    api.hqListTenants().then((t) => setRows(t || [])).catch((e) => setErr(String(e)))
+    api.hqListUsers().then((u) => setUsers(u || [])).catch(() => {})
+  }
+  useEffect(() => { if (isHQ) load() }, [isHQ])
+
+  if (me && !isHQ) {
+    return (
+      <>
+        <div className="page-toolbar">
+          <h1 className="page-title">HQ overview</h1>
+        </div>
+        <div className="card" style={{ borderColor: 'var(--warning, #F59E0B)' }}>
+          <h3 style={{ marginTop: 0 }}>HQ access required</h3>
+          <p className="muted">
+            You're signed in as <strong>{me.user?.role}</strong>. This page is only available to
+            <strong> hq_admin</strong> accounts — the top-level operators who can see and manage every tenant in the system.
+          </p>
+          <p className="muted">
+            Sign out and sign in as your HQ admin (the default is <code>hq@faceauth.local</code> if you haven't customised it) to see this page.
+            Your current role can manage everything within your own tenant — Devices, Members, Plans, Settings, etc.
+          </p>
+        </div>
+      </>
+    )
+  }
+  const del = async (id: string) => {
+    if (!confirm(`Delete tenant ${id}? This cascades — all its devices, persons, plans, users will be removed.`)) return
+    await api.hqDeleteTenant(id); load()
+  }
+  const createUser = async () => {
+    setErr('')
+    try {
+      await api.hqCreateUser(newUser)
+      setNewUser({ email: '', password: '', name: '', role: 'tenant_admin', tenantId: '' })
+      load()
+    } catch (e: any) { setErr(String(e)) }
+  }
+
+  const total = rows.reduce((acc: any, r: any) => ({
+    devices: acc.devices + (r.deviceCount || 0),
+    online:  acc.online  + (r.devicesOnline || 0),
+    persons: acc.persons + (r.personCount || 0),
+    plans:   acc.plans   + (r.planCount || 0),
+  }), { devices: 0, online: 0, persons: 0, plans: 0 })
+
+  return (
+    <>
+      <div className="page-toolbar">
+        <div className="toolbar-left">
+          <h1 className="page-title">HQ overview <span className="muted">· {rows.length} tenant{rows.length === 1 ? '' : 's'}</span></h1>
+        </div>
+        <div className="toolbar-right">
+          <button className="btn-primary" onClick={() => setCreating(true)}>+ New tenant</button>
+        </div>
+      </div>
+      {err && <div className="err">{err}</div>}
+
+      <div className="stat-grid">
+        <StatTile label="Tenants" value={String(rows.length)} />
+        <StatTile label="Devices online" value={`${total.online}/${total.devices}`} tone={total.online > 0 ? 'ok' : 'muted'} />
+        <StatTile label="Persons" value={String(total.persons)} />
+        <StatTile label="Plans" value={String(total.plans)} />
+      </div>
+
+      <Card title="Tenants">
+        <div className="table-wrap">
+          <table className="data-table">
+            <thead><tr><th>Name</th><th>Premise</th><th>Devices</th><th>Persons</th><th>Plans</th><th>Status</th><th className="ta-right">Actions</th></tr></thead>
+            <tbody>
+              {rows.length === 0 ? (
+                <tr><td colSpan={7}><div className="empty" style={{ padding: 16 }}>No tenants yet. Click <strong>New tenant</strong> above to create one.</div></td></tr>
+              ) : rows.map((r: any) => (
+                <tr key={r.tenant.id}>
+                  <td data-label="Name"><strong>{r.tenant.name}</strong><div className="muted small mono">{r.tenant.slug}</div></td>
+                  <td data-label="Premise"><span className="badge">{r.tenant.premiseType || 'generic'}</span></td>
+                  <td data-label="Devices">{r.devicesOnline}/{r.deviceCount}</td>
+                  <td data-label="Persons">{r.personCount}</td>
+                  <td data-label="Plans">{r.planCount}</td>
+                  <td data-label="Status">{r.tenant.active ? <span className="badge ok">active</span> : <span className="badge err">disabled</span>}</td>
+                  <td data-label="Actions" className="ta-right">
+                    <button className="btn-ghost" onClick={() => { auth.activeTenantId = r.tenant.id; location.reload() }}>Switch →</button>
+                    <button className="btn-ghost danger" onClick={() => del(r.tenant.id)}>Delete</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      <Card title="Users">
+        <div className="muted small" style={{ marginBottom: 12 }}>
+          All login accounts. <code>hq_admin</code> sees everything. <code>tenant_admin</code> manages one tenant.
+        </div>
+        <div className="form-row" style={{ gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+          <input placeholder="email" value={newUser.email} onChange={(e) => setNewUser({ ...newUser, email: e.target.value })} />
+          <input type="password" placeholder="password" value={newUser.password} onChange={(e) => setNewUser({ ...newUser, password: e.target.value })} />
+          <input placeholder="name" value={newUser.name} onChange={(e) => setNewUser({ ...newUser, name: e.target.value })} />
+          <select value={newUser.role} onChange={(e) => setNewUser({ ...newUser, role: e.target.value })}>
+            <option value="hq_admin">hq_admin</option>
+            <option value="tenant_admin">tenant_admin</option>
+            <option value="tenant_operator">tenant_operator</option>
+          </select>
+          <select value={newUser.tenantId} onChange={(e) => setNewUser({ ...newUser, tenantId: e.target.value })}>
+            <option value="">— no tenant (HQ) —</option>
+            {rows.map((r: any) => <option key={r.tenant.id} value={r.tenant.id}>{r.tenant.name}</option>)}
+          </select>
+          <button className="btn-primary" onClick={createUser} disabled={!newUser.email || !newUser.password}>+ Create user</button>
+        </div>
+        <div className="table-wrap">
+          <table className="data-table">
+            <thead><tr><th>Email</th><th>Role</th><th>Tenant</th><th>Last login</th><th className="ta-right">Actions</th></tr></thead>
+            <tbody>
+              {users.map((u: any) => (
+                <tr key={u.id}>
+                  <td><strong>{u.email}</strong><div className="muted small">{u.name}</div></td>
+                  <td><span className="badge">{u.role}</span></td>
+                  <td className="mono small">{u.tenantId || '—'}</td>
+                  <td className="muted small">{u.lastLoginAt ? new Date(u.lastLoginAt).toLocaleString() : 'never'}</td>
+                  <td className="ta-right">
+                    <button className="btn-ghost danger" onClick={async () => { if (confirm(`Delete ${u.email}?`)) { await api.hqDeleteUser(u.id); load() } }}>Delete</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      {creating && (
+        <NewTenantModal onClose={() => setCreating(false)} onCreated={() => { setCreating(false); load() }} />
+      )}
+    </>
+  )
+}
+
+// ===================== Plans & rules =====================
+
+const WEEKDAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
+function PlansTab() {
+  const [plans, setPlans] = useState<any[]>([])
+  const [editing, setEditing] = useState<any | null>(null)
+  const [persons, setPersons] = useState<any[]>([])
+  const [devices, setDevices] = useState<any[]>([])
+  const [assigning, setAssigning] = useState<any | null>(null)
+  const [premiseTypes, setPremiseTypes] = useState<any[]>([])
+  const [installingPresets, setInstallingPresets] = useState(false)
+  const [presetMsg, setPresetMsg] = useState('')
+  const [err, setErr] = useState('')
+
+  const load = () => {
+    api.listPlans().then((p) => setPlans(p || [])).catch((e) => setErr(String(e)))
+    api.listPersons().then((p) => setPersons(p || [])).catch(() => {})
+    api.listDevices().then((d) => setDevices(d || [])).catch(() => {})
+    api.premiseTypes().then((pt) => setPremiseTypes(pt || [])).catch(() => {})
+  }
+  useEffect(() => { load() }, [])
+
+  const installTemplate = async (premiseKey: string) => {
+    setInstallingPresets(true); setErr(''); setPresetMsg('')
+    try {
+      const r: any = await api.installPresets(premiseKey)
+      setPresetMsg(`Installed ${(r?.installed || []).length} plan(s) from ${premiseKey} template.`)
+      load()
+    } catch (e: any) { setErr(String(e)) } finally { setInstallingPresets(false) }
+  }
+
+  const del = async (id: string) => {
+    if (!confirm('Delete plan?')) return
+    await api.deletePlan(id); load()
+  }
+
+  return (
+    <>
+      <div className="page-toolbar">
+        <div className="toolbar-left">
+          <h1 className="page-title">Membership plans <span className="muted">· {plans.length}</span></h1>
+        </div>
+        <div className="toolbar-right">
+          {premiseTypes.length > 0 && (
+            <select
+              defaultValue=""
+              disabled={installingPresets}
+              onChange={(e) => {
+                const v = e.target.value
+                e.target.value = ''
+                if (v) installTemplate(v)
+              }}
+              title="Bulk-install a curated set of plans for this premise type"
+            >
+              <option value="">Install template…</option>
+              {premiseTypes.map((pt: any) => (
+                <option key={pt.key} value={pt.key}>{pt.label} ({pt.presets?.length || 0} plans)</option>
+              ))}
+            </select>
+          )}
+          <button className="btn-primary" onClick={() => setEditing({
+            name: '', type: 'unlimited', defaultCredits: 0, mustExitBeforeReentry: false, rules: [],
+          })}>+ New plan</button>
+        </div>
+      </div>
+      {err && <div className="err">{err}</div>}
+      {presetMsg && <div className="muted small" style={{ marginBottom: 12 }}>{presetMsg}</div>}
+
+      <Card>
+        <div className="muted small" style={{ marginBottom: 12 }}>
+          A plan describes how a member can enter:
+          <ul style={{ margin: '6px 0 0 18px' }}>
+            <li><strong>Unlimited</strong> — every entry allowed.</li>
+            <li><strong>Credit-based</strong> — each entry uses 1 credit. Recharge by re-assigning.</li>
+            <li><strong>Rule-based</strong> — allowed during one or more weekday + time windows (e.g. 6:00–9:00 AND 19:00–22:00).</li>
+          </ul>
+          Toggle <strong>Must exit before re-enter</strong> to enforce one-direction-at-a-time tracking.
+        </div>
+        {plans.length === 0
+          ? <div className="empty">No plans yet.</div>
+          : (
+            <div className="plan-grid">
+              {plans.map((p: any) => (
+                <div key={p.id} className="plan-card">
+                  <div className="plan-card-head">
+                    <strong>{p.name}</strong>
+                    <span className={`badge ${planTone(p.type)}`}>{p.type}</span>
+                  </div>
+                  <div className="muted small mono">{p.id}</div>
+                  {p.type === 'credit' && <div className="muted small">Default credits: {p.defaultCredits}</div>}
+                  {p.mustExitBeforeReentry && <div className="muted small">↳ Must exit before re-enter</div>}
+                  {p.type === 'rule' && (p.rules || []).length > 0 && (
+                    <div style={{ marginTop: 8 }}>
+                      <div className="muted small">Rules:</div>
+                      {(p.rules || []).map((r: any) => (
+                        <div key={r.id} className="rule-pill">
+                          <span>{r.label || `${r.startTime}-${r.endTime}`}</span>
+                          <span className="muted small">{weekdayString(r.weekdays)} {r.startTime}–{r.endTime}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="form-actions" style={{ marginTop: 12, gap: 6 }}>
+                    <button className="btn-ghost" onClick={() => setEditing({ ...p, rules: p.rules || [] })}>Edit</button>
+                    <button className="btn-ghost" onClick={() => setAssigning(p)}>Assign…</button>
+                    <button className="btn-ghost danger" onClick={() => del(p.id)}>Delete</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+      </Card>
+
+      {editing && (
+        <PlanEditor
+          plan={editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => { setEditing(null); load() }}
+        />
+      )}
+
+      {assigning && (
+        <PlanAssignModal
+          plan={assigning}
+          persons={persons}
+          devices={devices}
+          onClose={() => setAssigning(null)}
+          onSaved={() => { setAssigning(null); load() }}
+        />
+      )}
+    </>
+  )
+}
+
+function planTone(t: string) {
+  if (t === 'unlimited') return 'ok'
+  if (t === 'credit') return ''
+  return 'err'
+}
+function weekdayString(mask: number) {
+  if (mask === 127) return 'every day'
+  if (mask === 0b0111111) return 'Mon-Sat'
+  if (mask === 0b0011111) return 'Mon-Fri'
+  const days: string[] = []
+  for (let i = 0; i < 7; i++) if (mask & (1 << i)) days.push(WEEKDAY_NAMES[i])
+  return days.join(', ')
+}
+
+function PlanEditor({ plan, onClose, onSaved }: { plan: any; onClose: () => void; onSaved: () => void }) {
+  const [name, setName] = useState(plan.name || '')
+  const [type, setType] = useState<string>(plan.type || 'unlimited')
+  const [credits, setCredits] = useState<number>(plan.defaultCredits || 0)
+  const [mustExit, setMustExit] = useState<boolean>(!!plan.mustExitBeforeReentry)
+  const [rules, setRules] = useState<any[]>(plan.rules || [])
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+
+  const addRule = () => setRules([...rules, { weekdays: 127, startTime: '06:00', endTime: '09:00', label: '' }])
+  const updateRule = (i: number, patch: any) => setRules(rules.map((r, idx) => idx === i ? { ...r, ...patch } : r))
+  const removeRule = (i: number) => setRules(rules.filter((_, idx) => idx !== i))
+  const toggleWeekday = (i: number, bit: number) => {
+    const cur = rules[i].weekdays || 0
+    updateRule(i, { weekdays: cur ^ (1 << bit) })
+  }
+
+  const save = async () => {
+    setBusy(true); setErr('')
+    try {
+      const body = { name, type, defaultCredits: credits, mustExitBeforeReentry: mustExit, rules, active: true }
+      if (plan.id) await api.updatePlan(plan.id, body)
+      else await api.createPlan(body)
+      onSaved()
+    } catch (e: any) { setErr(String(e)) } finally { setBusy(false) }
+  }
+
+  return (
+    <Modal title={plan.id ? 'Edit plan' : 'New plan'} onClose={onClose}>
+      <Field label="Name"><input value={name} onChange={(e) => setName(e.target.value)} autoFocus /></Field>
+      <Field label="Type">
+        <select value={type} onChange={(e) => setType(e.target.value)}>
+          <option value="unlimited">Unlimited — every entry allowed</option>
+          <option value="credit">Credit-based — each entry uses 1 credit</option>
+          <option value="rule">Rule-based — allowed in specific weekday/time windows</option>
+        </select>
+      </Field>
+      {type === 'credit' && (
+        <Field label="Default credits" hint="Issued to a person when they're first assigned to this plan.">
+          <input type="number" min={0} value={credits} onChange={(e) => setCredits(parseInt(e.target.value || '0', 10))} />
+        </Field>
+      )}
+      <Field label="Must exit before re-enter" hint="Prevent the same person from triggering two consecutive 'in' events.">
+        <label className="toggle">
+          <input type="checkbox" checked={mustExit} onChange={(e) => setMustExit(e.target.checked)} />
+          <span>{mustExit ? 'on' : 'off'}</span>
+        </label>
+      </Field>
+
+      {type === 'rule' && (
+        <>
+          <h4 style={{ marginTop: 16 }}>Rules</h4>
+          <div className="muted small" style={{ marginBottom: 8 }}>
+            A person passes the gate if ANY rule matches (OR semantics). To express "06:00–09:00 AND 19:00–22:00", add two rules.
+          </div>
+          {rules.map((r, i) => (
+            <div key={i} className="rule-editor">
+              <div className="rule-editor-row">
+                <input placeholder="Label (optional)" value={r.label || ''} onChange={(e) => updateRule(i, { label: e.target.value })} />
+                <input type="time" value={r.startTime} onChange={(e) => updateRule(i, { startTime: e.target.value })} />
+                <span className="muted small">to</span>
+                <input type="time" value={r.endTime} onChange={(e) => updateRule(i, { endTime: e.target.value })} />
+                <button className="btn-ghost danger" onClick={() => removeRule(i)}>×</button>
+              </div>
+              <div className="weekday-row">
+                {WEEKDAY_NAMES.map((name, idx) => (
+                  <button
+                    key={idx}
+                    type="button"
+                    className={`weekday-pill ${(r.weekdays || 0) & (1 << idx) ? 'on' : ''}`}
+                    onClick={() => toggleWeekday(i, idx)}
+                  >{name}</button>
+                ))}
+              </div>
+            </div>
+          ))}
+          <button className="btn-ghost" onClick={addRule}>+ Add rule</button>
+        </>
+      )}
+
+      {err && <div className="err" style={{ marginTop: 8 }}>{err}</div>}
+      <div className="form-actions">
+        <button className="btn-ghost" onClick={onClose}>Cancel</button>
+        <button className="btn-primary" disabled={busy || !name} onClick={save}>{busy ? 'Saving…' : 'Save plan'}</button>
+      </div>
+    </Modal>
+  )
+}
+
+function PlanAssignModal({ plan, persons, devices, onClose, onSaved }: { plan: any; persons: any[]; devices: any[]; onClose: () => void; onSaved: () => void }) {
+  const [personId, setPersonId] = useState('')
+  const [credits, setCredits] = useState<number>(plan.defaultCredits || 0)
+  const [deviceId, setDeviceId] = useState('')
+  const [err, setErr] = useState('')
+  const [msg, setMsg] = useState('')
+
+  const assignPerson = async () => {
+    setErr(''); setMsg('')
+    try {
+      await api.assignPersonPlan(personId, plan.id, plan.type === 'credit' ? credits : 0)
+      setMsg(`Plan assigned to ${persons.find((p) => p.id === personId)?.name || personId}.`)
+    } catch (e: any) { setErr(String(e)) }
+  }
+  const assignDevice = async () => {
+    setErr(''); setMsg('')
+    try {
+      await api.assignDevicePlan(deviceId, plan.id)
+      setMsg(`Plan attached to ${devices.find((d) => d.deviceID === deviceId)?.name || deviceId}.`)
+    } catch (e: any) { setErr(String(e)) }
+  }
+
+  return (
+    <Modal title={`Assign — ${plan.name}`} onClose={onClose}>
+      <h4>Assign to a person</h4>
+      <Field label="Person">
+        <select value={personId} onChange={(e) => setPersonId(e.target.value)}>
+          <option value="">— pick —</option>
+          {persons.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.employeeNo})</option>)}
+        </select>
+      </Field>
+      {plan.type === 'credit' && (
+        <Field label="Credits"><input type="number" min={0} value={credits} onChange={(e) => setCredits(parseInt(e.target.value || '0', 10))} /></Field>
+      )}
+      <div className="form-actions">
+        <button className="btn-primary" disabled={!personId} onClick={assignPerson}>Assign to person</button>
+      </div>
+
+      <h4 style={{ marginTop: 20 }}>Attach to a device</h4>
+      <Field label="Device">
+        <select value={deviceId} onChange={(e) => setDeviceId(e.target.value)}>
+          <option value="">— pick —</option>
+          {devices.map((d: any) => <option key={d.deviceID} value={d.deviceID}>{d.name || d.deviceID}</option>)}
+        </select>
+      </Field>
+      <div className="form-actions">
+        <button className="btn-primary" disabled={!deviceId} onClick={assignDevice}>Attach to device</button>
+      </div>
+
+      {msg && <div className="muted small" style={{ marginTop: 12 }}>{msg}</div>}
+      {err && <div className="err" style={{ marginTop: 12 }}>{err}</div>}
+      <div className="form-actions" style={{ marginTop: 16 }}>
+        <button className="btn-ghost" onClick={() => { onSaved() }}>Done</button>
+      </div>
+    </Modal>
+  )
+}
+
+// ===================== Access log =====================
+
+function NewTenantModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+  const [name, setName] = useState('')
+  const [slug, setSlug] = useState('')
+  const [premiseType, setPremiseType] = useState('generic')
+  const [timezone, setTimezone] = useState('Asia/Kuala_Lumpur')
+  const [contactEmail, setContactEmail] = useState('')
+  const [contactPhone, setContactPhone] = useState('')
+  const [address, setAddress] = useState('')
+  const [installPresets, setInstallPresets] = useState(true)
+  const [premiseTypes, setPremiseTypes] = useState<any[]>([])
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+
+  useEffect(() => {
+    api.premiseTypes().then((pt) => setPremiseTypes(pt || [])).catch(() => {})
+  }, [])
+
+  const selected = premiseTypes.find((p) => p.key === premiseType)
+
+  const submit = async () => {
+    setErr(''); setBusy(true)
+    try {
+      await api.hqCreateTenant({ name, slug, premiseType, timezone, contactEmail, contactPhone, address, installPresets })
+      onCreated()
+    } catch (e: any) { setErr(String(e)) } finally { setBusy(false) }
+  }
+
+  return (
+    <Modal title="New tenant" onClose={onClose}>
+      <Field label="Name">
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Acme Gym" autoFocus />
+      </Field>
+      <Field label="Slug" hint="URL-friendly identifier, auto-generated if blank">
+        <input value={slug} onChange={(e) => setSlug(e.target.value)} placeholder="acme-gym" />
+      </Field>
+      <Field label="Premise type" hint="Drives the starter plan template + access patterns.">
+        <select value={premiseType} onChange={(e) => setPremiseType(e.target.value)}>
+          {premiseTypes.map((p: any) => <option key={p.key} value={p.key}>{p.label}</option>)}
+        </select>
+        {selected && <div className="muted small" style={{ marginTop: 4 }}>{selected.description}</div>}
+      </Field>
+      <div className="form-row">
+        <Field label="Timezone"><input value={timezone} onChange={(e) => setTimezone(e.target.value)} /></Field>
+        <Field label="Contact email"><input type="email" value={contactEmail} onChange={(e) => setContactEmail(e.target.value)} /></Field>
+      </div>
+      <div className="form-row">
+        <Field label="Contact phone"><input value={contactPhone} onChange={(e) => setContactPhone(e.target.value)} /></Field>
+        <Field label="Address"><input value={address} onChange={(e) => setAddress(e.target.value)} /></Field>
+      </div>
+      <Field label="Install preset plans" hint={`Creates ${selected?.presets?.length || 0} starter plan(s) for ${selected?.label || 'this premise'}. Fully editable later.`}>
+        <label className="toggle">
+          <input type="checkbox" checked={installPresets} onChange={(e) => setInstallPresets(e.target.checked)} />
+          <span>{installPresets ? 'yes — bootstrap plans' : 'no — leave empty'}</span>
+        </label>
+      </Field>
+      {err && <div className="err">{err}</div>}
+      <div className="form-actions">
+        <button className="btn-ghost" onClick={onClose}>Cancel</button>
+        <button className="btn-primary" onClick={submit} disabled={!name || busy}>{busy ? 'Creating…' : 'Create tenant'}</button>
+      </div>
+    </Modal>
+  )
+}
+
+function AccessLogTab() {
+  const [rows, setRows] = useState<any[]>([])
+  const [err, setErr] = useState('')
+  const load = () => api.accessLog(300).then((r) => setRows(r || [])).catch((e) => setErr(String(e)))
+  useEffect(() => {
+    load()
+    const t = setInterval(load, 5000)
+    return () => clearInterval(t)
+  }, [])
+  return (
+    <>
+      <div className="page-toolbar">
+        <h1 className="page-title">Access log <span className="muted">· {rows.length}</span></h1>
+        <div className="toolbar-right"><button className="btn-ghost" onClick={load}>↻ Refresh</button></div>
+      </div>
+      {err && <div className="err">{err}</div>}
+      <Card>
+        {rows.length === 0
+          ? <div className="empty">No access decisions yet. Face matches arriving from your devices will appear here.</div>
+          : (
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead><tr><th>When</th><th>Decision</th><th>Person</th><th>Device</th><th>Direction</th><th>Reason</th></tr></thead>
+                <tbody>
+                  {rows.map((r: any) => (
+                    <tr key={r.id}>
+                      <td className="muted small">{new Date(r.createdAt).toLocaleString()}</td>
+                      <td><span className={`badge ${r.decision === 'allow' ? 'ok' : r.decision === 'deny' ? 'err' : ''}`}>{r.decision}</span></td>
+                      <td><strong>{r.employeeNo || '—'}</strong></td>
+                      <td className="mono small">{r.deviceId || '—'}</td>
+                      <td className="muted small">{r.direction || ''}</td>
+                      <td className="muted small">{r.reason}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+      </Card>
+    </>
   )
 }

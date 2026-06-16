@@ -23,6 +23,10 @@ func main() {
 	}
 	defer store.Close()
 
+	if err := internal.Bootstrap(ctx, store); err != nil {
+		log.Printf("WARN: bootstrap: %v", err)
+	}
+
 	if dp := os.Getenv("DEBUG_PORT"); dp != "" {
 		internal.StartDebugListener(dp)
 	}
@@ -31,6 +35,9 @@ func main() {
 
 	pushApp := internal.NewPushServer(store, cfg)
 	apiApp := internal.NewAPIServer(store, cfg, hub)
+
+	stopPolicy := internal.StartPolicyRunner(store, hub)
+	defer stopPolicy()
 
 	go func() {
 		log.Printf("device push listener on :%s (plain HTTP)", cfg.PushPort)

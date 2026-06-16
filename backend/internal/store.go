@@ -221,6 +221,115 @@ CREATE INDEX IF NOT EXISTS idx_devices_agent ON devices(agent_id);
 -- NULL = follow the global setting; TRUE / FALSE = explicit override.
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS require_qr_2fa BOOLEAN;
 
+-- ============================================================
+--  Multi-tenant tables (added late — existing data lives in a
+--  "default" tenant created on first boot by the seed routine).
+-- ============================================================
+CREATE TABLE IF NOT EXISTS tenants (
+    id            TEXT PRIMARY KEY,
+    slug          TEXT UNIQUE NOT NULL,
+    name          TEXT NOT NULL,
+    premise_type  TEXT DEFAULT 'generic', -- gym | property | office | parking | club | school | hotel | generic
+    timezone      TEXT DEFAULT 'Asia/Kuala_Lumpur',
+    contact_email TEXT DEFAULT '',
+    contact_phone TEXT DEFAULT '',
+    address       TEXT DEFAULT '',
+    settings      JSONB DEFAULT '{}'::jsonb,
+    active        BOOLEAN DEFAULT TRUE,
+    created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS premise_type  TEXT DEFAULT 'generic';
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS timezone      TEXT DEFAULT 'Asia/Kuala_Lumpur';
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS contact_email TEXT DEFAULT '';
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS contact_phone TEXT DEFAULT '';
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS address       TEXT DEFAULT '';
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS settings      JSONB DEFAULT '{}'::jsonb;
+
+CREATE TABLE IF NOT EXISTS users (
+    id            TEXT PRIMARY KEY,
+    tenant_id     TEXT REFERENCES tenants(id) ON DELETE CASCADE, -- NULL = HQ admin
+    email         TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    role          TEXT NOT NULL, -- hq_admin | tenant_admin | tenant_operator
+    name          TEXT DEFAULT '',
+    active        BOOLEAN DEFAULT TRUE,
+    last_login_at TIMESTAMPTZ,
+    created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token        TEXT PRIMARY KEY,
+    user_id      TEXT REFERENCES users(id) ON DELETE CASCADE,
+    expires_at   TIMESTAMPTZ NOT NULL,
+    created_at   TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS plans (
+    id                          TEXT PRIMARY KEY,
+    tenant_id                   TEXT REFERENCES tenants(id) ON DELETE CASCADE,
+    name                        TEXT NOT NULL,
+    type                        TEXT NOT NULL, -- unlimited | credit | rule
+    default_credits             INTEGER DEFAULT 0,
+    must_exit_before_reentry    BOOLEAN DEFAULT FALSE,
+    active                      BOOLEAN DEFAULT TRUE,
+    created_at                  TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_plans_tenant ON plans(tenant_id);
+
+CREATE TABLE IF NOT EXISTS plan_rules (
+    id            TEXT PRIMARY KEY,
+    plan_id       TEXT REFERENCES plans(id) ON DELETE CASCADE,
+    -- weekdays bitmask: bit0=Mon..bit6=Sun
+    weekdays      SMALLINT NOT NULL DEFAULT 127,
+    start_time    TEXT NOT NULL DEFAULT '00:00', -- HH:MM (local time)
+    end_time      TEXT NOT NULL DEFAULT '23:59',
+    label         TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_plan_rules_plan ON plan_rules(plan_id);
+
+CREATE TABLE IF NOT EXISTS person_plans (
+    person_id          TEXT PRIMARY KEY REFERENCES persons(id) ON DELETE CASCADE,
+    plan_id            TEXT REFERENCES plans(id) ON DELETE SET NULL,
+    credits_remaining  INTEGER DEFAULT 0,
+    inside             BOOLEAN DEFAULT FALSE,
+    last_event_at      TIMESTAMPTZ,
+    assigned_at        TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_person_plans_plan ON person_plans(plan_id);
+
+CREATE TABLE IF NOT EXISTS device_plans (
+    device_id   TEXT REFERENCES devices(device_id) ON DELETE CASCADE,
+    plan_id     TEXT REFERENCES plans(id) ON DELETE CASCADE,
+    PRIMARY KEY (device_id, plan_id)
+);
+
+CREATE TABLE IF NOT EXISTS access_log (
+    id          BIGSERIAL PRIMARY KEY,
+    tenant_id   TEXT,
+    person_id   TEXT,
+    employee_no TEXT,
+    device_id   TEXT,
+    decision    TEXT,            -- allow | deny | observed
+    reason      TEXT,
+    direction   TEXT DEFAULT '', -- in | out | unknown
+    created_at  TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_access_log_tenant_time ON access_log(tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_access_log_person_time ON access_log(person_id, created_at DESC);
+
+-- Scope existing tables by tenant. NULL = legacy data; the seed will
+-- re-assign every NULL row to the "default" tenant on first run.
+ALTER TABLE devices  ADD COLUMN IF NOT EXISTS tenant_id TEXT;
+ALTER TABLE persons  ADD COLUMN IF NOT EXISTS tenant_id TEXT;
+ALTER TABLE agents   ADD COLUMN IF NOT EXISTS tenant_id TEXT;
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS tenant_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_devices_tenant ON devices(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_persons_tenant ON persons(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_agents_tenant  ON agents(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_api_keys_tenant ON api_keys(tenant_id);
+
 -- Global key/value config blob. Single row with key='global'.
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,

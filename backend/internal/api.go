@@ -33,9 +33,14 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 	})
 
 	app.Use(cors.New(cors.Config{
-		AllowOrigins:  "*",
-		AllowMethods:  "GET,POST,PUT,DELETE,OPTIONS",
-		AllowHeaders:  "Content-Type, Authorization",
+		AllowOrigins: "*",
+		AllowMethods: "GET,POST,PUT,DELETE,OPTIONS",
+		// Every custom header we send from the SPA must be listed here OR the
+		// browser silently kills the preflight. X-Tenant-Id is added on every
+		// dashboard request once an active tenant is picked. X-Session-Token
+		// is an alternate to the Authorization header. X-API-Key is used by
+		// third-party /api/v1 callers.
+		AllowHeaders:  "Content-Type, Authorization, X-Tenant-Id, X-Session-Token, X-API-Key",
 		ExposeHeaders: "Content-Disposition",
 	}))
 
@@ -50,10 +55,395 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 
 	api := app.Group("/api")
 
+	// ---------- Auth (unauthenticated) ----------
+
+	api.Post("/auth/login", func(c *fiber.Ctx) error {
+		var body struct {
+			Email    string `json:"email"`
+			Password string `json:"password"`
+		}
+		if err := json.Unmarshal(c.Body(), &body); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "bad body"})
+		}
+		u, err := store.GetUserByEmail(c.Context(), body.Email)
+		if err != nil || u == nil || !u.Active || !CheckPassword(u.PasswordHash, body.Password) {
+			return c.Status(401).JSON(fiber.Map{"error": "invalid email or password"})
+		}
+		sess, err := store.CreateSession(c.Context(), u.ID)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		var t *Tenant
+		if u.TenantID != nil && *u.TenantID != "" {
+			t, _ = store.GetTenant(c.Context(), *u.TenantID)
+		}
+		return c.JSON(fiber.Map{"token": sess.Token, "user": u, "tenant": t, "expiresAt": sess.ExpiresAt})
+	})
+
+	// Everything below this point requires a valid session token. The OLD
+	// /api/devices, /api/persons etc. endpoints are now session-gated too.
+	// Public third-party traffic still uses /api/v1/* with API keys.
+	api.Use(func(c *fiber.Ctx) error {
+		// ONLY /api/auth/login is unauthenticated. Everything else under
+		// /api/auth/* (me, logout) needs the session middleware to populate
+		// c.Locals("user") — otherwise /auth/me silently returns null and the
+		// SPA bounces back to the login screen in an infinite loop.
+		p := c.Path()
+		if p == "/api/auth/login" || p == "/api/healthz" {
+			return c.Next()
+		}
+		return sessionAuth(store)(c)
+	})
+
+	api.Post("/auth/logout", func(c *fiber.Ctx) error {
+		if sess, ok := c.Locals("session").(*Session); ok && sess != nil {
+			_ = store.DeleteSession(c.Context(), sess.Token)
+		}
+		return c.JSON(fiber.Map{"ok": true})
+	})
+
+	api.Get("/auth/me", func(c *fiber.Ctx) error {
+		u := currentUser(c)
+		var t *Tenant
+		if u != nil && u.TenantID != nil && *u.TenantID != "" {
+			t, _ = store.GetTenant(c.Context(), *u.TenantID)
+		}
+		// HQ users may have an active "viewing" tenant via header/query
+		if u != nil && u.Role == RoleHQ {
+			if tid := firstNonEmpty(c.Query("tenantId"), c.Get("X-Tenant-Id")); tid != "" {
+				t, _ = store.GetTenant(c.Context(), tid)
+			}
+		}
+		return c.JSON(fiber.Map{"user": u, "tenant": t})
+	})
+
+	// ---------- HQ: tenants + cross-tenant overview ----------
+
+	hq := api.Group("", requireRole(RoleHQ))
+
+	hq.Get("/hq/tenants", func(c *fiber.Ctx) error {
+		ts, err := store.ListTenants(c.Context())
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		// Decorate with quick counts
+		out := []fiber.Map{}
+		for _, t := range ts {
+			var devCount, personCount, planCount int
+			_ = store.PG.QueryRow(c.Context(), `SELECT COUNT(*) FROM devices WHERE tenant_id=$1`, t.ID).Scan(&devCount)
+			_ = store.PG.QueryRow(c.Context(), `SELECT COUNT(*) FROM persons WHERE tenant_id=$1`, t.ID).Scan(&personCount)
+			_ = store.PG.QueryRow(c.Context(), `SELECT COUNT(*) FROM plans WHERE tenant_id=$1`, t.ID).Scan(&planCount)
+			var onlineCount int
+			_ = store.PG.QueryRow(c.Context(), `SELECT COUNT(*) FROM devices WHERE tenant_id=$1 AND online=TRUE`, t.ID).Scan(&onlineCount)
+			out = append(out, fiber.Map{
+				"tenant":         t,
+				"deviceCount":    devCount,
+				"devicesOnline":  onlineCount,
+				"personCount":    personCount,
+				"planCount":      planCount,
+			})
+		}
+		return c.JSON(out)
+	})
+
+	hq.Post("/hq/tenants", func(c *fiber.Ctx) error {
+		var body struct {
+			Name         string `json:"name"`
+			Slug         string `json:"slug"`
+			PremiseType  string `json:"premiseType"`
+			Timezone     string `json:"timezone"`
+			ContactEmail string `json:"contactEmail"`
+			ContactPhone string `json:"contactPhone"`
+			Address      string `json:"address"`
+			InstallPresets bool `json:"installPresets"`
+		}
+		if err := json.Unmarshal(c.Body(), &body); err != nil || body.Name == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "name required"})
+		}
+		t := Tenant{
+			Name:         body.Name,
+			Slug:         body.Slug,
+			PremiseType:  body.PremiseType,
+			Timezone:     body.Timezone,
+			ContactEmail: body.ContactEmail,
+			ContactPhone: body.ContactPhone,
+			Address:      body.Address,
+			Active:       true,
+		}
+		if err := store.CreateTenant(c.Context(), t); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		// Re-read so we get the assigned ID and defaults
+		created, _ := store.GetTenant(c.Context(), t.ID)
+		if created == nil {
+			created = &t
+		}
+		// Optionally seed plans from the chosen premise template
+		installed := []Plan{}
+		if body.InstallPresets {
+			if pt := FindPremiseType(created.PremiseType); pt != nil {
+				installed, _ = store.InstallPresets(c.Context(), created.ID, pt.Presets)
+			}
+		}
+		return c.JSON(fiber.Map{"tenant": created, "installedPlans": installed})
+	})
+
+	hq.Put("/hq/tenants/:id", func(c *fiber.Ctx) error {
+		cur, _ := store.GetTenant(c.Context(), c.Params("id"))
+		if cur == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "tenant not found"})
+		}
+		var body Tenant
+		if err := json.Unmarshal(c.Body(), &body); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "bad body"})
+		}
+		body.ID = cur.ID
+		if body.Slug == "" {
+			body.Slug = cur.Slug
+		}
+		if body.Name == "" {
+			body.Name = cur.Name
+		}
+		if err := store.CreateTenant(c.Context(), body); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		updated, _ := store.GetTenant(c.Context(), cur.ID)
+		return c.JSON(updated)
+	})
+
+	// Premise types library — surfaces the canonical premise patterns + their
+	// preset plans so the UI can render an "install template" picker.
+	api.Get("/premise-types", func(c *fiber.Ctx) error {
+		return c.JSON(PremiseTypes)
+	})
+
+	// Install presets onto the active tenant (POST body: { premiseType: "gym" }
+	// — or omit to use the tenant's premise_type).
+	api.Post("/plans/install-presets", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		var body struct {
+			PremiseType string `json:"premiseType"`
+		}
+		_ = json.Unmarshal(c.Body(), &body)
+		key := body.PremiseType
+		if key == "" {
+			if t, _ := store.GetTenant(c.Context(), tid); t != nil {
+				key = t.PremiseType
+			}
+		}
+		pt := FindPremiseType(key)
+		if pt == nil {
+			return c.Status(400).JSON(fiber.Map{"error": "unknown premise type: " + key})
+		}
+		installed, err := store.InstallPresets(c.Context(), tid, pt.Presets)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"installed": installed, "premiseType": key})
+	})
+
+	hq.Delete("/hq/tenants/:id", func(c *fiber.Ctx) error {
+		if err := store.DeleteTenant(c.Context(), c.Params("id")); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"ok": true})
+	})
+
+	hq.Get("/hq/users", func(c *fiber.Ctx) error {
+		us, err := store.ListUsers(c.Context(), c.Query("tenantId"))
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(us)
+	})
+
+	hq.Post("/hq/users", func(c *fiber.Ctx) error {
+		var body struct {
+			TenantID string `json:"tenantId"`
+			Email    string `json:"email"`
+			Password string `json:"password"`
+			Role     string `json:"role"`
+			Name     string `json:"name"`
+		}
+		if err := json.Unmarshal(c.Body(), &body); err != nil || body.Email == "" || body.Password == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "email + password required"})
+		}
+		if body.Role == "" {
+			body.Role = RoleTenantAdmin
+		}
+		hash, err := HashPassword(body.Password)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		u := User{Email: body.Email, Role: body.Role, Name: body.Name, PasswordHash: hash, Active: true}
+		if body.TenantID != "" {
+			u.TenantID = &body.TenantID
+		}
+		if err := store.CreateUser(c.Context(), u); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(u)
+	})
+
+	hq.Delete("/hq/users/:id", func(c *fiber.Ctx) error {
+		if err := store.DeleteUser(c.Context(), c.Params("id")); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"ok": true})
+	})
+
+	// ---------- Tenant-scoped: plans / rules / assignments ----------
+
+	api.Get("/plans", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		ps, err := store.ListPlans(c.Context(), tid)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(ps)
+	})
+
+	api.Post("/plans", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		var body Plan
+		if err := json.Unmarshal(c.Body(), &body); err != nil || body.Name == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "name required"})
+		}
+		body.TenantID = tid
+		if body.Type == "" {
+			body.Type = PlanUnlimited
+		}
+		body.Active = true
+		p, err := store.CreatePlan(c.Context(), body)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		// Persist any nested rules atomically
+		for _, r := range body.Rules {
+			r.PlanID = p.ID
+			_, _ = store.UpsertPlanRule(c.Context(), r)
+		}
+		full, _ := store.GetPlan(c.Context(), p.ID)
+		return c.JSON(full)
+	})
+
+	api.Put("/plans/:id", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		var body Plan
+		if err := json.Unmarshal(c.Body(), &body); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "bad body"})
+		}
+		body.ID = c.Params("id")
+		body.TenantID = tid
+		if _, err := store.CreatePlan(c.Context(), body); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		// Replace rules: remove existing, insert new
+		_, _ = store.PG.Exec(c.Context(), `DELETE FROM plan_rules WHERE plan_id=$1`, body.ID)
+		for _, r := range body.Rules {
+			r.PlanID = body.ID
+			r.ID = "" // force new ID per rule
+			_, _ = store.UpsertPlanRule(c.Context(), r)
+		}
+		full, _ := store.GetPlan(c.Context(), body.ID)
+		return c.JSON(full)
+	})
+
+	api.Delete("/plans/:id", func(c *fiber.Ctx) error {
+		if _, err := tenantScope(c); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		if err := store.DeletePlan(c.Context(), c.Params("id")); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"ok": true})
+	})
+
+	// Person → plan assignment
+	api.Post("/persons/:id/plan", func(c *fiber.Ctx) error {
+		var body struct {
+			PlanID  string `json:"planId"`
+			Credits *int   `json:"credits"`
+		}
+		_ = json.Unmarshal(c.Body(), &body)
+		credits := 0
+		if body.Credits != nil {
+			credits = *body.Credits
+		} else if body.PlanID != "" {
+			if p, _ := store.GetPlan(c.Context(), body.PlanID); p != nil {
+				credits = p.DefaultCredits
+			}
+		}
+		if err := store.AssignPersonPlan(c.Context(), c.Params("id"), body.PlanID, credits); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		pp, _ := store.GetPersonPlan(c.Context(), c.Params("id"))
+		return c.JSON(pp)
+	})
+
+	api.Get("/persons/:id/plan", func(c *fiber.Ctx) error {
+		pp, _ := store.GetPersonPlan(c.Context(), c.Params("id"))
+		if pp == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "no plan assigned"})
+		}
+		return c.JSON(pp)
+	})
+
+	// Device → plan(s)
+	api.Get("/devices/:id/plans", func(c *fiber.Ctx) error {
+		ids, err := store.ListDevicePlans(c.Context(), c.Params("id"))
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(ids)
+	})
+	api.Post("/devices/:id/plans/:planId", func(c *fiber.Ctx) error {
+		if err := store.AssignDeviceToPlan(c.Context(), c.Params("id"), c.Params("planId")); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"ok": true})
+	})
+	api.Delete("/devices/:id/plans/:planId", func(c *fiber.Ctx) error {
+		if err := store.UnassignDeviceFromPlan(c.Context(), c.Params("id"), c.Params("planId")); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"ok": true})
+	})
+
+	// Access log (tenant-scoped feed of allow/deny decisions)
+	api.Get("/access-log", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		limit, _ := strconv.Atoi(c.Query("limit", "200"))
+		out, err := store.ListAccessLog(c.Context(), tid, limit)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(out)
+	})
+
 	// ---------- Devices ----------
 
 	api.Get("/devices", func(c *fiber.Ctx) error {
-		devs, err := store.ListDevices(c.Context())
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		devs, err := store.ListDevicesByTenant(c.Context(), tid)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
@@ -92,6 +482,10 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		dev.SetPassword(body.Password)
 		if err := store.RegisterDevice(c.Context(), dev); err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		// Tag device with the caller's tenant.
+		if tid, err := tenantScope(c); err == nil {
+			_ = store.SetDeviceTenant(c.Context(), dev.DeviceID, tid)
 		}
 		// If ISAPI credentials provided, immediately try to reach the device
 		// so the user gets instant feedback in the UI.
@@ -195,7 +589,11 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 	// ---------- Agents ----------
 
 	api.Get("/agents", func(c *fiber.Ctx) error {
-		agents, err := store.ListAgents(c.Context())
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		agents, err := store.ListAgentsByTenant(c.Context(), tid)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
@@ -223,6 +621,9 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		a := Agent{ID: body.ID, Name: body.Name, Token: GenerateAgentToken()}
 		if err := store.CreateAgent(c.Context(), a); err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		if tid, err := tenantScope(c); err == nil {
+			_ = store.SetAgentTenant(c.Context(), a.ID, tid)
 		}
 		return c.JSON(a) // Token is included here ONCE — for the user to copy
 	})
@@ -312,13 +713,21 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 	// ---------- Persons ----------
 
 	api.Get("/persons", func(c *fiber.Ctx) error {
-		out, err := store.ListPersons(c.Context())
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		out, err := store.ListPersonsByTenant(c.Context(), tid)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
 		return c.JSON(out)
 	})
 	api.Post("/persons", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
 		var body Person
 		if err := json.Unmarshal(c.Body(), &body); err != nil || body.Name == "" {
 			return c.Status(400).JSON(fiber.Map{"error": "name required"})
@@ -327,12 +736,12 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 			body.ID = uuid.NewString()
 		}
 		if body.EmployeeNo == "" {
-			// Hik devices require employeeNo to be set; use short version of ID
 			body.EmployeeNo = body.ID[:8]
 		}
 		if err := store.CreatePerson(c.Context(), body); err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
+		_ = store.SetPersonTenant(c.Context(), body.ID, tid)
 		return c.JSON(body)
 	})
 	// ---------- QR token + QR auth ----------
