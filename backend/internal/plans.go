@@ -309,6 +309,18 @@ func (s *Store) EvaluateAccess(ctx context.Context, personID string, when time.T
 		return AccessDecision{Allow: false, PlanID: plan.ID, PlanType: plan.Type, Reason: "plan inactive"}
 	}
 
+	// Rules are specified in HH:MM *local* time as the operator types them
+	// in the UI — but `when` arrives in UTC (the container clock). Convert
+	// to the tenant's configured timezone (default "Asia/Kuala_Lumpur") so
+	// "15:00-15:25" means 15:00-15:25 in the tenant's locale, not UTC.
+	if plan.Type == PlanRuleType {
+		if t, _ := s.GetTenant(ctx, plan.TenantID); t != nil && t.Timezone != "" {
+			if loc, err := time.LoadLocation(t.Timezone); err == nil {
+				when = when.In(loc)
+			}
+		}
+	}
+
 	// Must-exit-before-reenter check: if already inside, this is an "out" event.
 	direction := "in"
 	if plan.MustExitBeforeReentry && pp.Inside {
@@ -366,6 +378,11 @@ func (s *Store) CommitAccess(ctx context.Context, decision AccessDecision, perso
 
 // matchAnyRule returns true if `when` falls into at least one rule's
 // weekday + time window. Weekday bitmask: bit0=Mon..bit6=Sun.
+//
+// Boundaries are [start, end) — start is inclusive, end is EXCLUSIVE. So a
+// rule "15:00–15:15" allows entries from 15:00:00 through 15:14:59 and the
+// gate snaps shut at exactly 15:15:00. This matches the common-sense reading
+// of "the window ends at 15:15".
 func matchAnyRule(rules []PlanRule, when time.Time) (bool, string) {
 	wd := int(when.Weekday())       // 0=Sun..6=Sat
 	wdBit := ((wd + 6) % 7)          // remap so Mon=0
@@ -379,11 +396,11 @@ func matchAnyRule(rules []PlanRule, when time.Time) (bool, string) {
 		e := parseHMM(r.EndTime)
 		// Treat end < start as "crosses midnight" (e.g. 22:00 - 02:00).
 		if e < s {
-			if cur >= s || cur <= e {
+			if cur >= s || cur < e {
 				return true, ruleLabel(r)
 			}
 		} else {
-			if cur >= s && cur <= e {
+			if cur >= s && cur < e {
 				return true, ruleLabel(r)
 			}
 		}

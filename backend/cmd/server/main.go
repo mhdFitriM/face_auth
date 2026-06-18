@@ -39,6 +39,14 @@ func main() {
 	stopPolicy := internal.StartPolicyRunner(store, hub)
 	defer stopPolicy()
 
+	// Pre-flight enforcement: ticks every minute and pushes the correct
+	// userVerifyMode (face vs cardAndPw) to the camera based on each person's
+	// plan rules. Without this the rule check only fires AFTER the door has
+	// already opened — pre-flight makes the door physically refuse outside
+	// the allowed window.
+	stopScheduler := internal.StartPolicyScheduler(store, hub)
+	defer stopScheduler()
+
 	go func() {
 		log.Printf("device push listener on :%s (plain HTTP)", cfg.PushPort)
 		if err := pushApp.Listen(":" + cfg.PushPort); err != nil {

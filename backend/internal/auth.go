@@ -234,6 +234,14 @@ func sessionAuth(store *Store) fiber.Handler {
 		if tok == "" {
 			tok = c.Get("X-Session-Token")
 		}
+		// Fallback: accept the session token via ?token= query parameter so
+		// the browser can load authenticated images / SSE / MJPEG streams in
+		// <img> and <video> tags (which can't attach Authorization headers).
+		// Only used for GET requests so a leaked URL in logs can't be turned
+		// into a mutation.
+		if tok == "" && c.Method() == "GET" {
+			tok = c.Query("token")
+		}
 		if tok == "" {
 			return c.Status(401).JSON(fiber.Map{"error": "not authenticated"})
 		}

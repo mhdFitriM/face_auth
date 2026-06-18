@@ -82,17 +82,22 @@ func processFaceMatch(store *Store, hub *AgentHub, e Event, employeeNo string) {
 		d, _ := store.GetDevice(bg, e.DeviceID)
 		if d != nil && d.IP != "" {
 			client := NewISAPIClientForDevice(d, hub)
+			// Same "expired Valid window" trick as the scheduler — the next
+			// face match will hit a denial sound + on-screen "user invalid"
+			// instead of being silently ignored.
 			hikUser := HikUserInfo{
 				EmployeeNo:     person.EmployeeNo,
 				Name:           person.Name,
 				UserType:       person.PersonType,
 				Gender:         person.Gender,
-				LongTerm:       person.LongTerm,
+				LongTerm:       false,
+				ValidBegin:     "2000-01-01T00:00:00",
+				ValidEnd:       "2000-12-31T23:59:59",
 				DoorRight:      person.DoorRight,
 				PlanTemplate:   person.PlanTemplate,
 				LocalUIRight:   person.PersonRole == "administrator",
 				CheckUser:      person.AttendanceOnly,
-				UserVerifyMode: lockedVerifyMode,
+				UserVerifyMode: unlockedVerifyMode, // keep face matching active so denial is audible
 			}
 			if _, err := client.UpsertUserOnDevice(hikUser); err != nil {
 				log.Printf("[policy] lock %s on %s after deny: %v", employeeNo, e.DeviceID, err)

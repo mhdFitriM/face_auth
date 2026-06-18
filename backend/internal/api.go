@@ -741,8 +741,16 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if body.ID == "" {
 			body.ID = uuid.NewString()
 		}
+		// Force employeeNo to a Hik-compatible form (alphanumeric only, ≤32
+		// chars). If the caller submitted something with hyphens / underscores,
+		// strip them silently — otherwise the device would 400 the very first
+		// EnrolFace call with badJsonContent.FPID.
+		body.EmployeeNo = sanitizeFPID(body.EmployeeNo)
 		if body.EmployeeNo == "" {
-			body.EmployeeNo = body.ID[:8]
+			body.EmployeeNo = sanitizeFPID(body.ID)
+			if len(body.EmployeeNo) > 8 {
+				body.EmployeeNo = body.EmployeeNo[:8]
+			}
 		}
 		if err := store.CreatePerson(c.Context(), body); err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
@@ -1594,8 +1602,12 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if body.ID == "" {
 			body.ID = uuid.NewString()
 		}
+		body.EmployeeNo = sanitizeFPID(body.EmployeeNo)
 		if body.EmployeeNo == "" {
-			body.EmployeeNo = body.ID[:8]
+			body.EmployeeNo = sanitizeFPID(body.ID)
+			if len(body.EmployeeNo) > 8 {
+				body.EmployeeNo = body.EmployeeNo[:8]
+			}
 		}
 		if err := store.CreatePerson(c.Context(), body); err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})

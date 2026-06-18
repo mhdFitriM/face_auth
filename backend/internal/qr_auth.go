@@ -107,12 +107,18 @@ func (q *QRAuth) Scan(ctx context.Context, qrToken, agentID string) (*QRSession,
 	if p.EmployeeNo == "" {
 		return nil, errors.New("person has no employeeNo to authenticate against the device")
 	}
-	devices, err := q.devicesForAgent(ctx, agentID)
+	// Scope to the person's tenant — never touch devices belonging to other
+	// tenants. This is the multi-tenant safety net for QR scanning.
+	tenantID, _ := q.store.GetPersonTenant(ctx, p.ID)
+	if tenantID == "" {
+		return nil, errors.New("person has no tenant — assign one before QR-auth can run")
+	}
+	devices, err := q.devicesForAgent(ctx, tenantID, agentID)
 	if err != nil {
 		return nil, err
 	}
 	if len(devices) == 0 {
-		return nil, errors.New("no devices linked to this agent")
+		return nil, errors.New("no reachable devices for this tenant (no IP / no agent match)")
 	}
 	return q.openSession(ctx, p, devices, "qr", "agent")
 }
@@ -422,22 +428,31 @@ func extractFaceMatchFromEvent(e Event) (string, bool) {
 
 func (q *QRAuth) setUserVerifyMode(ctx context.Context, d *Device, p *Person, mode string) error {
 	client := NewISAPIClientForDevice(d, q.hub)
+	// Always keep verifyMode=face so the camera produces visible/audible
+	// feedback on every attempt. Distinguish allow vs deny via the Valid
+	// window — an expired window makes Hik emit a "user invalid" denial.
+	beginTime := "2020-01-01T00:00:00"
+	endTime := "2037-12-31T23:59:59"
+	if mode == lockedVerifyMode {
+		beginTime = "2000-01-01T00:00:00"
+		endTime = "2000-12-31T23:59:59"
+	}
 	body, _ := json.Marshal(map[string]any{
 		"UserInfo": map[string]any{
-			"employeeNo":   p.EmployeeNo,
-			"name":         p.Name,
-			"userType":     mapDeviceUserType(p.PersonType),
-			"localUIRight": p.PersonRole == "administrator",
-			"userVerifyMode": mode,
-			"gender":       ifElse(p.Gender == "", "unknown", p.Gender),
-			"doorRight":    ifElse(p.DoorRight == "", "1", p.DoorRight),
+			"employeeNo":     sanitizeFPID(p.EmployeeNo),
+			"name":           p.Name,
+			"userType":       mapDeviceUserType(p.PersonType),
+			"localUIRight":   p.PersonRole == "administrator",
+			"userVerifyMode": unlockedVerifyMode,
+			"gender":         ifElse(p.Gender == "", "unknown", p.Gender),
+			"doorRight":      ifElse(p.DoorRight == "", "1", p.DoorRight),
 			"RightPlan": []map[string]any{
 				{"doorNo": 1, "planTemplateNo": ifElse(p.PlanTemplate == "", "1", p.PlanTemplate)},
 			},
 			"Valid": map[string]any{
-				"enable":    !p.LongTerm,
-				"beginTime": validOr(p.ValidBegin, "2020-01-01T00:00:00"),
-				"endTime":   validOr(p.ValidEnd, "2037-12-31T23:59:59"),
+				"enable":    true, // must be true so Hik checks the dates
+				"beginTime": beginTime,
+				"endTime":   endTime,
 				"timeType":  "local",
 			},
 		},
@@ -479,7 +494,7 @@ func (q *QRAuth) SetAllUsersVerifyMode(ctx context.Context, deviceID, mode strin
 	for _, u := range users {
 		body, _ := json.Marshal(map[string]any{
 			"UserInfo": map[string]any{
-				"employeeNo":     u.EmployeeNo,
+				"employeeNo":     sanitizeFPID(u.EmployeeNo),
 				"name":           u.Name,
 				"userType":       firstNonEmpty(u.UserType, "normal"),
 				"localUIRight":   u.LocalUIRight,
@@ -585,19 +600,35 @@ func (q *QRAuth) History() []QRSession {
 	return out
 }
 
-func (q *QRAuth) devicesForAgent(ctx context.Context, agentID string) ([]Device, error) {
-	all, err := q.store.ListDevices(ctx)
+// devicesForAgent returns the devices a QR scan should operate on.
+//
+//   - tenantID: REQUIRED. Multi-tenant scoping — never reach into another
+//     tenant's devices even if the agent or qr-token resolution somehow
+//     leaked an unscoped lookup.
+//   - agentID: optional. If non-empty, restricts to devices linked to that
+//     agent (the LAN bridge that the scanner sent the token through).
+//
+// Devices with no LAN address are skipped — they're typically stubs created
+// in development. Operating on them would crash with "dial tcp :80: connect:
+// connection refused".
+func (q *QRAuth) devicesForAgent(ctx context.Context, tenantID, agentID string) ([]Device, error) {
+	if tenantID == "" {
+		return nil, errors.New("internal: tenantID required for QR device lookup")
+	}
+	all, err := q.store.ListDevicesByTenant(ctx, tenantID)
 	if err != nil {
 		return nil, err
 	}
 	out := []Device{}
 	for _, d := range all {
-		if agentID == "" || d.AgentID == agentID {
-			full, _ := q.store.GetDevice(ctx, d.DeviceID)
-			if full != nil {
-				out = append(out, *full)
-			}
+		if agentID != "" && d.AgentID != agentID {
+			continue
 		}
+		full, _ := q.store.GetDevice(ctx, d.DeviceID)
+		if full == nil || full.IP == "" {
+			continue
+		}
+		out = append(out, *full)
 	}
 	return out, nil
 }

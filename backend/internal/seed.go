@@ -49,6 +49,16 @@ func Bootstrap(ctx context.Context, store *Store) error {
 		envOr("HQ_ADMIN_EMAIL", "hq@faceauth.local"),
 		envOr("DEFAULT_TENANT_EMAIL", "admin@default.local"),
 	)
+	//    d) Strip Hikvision-incompatible characters from existing employee
+	//       numbers. Hik only accepts [A-Za-z0-9]{1,32} for FPID/employeeNo;
+	//       hyphens, dots, underscores all 400 with "badJsonContent.FPID".
+	//       This migration silently fixes legacy demo rows ("acme-gym-003" →
+	//       "acmegym003") so face enrolment starts working immediately.
+	_, _ = store.PG.Exec(ctx, `
+		UPDATE persons
+		SET employee_no = regexp_replace(employee_no, '[^A-Za-z0-9]', '', 'g')
+		WHERE employee_no ~ '[^A-Za-z0-9]'
+	`)
 
 	// 1) HQ admin — uses an auto-generated ID so this stays idempotent even
 	//    after the email default changes in the future.
@@ -200,15 +210,18 @@ func seedDemo(ctx context.Context, store *Store) error {
 
 		// A handful of demo people
 		now := time.Now()
+		// Hik FPID accepts [A-Za-z0-9] only — use a compact slug-prefix + 3-digit
+		// suffix per person. Same shape as a real employee ID.
+		slugClean := sanitizeFPID(d.Slug)
 		people := []struct {
 			name, emp string
 			planID    string
 			credits   int
 		}{
-			{"Alice Tan", d.Slug + "-001", safeID(unlim), 0},
-			{"Bob Chen", d.Slug + "-002", safeID(credit), 10},
-			{"Cara Ng", d.Slug + "-003", safeID(rule), 0},
-			{"David Lim", d.Slug + "-004", safeID(unlim), 0},
+			{"Alice Tan", slugClean + "001", safeID(unlim), 0},
+			{"Bob Chen",  slugClean + "002", safeID(credit), 10},
+			{"Cara Ng",   slugClean + "003", safeID(rule), 0},
+			{"David Lim", slugClean + "004", safeID(unlim), 0},
 		}
 		for _, p := range people {
 			id := "psn_" + uuid.NewString()[:10]

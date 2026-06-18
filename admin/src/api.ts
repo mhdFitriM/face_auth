@@ -124,7 +124,11 @@ export const api = {
   getPerson: (id: string) => req(`/api/persons/${encodeURIComponent(id)}`),
   syncPersons: (deviceId: string) => req(`/api/devices/${encodeURIComponent(deviceId)}/sync-persons`, { method: 'POST' }),
   openDoor: (deviceId: string, door = 1) => req(`/api/devices/${encodeURIComponent(deviceId)}/open-door?door=${door}`, { method: 'POST' }),
-  snapshotUrl: (deviceId: string) => apiUrl(`/api/devices/${encodeURIComponent(deviceId)}/snapshot`),
+  snapshotUrl: (deviceId: string) => {
+    const params = new URLSearchParams()
+    if (auth.token) params.set('token', auth.token)
+    return apiUrl(`/api/devices/${encodeURIComponent(deviceId)}/snapshot${params.toString() ? '?' + params : ''}`)
+  },
 
   enrolFace: async (deviceId: string, personId: string, file: File, opts?: { name?: string; FDID?: string; faceLibType?: string }) => {
     const fd = new FormData()
@@ -164,7 +168,14 @@ export const api = {
   agentDownloads: () => req('/api/agents/downloads'),
   agentDownloadUrl: (file: string) => apiUrl(`/api/agents/downloads/${encodeURIComponent(file)}`),
   rotateQR: (personId: string) => req(`/api/persons/${encodeURIComponent(personId)}/qr/rotate`, { method: 'POST' }),
-  qrImageUrl: (personId: string, size = 256) => apiUrl(`/api/persons/${encodeURIComponent(personId)}/qr.png?size=${size}`),
+  qrImageUrl: (personId: string, size = 256) => {
+    // <img> tags can't attach Authorization headers, so the backend's
+    // sessionAuth middleware also accepts ?token= on GET requests. Inline it
+    // here so the image actually loads when the session is gated.
+    const params = new URLSearchParams({ size: String(size) })
+    if (auth.token) params.set('token', auth.token)
+    return apiUrl(`/api/persons/${encodeURIComponent(personId)}/qr.png?${params.toString()}`)
+  },
   qrAuthSessions: () => req('/api/qr-auth/sessions'),
   qrAuthScan: (qrToken: string, agentId?: string) =>
     req('/api/qr-auth/scan', {
@@ -223,8 +234,11 @@ export const api = {
       headers: { 'X-API-Key': apiKey },
     }),
 
-  mjpegUrl: (deviceId: string, fps = 4) =>
-    apiUrl(`/api/devices/${encodeURIComponent(deviceId)}/stream.mjpg?fps=${fps}`),
+  mjpegUrl: (deviceId: string, fps = 4) => {
+    const params = new URLSearchParams({ fps: String(fps) })
+    if (auth.token) params.set('token', auth.token)
+    return apiUrl(`/api/devices/${encodeURIComponent(deviceId)}/stream.mjpg?${params.toString()}`)
+  },
 
   // ---- FaceApp plugin ----
   faceappGetConfig: () => req('/api/plugins/faceapp/config'),

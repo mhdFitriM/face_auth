@@ -626,6 +626,11 @@ func (c *ISAPIClient) GetSnapshot() ([]byte, string, error) {
 }
 
 func buildUserInfoBody(u HikUserInfo) []byte {
+	// Hikvision's employeeNo follows the same character constraints as FPID
+	// (no hyphens / underscores / dots / spaces). Strip aggressively to match
+	// what EnrolFace sends — otherwise the face record and user record on the
+	// device would have different keys and the device would never match them.
+	u.EmployeeNo = sanitizeFPID(u.EmployeeNo)
 	if u.UserType == "" {
 		u.UserType = "normal"
 	}
@@ -681,6 +686,11 @@ func (c *ISAPIClient) EnrolFace(fdid, faceLibType, fpid, name string, jpeg []byt
 	if faceLibType == "" {
 		faceLibType = "blackFD"
 	}
+	// Hikvision FPID must be [A-Za-z0-9], max ~32 chars. Hyphens, dots, and
+	// underscores trigger "badJsonContent — Exceeding the parameter range
+	// limit ... FPID". Defensive scrub so legacy data with hyphenated employee
+	// numbers still works.
+	fpid = sanitizeFPID(fpid)
 	record := map[string]any{
 		"faceLibType": faceLibType,
 		"FDID":        fdid,
@@ -815,4 +825,25 @@ func buildHikMultipart(parts map[string]struct {
 	}
 	_ = mw.Close()
 	return buf.Bytes(), mw.FormDataContentType()
+}
+
+// sanitizeFPID strips everything except [A-Za-z0-9] and trims to 32 chars.
+// Hikvision rejects FPIDs with hyphens, dots, underscores, spaces, or any
+// non-ASCII-alphanumeric characters. The same constraint applies to
+// `employeeNo` on the UserInfo endpoint, so this helper is reused there.
+func sanitizeFPID(in string) string {
+	if in == "" {
+		return ""
+	}
+	out := make([]byte, 0, len(in))
+	for i := 0; i < len(in); i++ {
+		c := in[i]
+		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+			out = append(out, c)
+		}
+	}
+	if len(out) > 32 {
+		out = out[:32]
+	}
+	return string(out)
 }
