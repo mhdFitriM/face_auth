@@ -118,10 +118,16 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 	})
 
 	// ---------- HQ: tenants + cross-tenant overview ----------
+	//
+	// NOTE: The Group prefix MUST be "/hq" (not "") because Fiber v2 treats
+	// an empty-prefix Group with middleware as a Use() on the parent — every
+	// subsequent route on `api` would inherit requireRole(HQ) and 403 for
+	// tenant_admin users. The /hq prefix scopes the middleware exactly to
+	// /api/hq/* paths.
 
-	hq := api.Group("", requireRole(RoleHQ))
+	hq := api.Group("/hq", requireRole(RoleHQ))
 
-	hq.Get("/hq/tenants", func(c *fiber.Ctx) error {
+	hq.Get("/tenants", func(c *fiber.Ctx) error {
 		ts, err := store.ListTenants(c.Context())
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
@@ -146,7 +152,7 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		return c.JSON(out)
 	})
 
-	hq.Post("/hq/tenants", func(c *fiber.Ctx) error {
+	hq.Post("/tenants", func(c *fiber.Ctx) error {
 		var body struct {
 			Name         string `json:"name"`
 			Slug         string `json:"slug"`
@@ -188,7 +194,7 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		return c.JSON(fiber.Map{"tenant": created, "installedPlans": installed})
 	})
 
-	hq.Put("/hq/tenants/:id", func(c *fiber.Ctx) error {
+	hq.Put("/tenants/:id", func(c *fiber.Ctx) error {
 		cur, _ := store.GetTenant(c.Context(), c.Params("id"))
 		if cur == nil {
 			return c.Status(404).JSON(fiber.Map{"error": "tenant not found"})
@@ -245,14 +251,14 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		return c.JSON(fiber.Map{"installed": installed, "premiseType": key})
 	})
 
-	hq.Delete("/hq/tenants/:id", func(c *fiber.Ctx) error {
+	hq.Delete("/tenants/:id", func(c *fiber.Ctx) error {
 		if err := store.DeleteTenant(c.Context(), c.Params("id")); err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
 		return c.JSON(fiber.Map{"ok": true})
 	})
 
-	hq.Get("/hq/users", func(c *fiber.Ctx) error {
+	hq.Get("/users", func(c *fiber.Ctx) error {
 		us, err := store.ListUsers(c.Context(), c.Query("tenantId"))
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
@@ -260,7 +266,7 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		return c.JSON(us)
 	})
 
-	hq.Post("/hq/users", func(c *fiber.Ctx) error {
+	hq.Post("/users", func(c *fiber.Ctx) error {
 		var body struct {
 			TenantID string `json:"tenantId"`
 			Email    string `json:"email"`
@@ -288,7 +294,7 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		return c.JSON(u)
 	})
 
-	hq.Delete("/hq/users/:id", func(c *fiber.Ctx) error {
+	hq.Delete("/users/:id", func(c *fiber.Ctx) error {
 		if err := store.DeleteUser(c.Context(), c.Params("id")); err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
