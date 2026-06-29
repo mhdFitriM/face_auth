@@ -340,6 +340,62 @@ Query parameters:
 > the browser history. For embedded views, prefer `X-API-Key` via a thin
 > server-side proxy.
 
+### 4.15  Enrolment — capture at the device
+
+Ask the reader to acquire a credential live (user presents face / swipes card /
+presses finger). All return the device's raw response in `response`.
+
+| Endpoint                                       | Method | Purpose                              |
+|------------------------------------------------|--------|--------------------------------------|
+| `/api/v1/devices/{id}/capture/face`            | POST   | Capture a live face (`?infrared=true` to also grab IR) |
+| `/api/v1/devices/{id}/capture/card`            | POST   | Wait for a card swipe, return its number |
+| `/api/v1/devices/{id}/capture/fingerprint`     | POST   | Capture a fingerprint (`?finger=N`)  |
+
+### 4.16  Cards & fingerprints
+
+| Endpoint                                          | Method | Body / params                                   |
+|---------------------------------------------------|--------|-------------------------------------------------|
+| `/api/v1/devices/{id}/cards`                      | POST   | `{employeeNo, cardNo, cardType?, mode?}` (`mode:"modify"` to update) |
+| `/api/v1/devices/{id}/cards/{cardNo}`             | DELETE | —                                               |
+| `/api/v1/devices/{id}/fingerprints`               | POST   | `{employeeNo, fingerPrintID?, fingerData}` (base64 template) |
+| `/api/v1/devices/{id}/fingerprints/{employeeNo}`  | DELETE | `?finger=N` for one print, omit for all         |
+
+### 4.17  Health & access schedules
+
+| Endpoint                                       | Method | Purpose                                          |
+|------------------------------------------------|--------|--------------------------------------------------|
+| `/api/v1/devices/{id}/work-status`             | GET    | Door / lock / tamper / battery / capacity (`raw`) |
+| `/api/v1/devices/{id}/week-plan/{planNo}`      | PUT    | `{days:[{week,enable,begin,end}, ...]}` per-weekday allow windows |
+| `/api/v1/devices/{id}/plan-template/{tplNo}`   | PUT    | `{name?, weekPlanNo}` — bind a template to a week plan |
+
+A week plan defines time windows → a plan template references it → a person's
+plan template points at the template. Outside the window the device denies entry.
+
+### 4.18  QR-via-camera (device-native)
+
+| Endpoint                                  | Method | Purpose                                              |
+|-------------------------------------------|--------|------------------------------------------------------|
+| `/api/v1/devices/{id}/qr-capability`      | GET    | `{supported, raw}` — does the camera read QR?        |
+| `/api/v1/devices/{id}/qr-scan`            | POST   | `{enable}` — toggle camera QR scanning               |
+
+> Hardware-gated: many terminals report `supported:false`. When enabled, the
+> user's QR must encode their employee number so the device matches it.
+
+### 4.19  Intercom (two-way audio)
+
+| Endpoint                                     | Method | Purpose                                  |
+|----------------------------------------------|--------|------------------------------------------|
+| `/api/v1/devices/{id}/intercom/channels`     | GET    | Two-way audio channel capabilities       |
+| `/api/v1/devices/{id}/intercom/open`         | POST   | Open the intercom channel (`?channel=N`) |
+| `/api/v1/devices/{id}/intercom/close`        | POST   | Close the intercom channel               |
+
+> Control plane only: this opens/closes the device's audio channel. Carrying
+> microphone/speaker audio in the browser is a separate media-pipeline follow-up.
+
+> ⚠️ All of §4.15–4.19 return the device's **raw** response and depend on the
+> device firmware; field names vary. Endpoints work over any reach mode
+> (direct / agent / OTAP), though binary pulls (snapshot) need direct/agent.
+
 ---
 
 ## 5. End-to-end example (face-only mode)

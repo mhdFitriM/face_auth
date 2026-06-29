@@ -39,7 +39,7 @@ func LoadConfig() Config {
 		MinIOPublicBase: getenv("MINIO_PUBLIC_BASE", ""),
 		NoAuthMode:      getenv("NO_AUTH_MODE", "true") == "true",
 		DefaultPassword: getenv("DEVICE_DEFAULT_PASSWORD", ""),
-		CommandInterval: atoiDefault(getenv("COMMAND_INTERVAL", "5"), 5),
+		CommandInterval: atoiDefault(getenv("COMMAND_INTERVAL", "2"), 2),
 		LogLevel:        getenv("LOG_LEVEL", "info"),
 		EventCallbackIP: getenv("EVENT_CALLBACK_IP", ""),
 		PublicPushURL:   getenv("PUBLIC_PUSH_URL", ""),

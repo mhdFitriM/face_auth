@@ -216,6 +216,7 @@ CREATE TABLE IF NOT EXISTS agents (
 
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS agent_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_devices_agent ON devices(agent_id);
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS reach TEXT DEFAULT '';
 
 -- Per-device override for the "require QR before face" toggle.
 -- NULL = follow the global setting; TRUE / FALSE = explicit override.
@@ -319,6 +320,15 @@ CREATE TABLE IF NOT EXISTS access_log (
 CREATE INDEX IF NOT EXISTS idx_access_log_tenant_time ON access_log(tenant_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_access_log_person_time ON access_log(person_id, created_at DESC);
 
+-- API keys for third-party callers of /api/v1/*.
+CREATE TABLE IF NOT EXISTS api_keys (
+    id TEXT PRIMARY KEY,
+    name TEXT DEFAULT '',
+    key TEXT NOT NULL UNIQUE,
+    last_used_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- Scope existing tables by tenant. NULL = legacy data; the seed will
 -- re-assign every NULL row to the "default" tenant on first run.
 ALTER TABLE devices  ADD COLUMN IF NOT EXISTS tenant_id TEXT;
@@ -335,15 +345,6 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value JSONB NOT NULL,
     updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- API keys for third-party callers of /api/v1/*.
-CREATE TABLE IF NOT EXISTS api_keys (
-    id TEXT PRIMARY KEY,
-    name TEXT DEFAULT '',
-    key TEXT NOT NULL UNIQUE,
-    last_used_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 `
 
@@ -392,12 +393,12 @@ func (s *Store) GetDevice(ctx context.Context, deviceID string) (*Device, error)
 	row := s.PG.QueryRow(ctx, `
 		SELECT device_id, name, salt, challenge, iterations, username, digest_type, is_auth,
 		       ip, port, use_https, isapi_username, isapi_password, fdid, face_lib_type,
-		       online, last_seen, model, firmware, COALESCE(agent_id,''), created_at
+		       online, last_seen, model, firmware, COALESCE(agent_id,''), COALESCE(reach,''), created_at
 		FROM devices WHERE device_id=$1`, deviceID)
 	d := &Device{}
 	err := row.Scan(&d.DeviceID, &d.Name, &d.Salt, &d.Challenge, &d.Iterations, &d.Username, &d.DigestType,
 		&d.IsAuth, &d.IP, &d.Port, &d.UseHTTPS, &d.ISAPIUsername, &d.ISAPIPassword, &d.FDID, &d.FaceLibType,
-		&d.Online, &d.LastSeen, &d.Model, &d.Firmware, &d.AgentID, &d.CreatedAt)
+		&d.Online, &d.LastSeen, &d.Model, &d.Firmware, &d.AgentID, &d.Reach, &d.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -417,7 +418,7 @@ func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 	rows, err := s.PG.Query(ctx, `
 		SELECT device_id, name, username, digest_type, is_auth,
 		       ip, port, use_https, isapi_username, fdid, face_lib_type,
-		       online, last_seen, model, firmware, COALESCE(agent_id,''), created_at
+		       online, last_seen, model, firmware, COALESCE(agent_id,''), COALESCE(reach,''), created_at
 		FROM devices ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -428,7 +429,7 @@ func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 		var d Device
 		if err := rows.Scan(&d.DeviceID, &d.Name, &d.Username, &d.DigestType, &d.IsAuth,
 			&d.IP, &d.Port, &d.UseHTTPS, &d.ISAPIUsername, &d.FDID, &d.FaceLibType,
-			&d.Online, &d.LastSeen, &d.Model, &d.Firmware, &d.AgentID, &d.CreatedAt); err != nil {
+			&d.Online, &d.LastSeen, &d.Model, &d.Firmware, &d.AgentID, &d.Reach, &d.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, d)
@@ -450,15 +451,16 @@ func (s *Store) RegisterDevice(ctx context.Context, d Device) error {
 		d.FaceLibType = "blackFD"
 	}
 	_, err := s.PG.Exec(ctx, `
-		INSERT INTO devices (device_id, name, password, ip, port, use_https, isapi_username, isapi_password, fdid, face_lib_type, agent_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULLIF($11,''))
+		INSERT INTO devices (device_id, name, password, ip, port, use_https, isapi_username, isapi_password, fdid, face_lib_type, agent_id, reach)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULLIF($11,''), $12)
 		ON CONFLICT (device_id) DO UPDATE
 		SET name=$2, password=COALESCE(NULLIF($3,''), devices.password),
 		    ip=$4, port=$5, use_https=$6,
 		    isapi_username=$7, isapi_password=COALESCE(NULLIF($8,''), devices.isapi_password),
 		    fdid=$9, face_lib_type=$10,
-		    agent_id=NULLIF($11,'')
-	`, d.DeviceID, d.Name, d.Password(), d.IP, d.Port, d.UseHTTPS, d.ISAPIUsername, d.ISAPIPassword, d.FDID, d.FaceLibType, d.AgentID)
+		    agent_id=NULLIF($11,''),
+		    reach=$12
+	`, d.DeviceID, d.Name, d.Password(), d.IP, d.Port, d.UseHTTPS, d.ISAPIUsername, d.ISAPIPassword, d.FDID, d.FaceLibType, d.AgentID, d.Reach)
 	return err
 }
 
@@ -892,6 +894,13 @@ func (s *Store) InsertEvent(ctx context.Context, e Event) (int64, error) {
 	e.ReceivedAt = time.Now()
 	s.publishEvent(e)
 	return id, nil
+}
+
+// UpdateEventImage attaches an image key to an existing event (used by the
+// snapshot-on-event capture, which fetches the picture asynchronously).
+func (s *Store) UpdateEventImage(ctx context.Context, id int64, imageKey string) error {
+	_, err := s.PG.Exec(ctx, `UPDATE events SET image_key=$1 WHERE id=$2`, imageKey, id)
+	return err
 }
 
 func (s *Store) ListEvents(ctx context.Context, deviceID string, limit int) ([]Event, error) {
