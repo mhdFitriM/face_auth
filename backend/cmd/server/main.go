@@ -31,9 +31,9 @@ func main() {
 		internal.StartDebugListener(dp)
 	}
 
-	hub := internal.NewAgentHub()
+	hub := internal.NewAgentHub(store)
 
-	pushApp := internal.NewPushServer(store, cfg)
+	pushApp := internal.NewPushServer(store, cfg, hub)
 	apiApp := internal.NewAPIServer(store, cfg, hub)
 
 	stopPolicy := internal.StartPolicyRunner(store, hub)

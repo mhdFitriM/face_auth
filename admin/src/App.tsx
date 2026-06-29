@@ -123,6 +123,10 @@ function LoginScreen({ onLoggedIn }: { onLoggedIn: () => void }) {
 function Dashboard({ me, onMe, onLogout, theme, setTheme }: { me: any; onMe: (m: any) => void; onLogout: () => void; theme: 'light' | 'dark'; setTheme: (t: 'light' | 'dark') => void }) {
   const isHQ = me.user?.role === 'hq_admin'
   const [tab, setTab] = useState<Tab>(isHQ ? 'hq' : 'devices')
+  // When the user clicks "Enrol face" on a person, jump to the Enrol tab with
+  // that person preselected. Consumed (and cleared) by EnrolTab on mount.
+  const [enrolPersonId, setEnrolPersonId] = useState('')
+  const goEnrol = (personId: string) => { setEnrolPersonId(personId); setTab('enrol') }
 
   // Hard guard: if the role changed mid-session (e.g. HQ admin logs out and a
   // tenant admin logs in on the same browser), force the active tab back to a
@@ -265,8 +269,8 @@ function Dashboard({ me, onMe, onLogout, theme, setTheme }: { me: any; onMe: (m:
         <main>
           {tab === 'devices' && <DevicesTab />}
           {tab === 'live' && <LiveTab />}
-          {tab === 'persons' && <PersonsTab />}
-          {tab === 'enrol' && <EnrolTab />}
+          {tab === 'persons' && <PersonsTab onEnrol={goEnrol} />}
+          {tab === 'enrol' && <EnrolTab initialPersonId={enrolPersonId} onConsumeInitial={() => setEnrolPersonId('')} />}
           {tab === 'events' && <EventsTab />}
           {tab === 'qr-auth' && <QRAuthTab />}
           {tab === 'agents' && <AgentsTab />}
@@ -291,6 +295,11 @@ function DevicesTab() {
   const [devices, setDevices] = useState<any[]>([])
   const [editing, setEditing] = useState<any | null>(null)
   const [creating, setCreating] = useState(false)
+  const [wifiDevice, setWifiDevice] = useState<any | null>(null)
+  const [qrDevice, setQrDevice] = useState<any | null>(null)
+  const [healthDevice, setHealthDevice] = useState<any | null>(null)
+  const [scheduleDevice, setScheduleDevice] = useState<any | null>(null)
+  const [liveDevice, setLiveDevice] = useState<any | null>(null)
   const [search, setSearch] = useState('')
   const [err, setErr] = useState('')
 
@@ -374,9 +383,11 @@ function DevicesTab() {
                     </div>
                   </td>
                   <td data-label="Address">
-                    {d.ip
-                      ? <span className="mono small">{d.useHttps ? 'https' : 'http'}://{d.ip}:{d.port}</span>
-                      : <span className="muted">—</span>}
+                    {d.reach === 'otap'
+                      ? <span className="badge mono small">OTAP push</span>
+                      : d.ip
+                        ? <span className="mono small">{d.useHttps ? 'https' : 'http'}://{d.ip}:{d.port}</span>
+                        : <span className="muted">—</span>}
                   </td>
                   <td data-label="Model">
                     <div className="cell-stack">
@@ -393,8 +404,13 @@ function DevicesTab() {
                   <td data-label="Actions" className="ta-right">
                     <div className="cell-actions">
                       <button className="btn-ghost" onClick={() => openDoor(d.deviceID)}>Open door</button>
+                      <button className="btn-ghost" onClick={() => setLiveDevice(d)}>Live</button>
                       <button className="btn-ghost" onClick={() => probe(d.deviceID)}>Probe</button>
                       <button className="btn-ghost" onClick={() => setupAlarm(d.deviceID)}>Events</button>
+                      <button className="btn-ghost" onClick={() => setWifiDevice(d)}>Wi-Fi</button>
+                      <button className="btn-ghost" onClick={() => setQrDevice(d)}>Camera QR</button>
+                      <button className="btn-ghost" onClick={() => setHealthDevice(d)}>Health</button>
+                      <button className="btn-ghost" onClick={() => setScheduleDevice(d)}>Schedule</button>
                       <button className="btn-ghost" onClick={() => setEditing(d)}>Edit</button>
                       <button className="btn-danger" onClick={() => del(d.deviceID)}>Delete</button>
                     </div>
@@ -411,7 +427,297 @@ function DevicesTab() {
 
       {creating && <DeviceModal onClose={() => setCreating(false)} onSaved={() => { setCreating(false); load() }} />}
       {editing && <DeviceModal device={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load() }} />}
+      {wifiDevice && <WifiModal device={wifiDevice} onClose={() => setWifiDevice(null)} />}
+      {qrDevice && <QRCameraModal device={qrDevice} onClose={() => setQrDevice(null)} />}
+      {healthDevice && <HealthModal device={healthDevice} onClose={() => setHealthDevice(null)} />}
+      {scheduleDevice && <ScheduleModal device={scheduleDevice} onClose={() => setScheduleDevice(null)} />}
+      {liveDevice && <LiveViewModal device={liveDevice} onClose={() => setLiveDevice(null)} />}
     </>
+  )
+}
+
+// Live view (MJPEG re-multiplexed snapshots) + snapshot grab + intercom control.
+function LiveViewModal({ device, onClose }: { device: any; onClose: () => void }) {
+  const id = device.deviceID
+  const [intercom, setIntercom] = useState<'idle' | 'opening' | 'open' | 'closing'>('idle')
+  const [msg, setMsg] = useState('')
+  const [err, setErr] = useState('')
+
+  const openIntercom = async () => {
+    setIntercom('opening'); setErr(''); setMsg('')
+    try { await api.intercomOpen(id); setIntercom('open'); setMsg('Intercom channel open. (Audio media pipeline is a follow-up — this opens the device channel.)') }
+    catch (e: any) { setErr(String(e)); setIntercom('idle') }
+  }
+  const closeIntercom = async () => {
+    setIntercom('closing'); setErr('')
+    try { await api.intercomClose(id); setIntercom('idle'); setMsg('Intercom channel closed.') }
+    catch (e: any) { setErr(String(e)); setIntercom('open') }
+  }
+  // Close the channel on unmount if it was left open.
+  useEffect(() => () => { if (intercom === 'open') api.intercomClose(id).catch(() => {}) }, [intercom, id])
+
+  return (
+    <Modal title={`Live — ${device.name || id}`} onClose={onClose}>
+      <div className="live-frame" style={{ marginBottom: 12 }}>
+        <img className="snap-img" alt="live" src={api.mjpegUrl(id, 6)} />
+      </div>
+      <div className="form-row" style={{ gap: 8, flexWrap: 'wrap' }}>
+        <a className="btn-ghost" href={`${api.snapshotUrl(id)}${api.snapshotUrl(id).includes('?') ? '&' : '?'}t=${Date.now()}`} target="_blank" rel="noreferrer">Open snapshot</a>
+        {intercom === 'open'
+          ? <button type="button" className="btn-danger" onClick={closeIntercom} disabled={intercom !== 'open'}>Hang up</button>
+          : <button type="button" className="btn-primary" onClick={openIntercom} disabled={intercom === 'opening'}>{intercom === 'opening' ? 'Calling…' : 'Intercom call'}</button>}
+      </div>
+      <p className="muted small" style={{ marginTop: 8 }}>
+        Live view streams re-multiplexed snapshots (MJPEG). Intercom opens the device's two-way audio channel;
+        carrying microphone/speaker audio in the browser is a follow-up that needs the device online.
+      </p>
+      {msg && <div className="muted small">{msg}</div>}
+      {err && <div className="err">{err}</div>}
+    </Modal>
+  )
+}
+
+// Device health — polls AcsWorkStatus.
+function HealthModal({ device, onClose }: { device: any; onClose: () => void }) {
+  const id = device.deviceID
+  const [raw, setRaw] = useState('')
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const load = async () => {
+    setBusy(true); setErr('')
+    try { const r = await api.workStatus(id); setRaw(r.raw || '') }
+    catch (e: any) { setErr(String(e)) } finally { setBusy(false) }
+  }
+  useEffect(() => { load() }, [])
+
+  // Pull a few well-known fields out of the raw status for a friendly summary.
+  let parsed: any = null
+  try { parsed = raw ? JSON.parse(raw).AcsWorkStatus || JSON.parse(raw) : null } catch {}
+
+  return (
+    <Modal title={`Health — ${device.name || id}`} onClose={onClose}>
+      <div className="form-row" style={{ marginBottom: 10 }}>
+        <button type="button" className="btn-ghost" disabled={busy} onClick={load}>{busy ? 'Refreshing…' : 'Refresh'}</button>
+      </div>
+      {parsed && (
+        <div>
+          {[
+            ['Door', parsed.doorLockStatus ?? parsed.doorStatus],
+            ['Magnetic', parsed.doorStatus ?? parsed.magneticStatus],
+            ['Tamper', parsed.antiSneakStatus ?? parsed.caseStatus ?? parsed.tamperStatus],
+            ['Battery', parsed.batteryVoltage ?? parsed.battery],
+            ['Capacity used', parsed.usedFaceNum ?? parsed.faceNum],
+          ].filter(([, v]) => v !== undefined).map(([label, v]) => (
+            <div className="detail-row" key={String(label)}>
+              <span className="detail-label">{label}</span>
+              <span className="detail-value">{String(v)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {err && <div className="err">{err}</div>}
+      {raw && <details style={{ marginTop: 10 }} open={!parsed}><summary className="muted small">Raw work status</summary><pre className="result">{raw}</pre></details>}
+    </Modal>
+  )
+}
+
+const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+
+// Access schedule editor — one allow window per weekday → week plan + template.
+function ScheduleModal({ device, onClose }: { device: any; onClose: () => void }) {
+  const id = device.deviceID
+  const [planNo, setPlanNo] = useState(1)
+  const [tplNo, setTplNo] = useState(1)
+  const [days, setDays] = useState(() => WEEKDAYS.map((w) => ({ week: w, enable: true, begin: '09:00:00', end: '18:00:00' })))
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<any>(null)
+  const [err, setErr] = useState('')
+
+  const setDay = (i: number, patch: Partial<{ enable: boolean; begin: string; end: string }>) =>
+    setDays((prev) => prev.map((d, j) => (j === i ? { ...d, ...patch } : d)))
+
+  const save = async () => {
+    setBusy(true); setErr(''); setResult(null)
+    try {
+      const wp = await api.setWeekPlan(id, planNo, days)
+      const tpl = await api.setPlanTemplate(id, tplNo, { weekPlanNo: planNo, name: `tpl${tplNo}` })
+      setResult({ weekPlan: wp, planTemplate: tpl })
+    } catch (e: any) { setErr(String(e)) } finally { setBusy(false) }
+  }
+
+  return (
+    <Modal title={`Access schedule — ${device.name || id}`} onClose={onClose}>
+      <p className="card-sub">
+        Set the allow window per weekday. This writes week plan #{planNo} and plan template #{tplNo} to the device.
+        Assign template #{tplNo} to a person (their plan template) to enforce it — outside the window the device denies entry.
+      </p>
+      <div className="form-row" style={{ gap: 8 }}>
+        <Field label="Week plan #"><input type="number" min={1} value={planNo} onChange={(e) => setPlanNo(parseInt(e.target.value || '1', 10))} /></Field>
+        <Field label="Template #"><input type="number" min={1} value={tplNo} onChange={(e) => setTplNo(parseInt(e.target.value || '1', 10))} /></Field>
+      </div>
+      <table className="table" style={{ marginTop: 8 }}>
+        <thead><tr><th>Day</th><th>Allow</th><th>From</th><th>To</th></tr></thead>
+        <tbody>
+          {days.map((d, i) => (
+            <tr key={d.week}>
+              <td>{d.week.slice(0, 3)}</td>
+              <td><input type="checkbox" checked={d.enable} onChange={(e) => setDay(i, { enable: e.target.checked })} /></td>
+              <td><input type="time" step={1} value={d.begin.slice(0, 5)} disabled={!d.enable} onChange={(e) => setDay(i, { begin: `${e.target.value}:00` })} /></td>
+              <td><input type="time" step={1} value={d.end.slice(0, 5)} disabled={!d.enable} onChange={(e) => setDay(i, { end: `${e.target.value}:00` })} /></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="form-actions" style={{ marginTop: 12 }}>
+        <button type="button" className="btn-ghost" onClick={onClose}>Close</button>
+        <button type="button" className="btn-primary" disabled={busy} onClick={save}>{busy ? 'Writing…' : 'Write schedule to device'}</button>
+      </div>
+      {err && <div className="err">{err}</div>}
+      {result && <pre className="result">{JSON.stringify(result, null, 2)}</pre>}
+    </Modal>
+  )
+}
+
+// Probe + toggle device-native QR-code scanning (user shows QR to the device camera).
+function QRCameraModal({ device, onClose }: { device: any; onClose: () => void }) {
+  const id = device.deviceID
+  const [busy, setBusy] = useState<'' | 'probe' | 'on' | 'off'>('')
+  const [supported, setSupported] = useState<boolean | null>(null)
+  const [raw, setRaw] = useState('')
+  const [result, setResult] = useState<any>(null)
+  const [err, setErr] = useState('')
+
+  const probe = async () => {
+    setBusy('probe'); setErr(''); setResult(null)
+    try {
+      const r = await api.qrCapability(id)
+      setSupported(!!r.supported); setRaw(r.raw || '')
+    } catch (e: any) { setErr(String(e)) } finally { setBusy('') }
+  }
+
+  useEffect(() => { probe() }, [])
+
+  const toggle = async (enable: boolean) => {
+    setBusy(enable ? 'on' : 'off'); setErr(''); setResult(null)
+    try { setResult(await api.setQrScan(id, enable)) }
+    catch (e: any) { setErr(String(e)) } finally { setBusy('') }
+  }
+
+  return (
+    <Modal title={`Camera QR — ${device.name || id}`} onClose={onClose}>
+      <p className="card-sub">
+        Let the device's own camera read a user's QR code and authenticate — no separate USB scanner.
+        Whether this works depends on the device firmware.
+      </p>
+      <div className="detail-row">
+        <span className="detail-label">Firmware support</span>
+        <span className="detail-value">
+          {busy === 'probe' ? 'Probing…'
+            : supported === null ? '—'
+            : supported ? <span className="badge ok">supported</span>
+            : <span className="badge">not supported</span>}
+        </span>
+      </div>
+      {supported === false && (
+        <div className="err">This device's firmware reports no camera QR support. Users must use the USB scanner or another method.</div>
+      )}
+      <div className="form-row" style={{ gap: 8, marginTop: 12 }}>
+        <button type="button" className="btn-ghost" disabled={!!busy} onClick={probe}>Re-probe</button>
+        <button type="button" className="btn-primary" disabled={!!busy || supported === false} onClick={() => toggle(true)}>
+          {busy === 'on' ? 'Enabling…' : 'Enable camera QR'}
+        </button>
+        <button type="button" className="btn-ghost" disabled={!!busy} onClick={() => toggle(false)}>
+          {busy === 'off' ? 'Disabling…' : 'Disable'}
+        </button>
+      </div>
+      <p className="muted small" style={{ marginTop: 10 }}>
+        After enabling, the user's QR must encode their employee number so the device can match it to the enrolled user.
+      </p>
+      {err && <div className="err">{err}</div>}
+      {result && <pre className="result">{JSON.stringify(result, null, 2)}</pre>}
+      {raw && <details style={{ marginTop: 10 }}><summary className="muted small">Raw capabilities</summary><pre className="result">{raw}</pre></details>}
+    </Modal>
+  )
+}
+
+function WifiModal({ device, onClose }: { device: any; onClose: () => void }) {
+  const id = device.deviceID
+  const [ssid, setSsid] = useState('')
+  const [password, setPassword] = useState('')
+  const [securityMode, setSecurityMode] = useState('WPA2-personal')
+  const [ifId, setIfId] = useState('')
+  const [aps, setAps] = useState<any[]>([])
+  const [current, setCurrent] = useState('')
+  const [busy, setBusy] = useState<'' | 'load' | 'scan' | 'save'>('')
+  const [msg, setMsg] = useState('')
+  const [err, setErr] = useState('')
+
+  const loadCurrent = async () => {
+    setBusy('load'); setErr(''); setMsg('')
+    try {
+      const r = await api.getWifi(id, ifId)
+      setCurrent(r.raw || '')
+      if (!r.ok) setErr(r.error || 'Could not read Wi-Fi config')
+    } catch (e: any) { setErr(String(e)) } finally { setBusy('') }
+  }
+  const scan = async () => {
+    setBusy('scan'); setErr(''); setMsg('')
+    try {
+      const r = await api.scanWifi(id, ifId)
+      if (r.ok) setAps(r.accessPoints || [])
+      else setErr(r.error || 'Scan failed (firmware may not support scanning)')
+    } catch (e: any) { setErr(String(e)) } finally { setBusy('') }
+  }
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!ssid) { setErr('SSID required'); return }
+    if (!confirm(`Point ${id} at Wi-Fi network "${ssid}"? The device may drop off its current connection while it reconnects.`)) return
+    setBusy('save'); setErr(''); setMsg('')
+    try {
+      const r = await api.setWifi(id, { ssid, password, securityMode, ifId: ifId || undefined })
+      if (r.ok) setMsg('Saved. The device is switching networks — give it up to a minute, then Probe.')
+      else setErr(r.error || 'Failed to set Wi-Fi')
+    } catch (e: any) { setErr(String(e)) } finally { setBusy('') }
+  }
+
+  return (
+    <Modal title={`Wi-Fi · ${device.name || id}`} onClose={onClose}>
+      <form onSubmit={save} className="form">
+        <Field label="Network (SSID)" hint="pick from a scan or type it in">
+          <input value={ssid} onChange={(e) => setSsid(e.target.value)} placeholder="OfficeWiFi" required list="wifi-scan-list" />
+          {aps.length > 0 && (
+            <datalist id="wifi-scan-list">
+              {aps.map((ap, i) => <option key={i} value={ap.ssid}>{ap.securityMode || ''} {ap.signalStrength ? `· ${ap.signalStrength}%` : ''}</option>)}
+            </datalist>
+          )}
+        </Field>
+        <Field label="Password">
+          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="(leave blank for open networks)" />
+        </Field>
+        <div className="form-row">
+          <Field label="Security" grow={2}>
+            <select value={securityMode} onChange={(e) => setSecurityMode(e.target.value)}>
+              <option value="WPA2-personal">WPA2-Personal</option>
+              <option value="WPA-personal">WPA-Personal</option>
+              <option value="WEP">WEP</option>
+              <option value="disable">Open (none)</option>
+            </select>
+          </Field>
+          <Field label="Interface" grow={1} hint="blank = auto">
+            <input value={ifId} onChange={(e) => setIfId(e.target.value)} placeholder="auto" />
+          </Field>
+        </div>
+        <div className="form-actions">
+          <button type="button" className="btn-ghost" onClick={scan} disabled={busy !== ''}>{busy === 'scan' ? 'Scanning…' : 'Scan'}</button>
+          <button type="button" className="btn-ghost" onClick={loadCurrent} disabled={busy !== ''}>{busy === 'load' ? 'Reading…' : 'Read current'}</button>
+          <button type="submit" className="btn-primary" disabled={busy !== ''}>{busy === 'save' ? 'Saving…' : 'Connect'}</button>
+        </div>
+      </form>
+      {msg && <div className="ok-banner">{msg}</div>}
+      {err && <div className="err">{err}</div>}
+      {current && <pre className="result">{current}</pre>}
+    </Modal>
   )
 }
 
@@ -423,10 +729,11 @@ function DeviceModal({ device, onClose, onSaved }: { device?: any; onClose: () =
     isapiUsername: device.isapiUsername || 'admin', isapiPassword: '',
     fdid: device.fdid || '1', faceLibType: device.faceLibType || 'blackFD',
     agentId: device.agentId || '',
+    reach: device.reach || (device.agentId ? 'agent' : 'direct'),
   } : {
     deviceId: '', name: '', ip: '', port: 80, useHttps: false,
     isapiUsername: 'admin', isapiPassword: '',
-    fdid: '1', faceLibType: 'blackFD', agentId: '',
+    fdid: '1', faceLibType: 'blackFD', agentId: '', reach: 'direct',
   })
   const [agents, setAgents] = useState<any[]>([])
   const [busy, setBusy] = useState(false)
@@ -441,7 +748,7 @@ function DeviceModal({ device, onClose, onSaved }: { device?: any; onClose: () =
     try {
       const r = await api.registerDevice(form)
       setProbe(r.probe)
-      if (r.probe?.reachable || editing) {
+      if (r.probe?.reachable || editing || form.reach === 'otap') {
         onSaved()
       }
     } catch (e: any) { setErr(String(e)) } finally { setBusy(false) }
@@ -456,9 +763,23 @@ function DeviceModal({ device, onClose, onSaved }: { device?: any; onClose: () =
         <Field label="Display name">
           <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Front Door" />
         </Field>
+        <Field label="Reach via" hint="how the platform sends commands to this device">
+          <select value={form.reach || 'direct'} onChange={(e) => setForm({ ...form, reach: e.target.value, agentId: e.target.value === 'agent' ? form.agentId : '' })}>
+            <option value="direct">Direct ISAPI (same LAN)</option>
+            <option value="agent">Via agent (cloud → LAN bridge)</option>
+            <option value="otap">OTAP push (device dials out — no agent)</option>
+          </select>
+        </Field>
+        {form.reach === 'otap' && (
+          <p className="muted small">
+            The device dials out to the platform's push listener; no IP or agent is needed.
+            Make sure the device's PUSHCfg points at this server and it has authenticated (AuthInfo/Login).
+            Commands are delivered on the device's next poll.
+          </p>
+        )}
         <div className="form-row">
           <Field label="Device IP" grow={3}>
-            <input value={form.ip} onChange={(e) => setForm({ ...form, ip: e.target.value })} placeholder="192.168.100.64" required />
+            <input value={form.ip} onChange={(e) => setForm({ ...form, ip: e.target.value })} placeholder="192.168.100.64" required={form.reach !== 'otap'} disabled={form.reach === 'otap'} />
           </Field>
           <Field label="Port" grow={1}>
             <input type="number" value={form.port} onChange={(e) => setForm({ ...form, port: parseInt(e.target.value || '80', 10) })} />
@@ -480,14 +801,16 @@ function DeviceModal({ device, onClose, onSaved }: { device?: any; onClose: () =
           <Field label="FDID"><input value={form.fdid} onChange={(e) => setForm({ ...form, fdid: e.target.value })} /></Field>
           <Field label="Face lib type"><input value={form.faceLibType} onChange={(e) => setForm({ ...form, faceLibType: e.target.value })} /></Field>
         </div>
-        <Field label="Reach via" hint="blank = direct LAN; pick an agent for cloud→LAN bridging">
-          <select value={form.agentId || ''} onChange={(e) => setForm({ ...form, agentId: e.target.value })}>
-            <option value="">Direct ISAPI</option>
-            {agents.map((a) => (
-              <option key={a.id} value={a.id}>{a.name || a.id} {a.online ? '· online' : '· offline'}</option>
-            ))}
-          </select>
-        </Field>
+        {form.reach === 'agent' && (
+          <Field label="Agent" hint="which on-prem agent bridges to this device">
+            <select value={form.agentId || ''} onChange={(e) => setForm({ ...form, agentId: e.target.value })}>
+              <option value="">— select an agent —</option>
+              {agents.map((a) => (
+                <option key={a.id} value={a.id}>{a.name || a.id} {a.online ? '· online' : '· offline'}</option>
+              ))}
+            </select>
+          </Field>
+        )}
         <div className="form-actions">
           <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
           <button type="submit" className="btn-primary" disabled={busy}>{busy ? 'Saving…' : (editing ? 'Save changes' : 'Save & probe')}</button>
@@ -583,7 +906,7 @@ function LiveTab() {
 
 // ===================== Persons =====================
 
-function PersonsTab() {
+function PersonsTab({ onEnrol }: { onEnrol: (personId: string) => void }) {
   const [persons, setPersons] = useState<any[]>([])
   const [devices, setDevices] = useState<any[]>([])
   const [search, setSearch] = useState('')
@@ -597,7 +920,13 @@ function PersonsTab() {
   const load = () => api.listPersons().then((p) => setPersons(p || [])).catch(() => setPersons([]))
   useEffect(() => {
     load()
-    api.listDevices().then((d) => setDevices(d || [])).catch(() => setDevices([]))
+    api.listDevices().then((d) => {
+      const list = d || []
+      setDevices(list)
+      // Convenience: if there's exactly one device, preselect it so "Sync
+      // from device" is immediately usable (the button is disabled otherwise).
+      if (list.length === 1) setDeviceFilter(list[0].deviceID)
+    }).catch(() => setDevices([]))
   }, [])
 
   const sync = async () => {
@@ -652,7 +981,7 @@ function PersonsTab() {
           </select>
         </div>
         <div className="toolbar-right">
-          <button className="btn-ghost" onClick={sync} disabled={syncing || !deviceFilter}>{syncing ? 'Syncing…' : 'Sync from device'}</button>
+          <button className="btn-ghost" onClick={sync} disabled={syncing || !deviceFilter} title={!deviceFilter ? 'Pick a device in the dropdown first' : 'Import users & faces from the selected device'}>{syncing ? 'Syncing…' : 'Sync from device'}</button>
           <button className="btn-primary" onClick={() => setCreating(true)}>Add person</button>
         </div>
       </div>
@@ -698,6 +1027,7 @@ function PersonsTab() {
                   <td data-label="Actions" className="ta-right">
                     <div className="cell-actions">
                       <button className="btn-ghost" onClick={() => setViewing(p)}>View</button>
+                      <button className="btn-ghost" onClick={() => onEnrol(p.id)}>Enrol face</button>
                       <button className="btn-danger" onClick={() => del(p)}>Delete</button>
                     </div>
                   </td>
@@ -718,7 +1048,7 @@ function PersonsTab() {
       </Card>
 
       {creating && <PersonModal onClose={() => setCreating(false)} onSaved={() => { setCreating(false); load() }} />}
-      {viewing && <PersonDetailModal personId={viewing.id} onClose={() => setViewing(null)} onDeleted={() => { setViewing(null); load() }} />}
+      {viewing && <PersonDetailModal personId={viewing.id} onClose={() => setViewing(null)} onDeleted={() => { setViewing(null); load() }} onEnrol={onEnrol} />}
     </>
   )
 }
@@ -800,7 +1130,7 @@ function PersonModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
   )
 }
 
-function PersonDetailModal({ personId, onClose, onDeleted }: { personId: string; onClose: () => void; onDeleted: () => void }) {
+function PersonDetailModal({ personId, onClose, onDeleted, onEnrol }: { personId: string; onClose: () => void; onDeleted: () => void; onEnrol?: (personId: string) => void }) {
   const [data, setData] = useState<any>(null)
   const [err, setErr] = useState('')
   const [qrBust, setQrBust] = useState(0)
@@ -834,11 +1164,16 @@ function PersonDetailModal({ personId, onClose, onDeleted }: { personId: string;
             ? <div className="snap-box big"><div className="snap-placeholder">no face</div></div>
             : faces.map((f: any) => (
                 <div key={f.id} className="snap-box big">
-                  <img className="snap-img" src={apiUrl(`/api/images/${f.imageKey}`)} alt="" />
+                  <img className="snap-img" src={api.imageUrl(f.imageKey)} alt="" />
                 </div>
               ))
           }
         </div>
+        {onEnrol && (
+          <button className="btn-primary" onClick={() => onEnrol(personId)}>
+            {faces.length === 0 ? 'Enrol face' : 'Add / replace face'}
+          </button>
+        )}
         <div className="detail-rows">
           <DetailRow label="Employee #" value={<span className="mono">{p.employeeNo}</span>} />
           <DetailRow label="Gender" value={p.gender} />
@@ -892,11 +1227,11 @@ function DetailRow({ label, value }: { label: string; value: React.ReactNode }) 
 
 // ===================== Enrol =====================
 
-function EnrolTab() {
+function EnrolTab({ initialPersonId, onConsumeInitial }: { initialPersonId?: string; onConsumeInitial?: () => void } = {}) {
   const [devices, setDevices] = useState<any[]>([])
   const [persons, setPersons] = useState<any[]>([])
   const [deviceId, setDeviceId] = useState('')
-  const [personId, setPersonId] = useState('')
+  const [personId, setPersonId] = useState(initialPersonId || '')
   const [file, setFile] = useState<File | null>(null)
   const [FDID, setFDID] = useState('1')
   const [faceLibType, setFaceLibType] = useState('blackFD')
@@ -905,10 +1240,23 @@ function EnrolTab() {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [cameraOpen, setCameraOpen] = useState(false)
+  // Phase 2 — capture-at-device state
+  const [capBusy, setCapBusy] = useState('')
+  const [capResult, setCapResult] = useState<any>(null)
+  const [cardNo, setCardNo] = useState('')
 
   useEffect(() => {
-    api.listDevices().then((d) => setDevices(d || [])).catch(() => setDevices([]))
+    api.listDevices().then((d) => {
+      const list = d || []
+      setDevices(list)
+      // Pre-select the device: the only one, else the first that's online.
+      if (list.length === 1) setDeviceId(list[0].deviceID)
+      else { const on = list.find((x: any) => x.online); if (on) setDeviceId(on.deviceID) }
+    }).catch(() => setDevices([]))
     api.listPersons().then((p) => setPersons(p || [])).catch(() => setPersons([]))
+    // If we arrived here from a person's "Enrol face" button, clear that
+    // hand-off state now that personId has been seeded from it.
+    if (initialPersonId) onConsumeInitial?.()
   }, [])
 
   useEffect(() => {
@@ -925,6 +1273,18 @@ function EnrolTab() {
       const r = await api.enrolFace(deviceId, personId, file, { FDID, faceLibType })
       setResult(r)
     } catch (e: any) { setErr(String(e)) } finally { setBusy(false) }
+  }
+
+  const selectedPerson = persons.find((p) => p.id === personId)
+  const employeeNo = selectedPerson?.employeeNo || ''
+
+  // Run a capture/card/fingerprint action against the device and show the raw result.
+  const runCapture = async (label: string, fn: () => Promise<any>) => {
+    if (!deviceId) { setErr('Pick a device first'); return }
+    setCapBusy(label); setErr(''); setCapResult(null)
+    try { setCapResult(await fn()) }
+    catch (e: any) { setErr(String(e)) }
+    finally { setCapBusy('') }
   }
 
   return (
@@ -981,6 +1341,40 @@ function EnrolTab() {
             : <div className="empty">Upload a file or capture from your camera.</div>}
         </Card>
       </div>
+
+      <Card title="Capture at the device (reader)">
+        <p className="card-sub">
+          Ask the selected reader to capture a credential live — the user presents their face / card / finger
+          at the door instead of uploading a photo. Captured data is returned below.
+          {employeeNo
+            ? <> Card/fingerprint actions bind to <strong>{selectedPerson?.name}</strong> (#{employeeNo}).</>
+            : <> Select a person above to bind cards/fingerprints.</>}
+        </p>
+        <div className="form-row" style={{ flexWrap: 'wrap', gap: 8 }}>
+          <button type="button" className="btn-ghost" disabled={!!capBusy}
+            onClick={() => runCapture('face', () => api.captureFace(deviceId))}>
+            {capBusy === 'face' ? 'Capturing face…' : 'Capture face'}
+          </button>
+          <button type="button" className="btn-ghost" disabled={!!capBusy}
+            onClick={() => runCapture('card', () => api.captureCard(deviceId))}>
+            {capBusy === 'card' ? 'Swipe card now…' : 'Capture card'}
+          </button>
+          <button type="button" className="btn-ghost" disabled={!!capBusy}
+            onClick={() => runCapture('finger', () => api.captureFingerprint(deviceId))}>
+            {capBusy === 'finger' ? 'Press finger now…' : 'Capture fingerprint'}
+          </button>
+        </div>
+        <div className="form-row" style={{ marginTop: 12, alignItems: 'flex-end' }}>
+          <Field label="Bind card number" grow={2}>
+            <input value={cardNo} onChange={(e) => setCardNo(e.target.value)} placeholder="e.g. 1234567890" />
+          </Field>
+          <button type="button" className="btn-primary" disabled={!!capBusy || !employeeNo || !cardNo}
+            onClick={() => runCapture('bindcard', () => api.setCard(deviceId, { employeeNo, cardNo }))}>
+            {capBusy === 'bindcard' ? 'Binding…' : 'Bind card to person'}
+          </button>
+        </div>
+        {capResult && <pre className="result">{JSON.stringify(capResult, null, 2)}</pre>}
+      </Card>
 
       {cameraOpen && (
         <CameraCapture
@@ -1215,7 +1609,7 @@ function EventsTab() {
       <div className="event-list">
         {events.map((e) => (
           <div key={e.id} className="event">
-            {e.imageKey && <img src={apiUrl(`/api/images/${e.imageKey}`)} alt="" />}
+            {e.imageKey && <img src={api.imageUrl(e.imageKey)} alt="" />}
             <div className="event-body">
               <div className="event-head">
                 <span className="mono small">{e.deviceId}</span>
@@ -1430,7 +1824,7 @@ AGENT_TOKEN=${credentials.token} \\
               <p>Windows doesn't have <code>/dev/input/*</code>, but a small AutoHotkey script catches scanner keystrokes (faster than human typing) and posts them to the agent. No interference with normal typing.</p>
               <ol>
                 <li>Install <a href="https://www.autohotkey.com/" target="_blank" rel="noreferrer">AutoHotkey v2</a> on the Windows machine where the agent runs.</li>
-                <li>Download the watcher script: <a href={apiUrl('/api/agents/scripts/qr-watcher.ahk')} download>qr-watcher.ahk</a></li>
+                <li>Download the watcher script: <a href={api.agentScriptUrl('qr-watcher.ahk')} download>qr-watcher.ahk</a></li>
                 <li>Right-click the downloaded file → <strong>Run script</strong>. You'll see a tray icon "face_auth QR watcher".</li>
                 <li>Make it auto-start at login: press <kbd>Win+R</kbd> → type <code>shell:startup</code> → drag the .ahk file into that folder.</li>
                 <li>Scan a QR — the tray icon shows "Scan forwarded: 1" and the QR Auth tab shows a new session.</li>
@@ -1497,7 +1891,7 @@ AGENT_TOKEN=${credentials.token} \\
           For production with a USB QR scanner plugged into the agent's host machine. Pick the helper that matches the host OS.
         </p>
         <div className="download-grid">
-          <a className="download-tile" href={apiUrl('/api/agents/scripts/qr-watcher.ahk')} download>
+          <a className="download-tile" href={api.agentScriptUrl('qr-watcher.ahk')} download>
             <strong>Windows — AutoHotkey v2 script</strong>
             <span className="muted mono small">qr-watcher.ahk</span>
             <span className="muted small">Install AHK v2 → run this once → put in shell:startup</span>
@@ -2286,7 +2680,7 @@ AGENT_TOKEN=paste-token \\
             ) : (
               <div className="download-grid">
                 {downloads.map((d) => (
-                  <a key={d.file} className="download-tile" href={apiUrl(`/api/agents/downloads/${encodeURIComponent(d.file)}`)} download>
+                  <a key={d.file} className="download-tile" href={api.agentDownloadUrl(d.file)} download>
                     <strong>{d.label}</strong>
                     <span className="muted mono small">{d.file}</span>
                     <span className="muted small">{Math.round(d.size / (1024 * 1024) * 10) / 10} MB</span>
@@ -2324,7 +2718,7 @@ AGENT_TOKEN=paste-token \\
           <h4>One-time setup on the kiosk PC</h4>
           <ol>
             <li>Install AutoHotkey v2: <a href="https://www.autohotkey.com/" target="_blank" rel="noreferrer">autohotkey.com</a> → Download v2 → run installer.</li>
-            <li>Download the watcher: <a href={apiUrl('/api/agents/scripts/qr-watcher.ahk')} download><code>qr-watcher.ahk</code></a>.</li>
+            <li>Download the watcher: <a href={api.agentScriptUrl('qr-watcher.ahk')} download><code>qr-watcher.ahk</code></a>.</li>
             <li>Open it in Notepad. Check the <code>AGENT_URL</code> line near the top — default <code>http://127.0.0.1:7771/scan</code> works when the agent runs on the same machine. Change it if the agent is elsewhere.</li>
             <li>Double-click <code>qr-watcher.ahk</code> to run. A tray icon appears.</li>
             <li>Auto-start on boot: <kbd>Win+R</kbd> → <code>shell:startup</code> → drop a shortcut to the script in there.</li>
@@ -2338,7 +2732,7 @@ AGENT_TOKEN=paste-token \\
                 <strong>AutoHotkey v2</strong>
                 <span className="muted small">autohotkey.com</span>
               </a>
-              <a className="download-tile" href={apiUrl('/api/agents/scripts/qr-watcher.ahk')} download>
+              <a className="download-tile" href={api.agentScriptUrl('qr-watcher.ahk')} download>
                 <strong>qr-watcher.ahk</strong>
                 <span className="muted small">QR forwarder script</span>
               </a>
@@ -2459,10 +2853,10 @@ type EndpointDef = {
   group: string
   summary: string
   description?: string
-  auth: 'v1' | 'admin'
+  auth: 'v1' | 'admin' | 'none'
   params?: { name: string; in: 'path' | 'query' | 'body' | 'form'; type?: string; required?: boolean; description?: string }[]
   bodyExample?: any
-  responseType?: 'json' | 'image' | 'mjpeg' | 'sse' | 'text'
+  responseType?: 'json' | 'image' | 'mjpeg' | 'sse' | 'text' | 'binary'
   responses?: { status: number; description: string; example?: any }[]
 }
 
@@ -2588,16 +2982,59 @@ const ENDPOINTS: EndpointDef[] = [
   { method: 'POST', path: '/api/devices', group: 'admin — Devices', summary: 'Register a device', auth: 'admin', bodyExample: { deviceId: 'lobby-1', name: 'Lobby', ip: '192.168.1.50', port: 80, isapiUsername: 'admin', isapiPassword: 'pass' } },
   { method: 'DELETE', path: '/api/devices/:id', group: 'admin — Devices', summary: 'Delete a device', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
   { method: 'POST', path: '/api/devices/:id/setup-alarm-host', group: 'admin — Devices', summary: 'Register face_auth as alarm host on device', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'GET', path: '/api/devices/:id/wifi', group: 'admin — Devices', summary: 'Read device Wi-Fi config', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'ifId', in: 'query', required: false }] },
+  { method: 'POST', path: '/api/devices/:id/wifi/scan', group: 'admin — Devices', summary: 'Scan for nearby Wi-Fi access points', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'ifId', in: 'query', required: false }] },
+  { method: 'PUT', path: '/api/devices/:id/wifi', group: 'admin — Devices', summary: 'Join a Wi-Fi network', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { ssid: 'OfficeWiFi', password: 'secret123', securityMode: 'WPA2-personal' } },
   { method: 'GET', path: '/api/agents', group: 'admin — Agents', summary: 'List agents', auth: 'admin' },
   { method: 'POST', path: '/api/agents', group: 'admin — Agents', summary: 'Register agent (token shown once)', auth: 'admin', bodyExample: { id: 'lobby-agent', name: 'Lobby Agent' } },
   { method: 'DELETE', path: '/api/agents/:id', group: 'admin — Agents', summary: 'Delete an agent', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
   { method: 'POST', path: '/api/agents/:id/regen-token', group: 'admin — Agents', summary: 'Rotate agent token', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
-  { method: 'GET', path: '/api/agents/downloads', group: 'admin — Agents', summary: 'List available agent binaries', auth: 'admin' },
+  { method: 'GET', path: '/api/agents/downloads', group: 'admin — Agents', summary: 'List agent binaries (public — no auth)', auth: 'none' },
+  { method: 'GET', path: '/api/agents/downloads/:file', group: 'admin — Agents', summary: 'Download an agent binary (public — no auth)', auth: 'none', responseType: 'binary', params: [{ name: 'file', in: 'path', required: true }] },
   { method: 'GET', path: '/api/qr-auth/sessions', group: 'admin — QR Auth', summary: 'Active + historical sessions', auth: 'admin' },
   { method: 'POST', path: '/api/qr-auth/scan', group: 'admin — QR Auth', summary: 'Agent-style QR scan (admin)', auth: 'admin', bodyExample: { qrToken: 'paste-here', agentId: '' } },
   { method: 'POST', path: '/api/devices/:id/lock-all-users', group: 'admin — QR Auth', summary: 'Lock every device user into baseline', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
   { method: 'GET', path: '/api/events', group: 'admin — Events', summary: 'List events', auth: 'admin' },
   { method: 'GET', path: '/api/events/stream', group: 'admin — Events', summary: 'SSE stream', auth: 'admin', responseType: 'sse' },
+
+  // ---- Enrolment: capture-at-device + cards + fingerprints (v1 + admin) ----
+  { method: 'POST', path: '/api/v1/devices/:id/capture/face', group: 'v1 — Enrolment', summary: 'Capture a live face at the reader', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'infrared', in: 'query', description: 'true to also grab IR' }] },
+  { method: 'POST', path: '/api/v1/devices/:id/capture/card', group: 'v1 — Enrolment', summary: 'Capture a card swipe', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'POST', path: '/api/v1/devices/:id/capture/fingerprint', group: 'v1 — Enrolment', summary: 'Capture a fingerprint', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'finger', in: 'query', type: 'int', description: 'finger no, default 1' }] },
+  { method: 'POST', path: '/api/v1/devices/:id/cards', group: 'v1 — Enrolment', summary: 'Bind/modify a card', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { employeeNo: '1001', cardNo: '0468229170', cardType: 'normalCard', mode: '' } },
+  { method: 'DELETE', path: '/api/v1/devices/:id/cards/:cardNo', group: 'v1 — Enrolment', summary: 'Delete a card', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'cardNo', in: 'path', required: true }] },
+  { method: 'POST', path: '/api/v1/devices/:id/fingerprints', group: 'v1 — Enrolment', summary: 'Upload a fingerprint template', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { employeeNo: '1001', fingerPrintID: 1, fingerData: '<base64>' } },
+  { method: 'DELETE', path: '/api/v1/devices/:id/fingerprints/:employeeNo', group: 'v1 — Enrolment', summary: 'Delete fingerprint(s)', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'employeeNo', in: 'path', required: true }, { name: 'finger', in: 'query', type: 'int', description: 'one print; omit for all' }] },
+
+  // ---- Health & access schedules (v1) ----
+  { method: 'GET', path: '/api/v1/devices/:id/work-status', group: 'v1 — Health & Schedules', summary: 'Door / lock / tamper / battery / capacity', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'PUT', path: '/api/v1/devices/:id/week-plan/:planNo', group: 'v1 — Health & Schedules', summary: 'Write per-weekday allow windows', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'planNo', in: 'path', required: true }], bodyExample: { days: [{ week: 'Monday', enable: true, begin: '09:00:00', end: '18:00:00' }] } },
+  { method: 'PUT', path: '/api/v1/devices/:id/plan-template/:tplNo', group: 'v1 — Health & Schedules', summary: 'Bind a template to a week plan', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'tplNo', in: 'path', required: true }], bodyExample: { name: 'office-hours', weekPlanNo: 1 } },
+
+  // ---- QR-via-camera + intercom (v1) ----
+  { method: 'GET', path: '/api/v1/devices/:id/qr-capability', group: 'v1 — QR & Intercom', summary: 'Does the camera support QR?', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'POST', path: '/api/v1/devices/:id/qr-scan', group: 'v1 — QR & Intercom', summary: 'Enable/disable camera QR scanning', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { enable: true } },
+  { method: 'GET', path: '/api/v1/devices/:id/intercom/channels', group: 'v1 — QR & Intercom', summary: 'Two-way audio capabilities', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'POST', path: '/api/v1/devices/:id/intercom/open', group: 'v1 — QR & Intercom', summary: 'Open the intercom channel', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'channel', in: 'query', type: 'int', description: 'default 1' }] },
+  { method: 'POST', path: '/api/v1/devices/:id/intercom/close', group: 'v1 — QR & Intercom', summary: 'Close the intercom channel', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'channel', in: 'query', type: 'int', description: 'default 1' }] },
+
+  // ---- Same features on the admin mount (session auth) ----
+  { method: 'POST', path: '/api/devices/:id/capture/face', group: 'admin — Enrolment', summary: 'Capture a live face at the reader', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'infrared', in: 'query' }] },
+  { method: 'POST', path: '/api/devices/:id/capture/card', group: 'admin — Enrolment', summary: 'Capture a card swipe', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'POST', path: '/api/devices/:id/capture/fingerprint', group: 'admin — Enrolment', summary: 'Capture a fingerprint', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'finger', in: 'query', type: 'int' }] },
+  { method: 'POST', path: '/api/devices/:id/cards', group: 'admin — Enrolment', summary: 'Bind/modify a card', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { employeeNo: '1001', cardNo: '0468229170' } },
+  { method: 'DELETE', path: '/api/devices/:id/cards/:cardNo', group: 'admin — Enrolment', summary: 'Delete a card', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'cardNo', in: 'path', required: true }] },
+  { method: 'POST', path: '/api/devices/:id/fingerprints', group: 'admin — Enrolment', summary: 'Upload a fingerprint template', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { employeeNo: '1001', fingerPrintID: 1, fingerData: '<base64>' } },
+  { method: 'DELETE', path: '/api/devices/:id/fingerprints/:employeeNo', group: 'admin — Enrolment', summary: 'Delete fingerprint(s)', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'employeeNo', in: 'path', required: true }, { name: 'finger', in: 'query', type: 'int' }] },
+  { method: 'GET', path: '/api/devices/:id/work-status', group: 'admin — Health & Schedules', summary: 'Device health', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'GET', path: '/api/devices/:id/week-plan/:planNo', group: 'admin — Health & Schedules', summary: 'Read a week plan', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'planNo', in: 'path', required: true }] },
+  { method: 'PUT', path: '/api/devices/:id/week-plan/:planNo', group: 'admin — Health & Schedules', summary: 'Write per-weekday allow windows', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'planNo', in: 'path', required: true }], bodyExample: { days: [{ week: 'Monday', enable: true, begin: '09:00:00', end: '18:00:00' }] } },
+  { method: 'PUT', path: '/api/devices/:id/plan-template/:tplNo', group: 'admin — Health & Schedules', summary: 'Bind a template to a week plan', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'tplNo', in: 'path', required: true }], bodyExample: { name: 'office-hours', weekPlanNo: 1 } },
+  { method: 'GET', path: '/api/devices/:id/qr-capability', group: 'admin — QR & Intercom', summary: 'Does the camera support QR?', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'POST', path: '/api/devices/:id/qr-scan', group: 'admin — QR & Intercom', summary: 'Enable/disable camera QR scanning', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { enable: true } },
+  { method: 'GET', path: '/api/devices/:id/intercom/channels', group: 'admin — QR & Intercom', summary: 'Two-way audio capabilities', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'POST', path: '/api/devices/:id/intercom/open', group: 'admin — QR & Intercom', summary: 'Open the intercom channel', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'channel', in: 'query', type: 'int' }] },
+  { method: 'POST', path: '/api/devices/:id/intercom/close', group: 'admin — QR & Intercom', summary: 'Close the intercom channel', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'channel', in: 'query', type: 'int' }] },
 ]
 
 const METHOD_COLOR: Record<string, string> = { GET: '#3b82f6', POST: '#10b981', PUT: '#f59e0b', DELETE: '#ef4444' }
@@ -2618,6 +3055,43 @@ export function ApiDocsStandalone() {
       <ApiDocsView />
     </div>
   )
+}
+
+// Build a single paste-ready text spec of the whole API — drop it into an LLM
+// (Claude/ChatGPT/etc.) and ask it to write the integration for you.
+function buildLlmSpec(origin: string): string {
+  const L: string[] = []
+  L.push('# face_auth HTTP API — integration spec')
+  L.push('')
+  L.push(`Base URL: ${origin || 'https://YOUR-SERVER'}`)
+  L.push('')
+  L.push('Two surfaces:')
+  L.push('- `/api/v1/*` — third-party API. Auth: send your API key as header `Authorization: Bearer fa_…` or `X-API-Key: fa_…` (or `?apiKey=` in a pinch). Create keys in Settings → API keys.')
+  L.push('- `/api/*` — admin API behind the dashboard (same-origin session). A few agent-download routes are public (no auth).')
+  L.push('')
+  L.push('Notes for integration:')
+  L.push('- Device-command endpoints return the device\'s raw response in `response` or `raw`; exact JSON shapes depend on the Hikvision firmware.')
+  L.push('- Endpoints work over any reach mode (direct / agent / OTAP). Binary pulls (snapshot/MJPEG) need direct or agent reach.')
+  L.push('- The headline flow is: POST `/api/v1/auth/face/start` to arm a short face-auth window, then poll GET `/api/v1/auth/face/{id}` (or subscribe to `/auth/face/stream`).')
+  L.push('')
+  const groups: Record<string, EndpointDef[]> = {}
+  ENDPOINTS.forEach((e) => { (groups[e.group] = groups[e.group] || []).push(e) })
+  for (const [group, items] of Object.entries(groups)) {
+    L.push(`## ${group}`)
+    for (const e of items) {
+      L.push('')
+      L.push(`### ${e.method} ${e.path}`)
+      L.push(`${e.summary} (auth: ${e.auth})`)
+      if (e.params && e.params.length) {
+        L.push('Params:')
+        e.params.forEach((p) => L.push(`- ${p.name} (${p.in}${p.required ? ', required' : ''}${p.type ? ', ' + p.type : ''})${p.description ? ': ' + p.description : ''}`))
+      }
+      if (e.bodyExample !== undefined) L.push('Body JSON: ' + JSON.stringify(e.bodyExample))
+      if (e.responseType && e.responseType !== 'json') L.push(`Response: ${e.responseType}`)
+    }
+    L.push('')
+  }
+  return L.join('\n')
 }
 
 function ApiDocsView({ showHeader = false }: { showHeader?: boolean }) {
@@ -2648,6 +3122,14 @@ function ApiDocsView({ showHeader = false }: { showHeader?: boolean }) {
 
   const origin = typeof location !== 'undefined' ? location.origin : ''
   const standaloneUrl = origin + '/docs'
+
+  const [copied, setCopied] = useState(false)
+  const copyForLLM = async () => {
+    try {
+      await navigator.clipboard.writeText(buildLlmSpec(origin))
+      setCopied(true); setTimeout(() => setCopied(false), 1800)
+    } catch { /* clipboard blocked — ignore */ }
+  }
 
   return (
     <div className="docs-shell" style={{ display: 'grid', gridTemplateColumns: '260px 1fr', gap: 0, alignItems: 'start' }}>
@@ -2689,6 +3171,7 @@ function ApiDocsView({ showHeader = false }: { showHeader?: boolean }) {
               <h1 className="page-title">API docs <span className="muted">· {ENDPOINTS.length} endpoints</span></h1>
             </div>
             <div className="toolbar-right">
+              <button className="btn-primary" onClick={copyForLLM}>{copied ? 'Copied ✓' : 'Copy for LLM'}</button>
               <a className="btn-ghost" href={standaloneUrl} target="_blank" rel="noreferrer">Open standalone view ↗</a>
             </div>
           </div>
@@ -2702,6 +3185,10 @@ function ApiDocsView({ showHeader = false }: { showHeader?: boolean }) {
             <li><strong><code>/api/*</code></strong> — admin surface backing this dashboard. Same-origin only.</li>
           </ul>
           <p>Base URL: <code>{origin}</code></p>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12, padding: '12px 14px', border: '1px solid var(--border, #2a2a2a)', borderRadius: 8 }}>
+            <button className="btn-primary" onClick={copyForLLM}>{copied ? 'Copied ✓' : 'Copy for LLM'}</button>
+            <span className="muted small">Copies the whole API (every endpoint, params &amp; body examples) as text — paste into an LLM and ask it to build your integration.</span>
+          </div>
         </section>
 
         <section style={{ marginBottom: 32 }}>

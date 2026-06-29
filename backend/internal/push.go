@@ -18,9 +18,10 @@ type PushServer struct {
 	app   *fiber.App
 	store *Store
 	cfg   Config
+	hub   *AgentHub // used for snapshot-on-event capture (direct/agent reach)
 }
 
-func NewPushServer(store *Store, cfg Config) *fiber.App {
+func NewPushServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: true,
 		BodyLimit:             50 * 1024 * 1024, // 50MB for face image events
@@ -28,7 +29,7 @@ func NewPushServer(store *Store, cfg Config) *fiber.App {
 		AppName:               "face_auth-push",
 	})
 
-	ps := &PushServer{app: app, store: store, cfg: cfg}
+	ps := &PushServer{app: app, store: store, cfg: cfg, hub: hub}
 
 	app.Use(func(c *fiber.Ctx) error {
 		start := time.Now()
@@ -490,14 +491,49 @@ func (ps *PushServer) persistEventList(ctx context.Context, deviceID string, lis
 			eventType = sniffEventType(payload)
 		}
 
-		if _, err := ps.store.InsertEvent(ctx, Event{
+		id, err := ps.store.InsertEvent(ctx, Event{
 			DeviceID:  deviceID,
 			EventType: eventType,
 			Raw:       json.RawMessage(safeJSONFromBytes(payload)),
 			ImageKey:  imageKey,
-		}); err != nil {
+		})
+		if err != nil {
 			log.Printf("InsertEvent: %v", err)
+			continue
 		}
+		// Snapshot-on-event: if the event carried no image, try to grab a live
+		// frame so door/face events have a picture. Runs async so it never
+		// delays the device's event POST.
+		if imageKey == "" {
+			go ps.captureSnapshotForEvent(deviceID, id)
+		}
+	}
+}
+
+// captureSnapshotForEvent pulls a live snapshot and attaches it to an event
+// that arrived without an image. Only meaningful for devices we can reach for a
+// binary pull (direct/agent) — OTAP's command queue can't carry binary frames.
+func (ps *PushServer) captureSnapshotForEvent(deviceID string, eventID int64) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	d, err := ps.store.GetDevice(ctx, deviceID)
+	if err != nil || d == nil || d.Reach == "otap" {
+		return
+	}
+	if d.IP == "" && d.AgentID == "" {
+		return
+	}
+	client := NewISAPIClientForDevice(d, ps.hub)
+	jpeg, _, err := client.GetSnapshot()
+	if err != nil || len(jpeg) == 0 {
+		return
+	}
+	key := fmt.Sprintf("events/%s/%s.jpg", deviceID, uuid.NewString())
+	if err := ps.store.PutObject(ctx, key, "image/jpeg", jpeg); err != nil {
+		return
+	}
+	if err := ps.store.UpdateEventImage(ctx, eventID, key); err != nil {
+		log.Printf("UpdateEventImage: %v", err)
 	}
 }
 

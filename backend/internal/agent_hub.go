@@ -18,6 +18,7 @@ type AgentHub struct {
 	mu      sync.RWMutex
 	agents  map[string]*AgentConn
 	onEvent func(Frame)
+	store   *Store // used by OTAP command transport (see ISAPIClient.doViaOTAP)
 }
 
 type AgentConn struct {
@@ -34,8 +35,8 @@ type AgentConn struct {
 	closed  bool
 }
 
-func NewAgentHub() *AgentHub {
-	return &AgentHub{agents: map[string]*AgentConn{}}
+func NewAgentHub(store *Store) *AgentHub {
+	return &AgentHub{agents: map[string]*AgentConn{}, store: store}
 }
 
 func (h *AgentHub) IsOnline(agentID string) bool {

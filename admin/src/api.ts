@@ -80,6 +80,7 @@ export interface DeviceForm {
   fdid?: string
   faceLibType?: string
   agentId?: string
+  reach?: string
 }
 
 export const api = {
@@ -100,6 +101,16 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ hostIp, hostPort }),
     }),
+  getWifi: (id: string, ifId?: string) =>
+    req(`/api/devices/${encodeURIComponent(id)}/wifi${ifId ? `?ifId=${encodeURIComponent(ifId)}` : ''}`),
+  scanWifi: (id: string, ifId?: string) =>
+    req(`/api/devices/${encodeURIComponent(id)}/wifi/scan${ifId ? `?ifId=${encodeURIComponent(ifId)}` : ''}`, { method: 'POST' }),
+  setWifi: (id: string, body: { ssid: string; password?: string; securityMode?: string; algorithm?: string; ifId?: string; enabled?: boolean }) =>
+    req(`/api/devices/${encodeURIComponent(id)}/wifi`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
   deviceFaceLib: (id: string) => req(`/api/devices/${encodeURIComponent(id)}/face-lib`),
   rawIsapi: (id: string, method: string, path: string, body: string) =>
     req(`/api/devices/${encodeURIComponent(id)}/isapi`, {
@@ -109,6 +120,56 @@ export const api = {
     }),
   deleteFace: (deviceId: string, personId: string) =>
     req(`/api/devices/${encodeURIComponent(deviceId)}/faces/${encodeURIComponent(personId)}`, { method: 'DELETE' }),
+
+  // Phase 2 — capture-at-device + card / fingerprint enrol
+  captureFace: (deviceId: string, infrared = false) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/capture/face${infrared ? '?infrared=true' : ''}`, { method: 'POST' }),
+  captureCard: (deviceId: string) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/capture/card`, { method: 'POST' }),
+  captureFingerprint: (deviceId: string, finger = 1) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/capture/fingerprint?finger=${finger}`, { method: 'POST' }),
+  setCard: (deviceId: string, body: { employeeNo: string; cardNo: string; cardType?: string; mode?: string }) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/cards`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    }),
+  deleteCard: (deviceId: string, cardNo: string) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/cards/${encodeURIComponent(cardNo)}`, { method: 'DELETE' }),
+  setFingerprint: (deviceId: string, body: { employeeNo: string; fingerPrintID?: number; fingerData: string }) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/fingerprints`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    }),
+  deleteFingerprint: (deviceId: string, employeeNo: string, finger = 0) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/fingerprints/${encodeURIComponent(employeeNo)}${finger ? `?finger=${finger}` : ''}`, { method: 'DELETE' }),
+
+  // Phase 4 — intercom (two-way audio)
+  intercomChannels: (deviceId: string) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/intercom/channels`),
+  intercomOpen: (deviceId: string, channel = 1) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/intercom/open?channel=${channel}`, { method: 'POST' }),
+  intercomClose: (deviceId: string, channel = 1) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/intercom/close?channel=${channel}`, { method: 'POST' }),
+
+  // Phase 3 — health & access schedules
+  workStatus: (deviceId: string) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/work-status`),
+  getWeekPlan: (deviceId: string, planNo: number) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/week-plan/${planNo}`),
+  setWeekPlan: (deviceId: string, planNo: number, days: Array<{ week: string; enable: boolean; begin: string; end: string }>) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/week-plan/${planNo}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ days }),
+    }),
+  setPlanTemplate: (deviceId: string, tplNo: number, body: { name?: string; weekPlanNo: number }) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/plan-template/${tplNo}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    }),
+
+  // QR-via-camera (device-native QR scanning)
+  qrCapability: (deviceId: string) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/qr-capability`),
+  setQrScan: (deviceId: string, enable: boolean) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/qr-scan`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enable }),
+    }),
 
   listPersons: () => req('/api/persons'),
   createPerson: (body: PersonForm) =>
@@ -166,8 +227,20 @@ export const api = {
   deleteAgent: (id: string) => req(`/api/agents/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   regenAgentToken: (id: string) => req(`/api/agents/${encodeURIComponent(id)}/regen-token`, { method: 'POST' }),
   agentDownloads: () => req('/api/agents/downloads'),
+  // Agent binaries + scripts are public, secret-free downloads (the per-agent
+  // token is generated separately), so these links need no auth token.
   agentDownloadUrl: (file: string) => apiUrl(`/api/agents/downloads/${encodeURIComponent(file)}`),
+  agentScriptUrl: (file: string) => apiUrl(`/api/agents/scripts/${encodeURIComponent(file)}`),
   rotateQR: (personId: string) => req(`/api/persons/${encodeURIComponent(personId)}/qr/rotate`, { method: 'POST' }),
+  // Authenticated object URL for <img> tags. The /api/images/* route is
+  // session-gated, and <img> can't send an Authorization header, so the
+  // session token is passed via ?token= (sessionAuth accepts it on GET).
+  imageUrl: (imageKey: string) => {
+    const params = new URLSearchParams()
+    if (auth.token) params.set('token', auth.token)
+    const q = params.toString()
+    return apiUrl(`/api/images/${imageKey}${q ? '?' + q : ''}`)
+  },
   qrImageUrl: (personId: string, size = 256) => {
     // <img> tags can't attach Authorization headers, so the backend's
     // sessionAuth middleware also accepts ?token= on GET requests. Inline it

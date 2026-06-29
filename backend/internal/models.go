@@ -113,6 +113,7 @@ type Device struct {
 	Model         string     `json:"model,omitempty"`
 	Firmware      string     `json:"firmware,omitempty"`
 	AgentID       string     `json:"agentId,omitempty"` // if set, ISAPI is routed via this agent
+	Reach         string     `json:"reach,omitempty"`   // command transport: "direct" | "agent" | "otap" (empty = direct/agent auto)
 	CreatedAt     time.Time  `json:"createdAt"`
 
 	// Password is a transient field used only when writing; never serialized

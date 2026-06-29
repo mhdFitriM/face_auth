@@ -89,7 +89,17 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		// c.Locals("user") — otherwise /auth/me silently returns null and the
 		// SPA bounces back to the login screen in an infinite loop.
 		p := c.Path()
-		if p == "/api/auth/login" || p == "/api/healthz" {
+		// /api/qr-auth/scan is called by LAN agents (USB scanner → cloud) which
+		// hold no dashboard session. The per-person QR token in the body IS the
+		// credential, so this route authenticates itself — same model as the
+		// /api/v1/qr-auth/scan API-key endpoint.
+		if p == "/api/auth/login" || p == "/api/healthz" || p == "/api/qr-auth/scan" {
+			return c.Next()
+		}
+		// Agent binaries and companion scripts are generic, secret-free downloads
+		// (the per-agent token is generated separately and shown once in the UI),
+		// so they're served without a session — no token needed in the URL.
+		if strings.HasPrefix(p, "/api/agents/downloads") || strings.HasPrefix(p, "/api/agents/scripts/") {
 			return c.Next()
 		}
 		return sessionAuth(store)(c)
@@ -142,11 +152,11 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 			var onlineCount int
 			_ = store.PG.QueryRow(c.Context(), `SELECT COUNT(*) FROM devices WHERE tenant_id=$1 AND online=TRUE`, t.ID).Scan(&onlineCount)
 			out = append(out, fiber.Map{
-				"tenant":         t,
-				"deviceCount":    devCount,
-				"devicesOnline":  onlineCount,
-				"personCount":    personCount,
-				"planCount":      planCount,
+				"tenant":        t,
+				"deviceCount":   devCount,
+				"devicesOnline": onlineCount,
+				"personCount":   personCount,
+				"planCount":     planCount,
 			})
 		}
 		return c.JSON(out)
@@ -154,14 +164,14 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 
 	hq.Post("/tenants", func(c *fiber.Ctx) error {
 		var body struct {
-			Name         string `json:"name"`
-			Slug         string `json:"slug"`
-			PremiseType  string `json:"premiseType"`
-			Timezone     string `json:"timezone"`
-			ContactEmail string `json:"contactEmail"`
-			ContactPhone string `json:"contactPhone"`
-			Address      string `json:"address"`
-			InstallPresets bool `json:"installPresets"`
+			Name           string `json:"name"`
+			Slug           string `json:"slug"`
+			PremiseType    string `json:"premiseType"`
+			Timezone       string `json:"timezone"`
+			ContactEmail   string `json:"contactEmail"`
+			ContactPhone   string `json:"contactPhone"`
+			Address        string `json:"address"`
+			InstallPresets bool   `json:"installPresets"`
 		}
 		if err := json.Unmarshal(c.Body(), &body); err != nil || body.Name == "" {
 			return c.Status(400).JSON(fiber.Map{"error": "name required"})
@@ -469,6 +479,7 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 			FDID          string `json:"fdid"`
 			FaceLibType   string `json:"faceLibType"`
 			AgentID       string `json:"agentId"`
+			Reach         string `json:"reach"`
 		}
 		if err := json.Unmarshal(c.Body(), &body); err != nil || body.DeviceID == "" {
 			return c.Status(400).JSON(fiber.Map{"error": "deviceId required"})
@@ -484,6 +495,7 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 			FDID:          body.FDID,
 			FaceLibType:   body.FaceLibType,
 			AgentID:       body.AgentID,
+			Reach:         body.Reach,
 		}
 		dev.SetPassword(body.Password)
 		if err := store.RegisterDevice(c.Context(), dev); err != nil {
@@ -561,6 +573,71 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		}
 		client := NewISAPIClientForDevice(d, hub)
 		resp, err := client.SetAlarmHost(body.HostIP, body.HostPort, "/hik-event", body.Slot)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+
+	// ---------- Wi-Fi ----------
+
+	// Read the device's current wireless config (raw device XML).
+	api.Get("/devices/:id/wifi", func(c *fiber.Ctx) error {
+		d, err := store.GetDevice(c.Context(), c.Params("id"))
+		if err != nil || d == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "device not found"})
+		}
+		client := NewISAPIClientForDevice(d, hub)
+		raw, err := client.GetWifi(c.Query("ifId"))
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "raw": raw})
+		}
+		return c.JSON(fiber.Map{"ok": true, "raw": raw})
+	})
+
+	// Scan for nearby access points.
+	api.Post("/devices/:id/wifi/scan", func(c *fiber.Ctx) error {
+		d, err := store.GetDevice(c.Context(), c.Params("id"))
+		if err != nil || d == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "device not found"})
+		}
+		client := NewISAPIClientForDevice(d, hub)
+		aps, raw, err := client.ScanWifi(c.Query("ifId"))
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "raw": raw})
+		}
+		return c.JSON(fiber.Map{"ok": true, "accessPoints": aps})
+	})
+
+	// Join a Wi-Fi network. Body: { ssid, password, securityMode?, algorithm?, ifId?, enabled? }
+	api.Put("/devices/:id/wifi", func(c *fiber.Ctx) error {
+		d, err := store.GetDevice(c.Context(), c.Params("id"))
+		if err != nil || d == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "device not found"})
+		}
+		var body struct {
+			SSID         string `json:"ssid"`
+			Password     string `json:"password"`
+			SecurityMode string `json:"securityMode"`
+			Algorithm    string `json:"algorithm"`
+			IfID         string `json:"ifId"`
+			Enabled      *bool  `json:"enabled"`
+		}
+		if err := json.Unmarshal(c.Body(), &body); err != nil || body.SSID == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "ssid required"})
+		}
+		enabled := true
+		if body.Enabled != nil {
+			enabled = *body.Enabled
+		}
+		client := NewISAPIClientForDevice(d, hub)
+		resp, err := client.SetWifi(body.IfID, WifiConfig{
+			SSID:         body.SSID,
+			Key:          body.Password,
+			SecurityMode: body.SecurityMode,
+			Algorithm:    body.Algorithm,
+			Enabled:      enabled,
+		})
 		if err != nil {
 			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
 		}
@@ -894,11 +971,11 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 			}
 
 			meta, _ := json.Marshal(map[string]any{
-				"cards":           cardByEmp[u.EmployeeNo],
-				"deviceUserType":  u.UserType,
-				"userVerifyMode":  u.UserVerifyMode,
-				"deviceFaceURL":   faceByEmp[u.EmployeeNo].FaceURL,
-				"deviceSyncedAt":  time.Now().UTC(),
+				"cards":            cardByEmp[u.EmployeeNo],
+				"deviceUserType":   u.UserType,
+				"userVerifyMode":   u.UserVerifyMode,
+				"deviceFaceURL":    faceByEmp[u.EmployeeNo].FaceURL,
+				"deviceSyncedAt":   time.Now().UTC(),
 				"deviceSyncedFrom": d.DeviceID,
 			})
 
@@ -954,11 +1031,11 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 			synced++
 		}
 		return c.JSON(fiber.Map{
-			"ok":      true,
-			"users":   len(users),
-			"faces":   len(faces),
-			"cards":   len(cards),
-			"synced":  synced,
+			"ok":     true,
+			"users":  len(users),
+			"faces":  len(faces),
+			"cards":  len(cards),
+			"synced": synced,
 		})
 	})
 
@@ -971,6 +1048,288 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		doorNo, _ := strconv.Atoi(c.Query("door", "1"))
 		client := NewISAPIClientForDevice(d, hub)
 		resp, err := client.OpenDoor(doorNo)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+
+	// ---------- Phase 2: capture-at-device + card / fingerprint enrol ----------
+	// reachable returns the device if it can be commanded (has IP, an agent, or
+	// OTAP push). OTAP devices have no IP, so we must not require d.IP here.
+	reachable := func(c *fiber.Ctx) (*Device, error) {
+		d, err := store.GetDevice(c.Context(), c.Params("id"))
+		if err != nil || d == nil {
+			return nil, fmt.Errorf("device not found")
+		}
+		if d.IP == "" && d.AgentID == "" && d.Reach != "otap" {
+			return nil, fmt.Errorf("device has no reachable transport (set IP, agent, or OTAP)")
+		}
+		return d, nil
+	}
+
+	// Capture a live face from the device camera.
+	api.Post("/devices/:id/capture/face", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		client := NewISAPIClientForDevice(d, hub)
+		resp, err := client.CaptureFaceData(c.Query("infrared") == "true")
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+
+	// Capture a card swipe on the device reader.
+	api.Post("/devices/:id/capture/card", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		client := NewISAPIClientForDevice(d, hub)
+		resp, err := client.CaptureCardInfo()
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+
+	// Capture a fingerprint on the device sensor.
+	api.Post("/devices/:id/capture/fingerprint", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		finger, _ := strconv.Atoi(c.Query("finger", "1"))
+		client := NewISAPIClientForDevice(d, hub)
+		resp, err := client.CaptureFingerPrint(finger)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+
+	// Create/modify a card bound to a user.
+	api.Post("/devices/:id/cards", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		var body struct {
+			EmployeeNo string `json:"employeeNo"`
+			CardNo     string `json:"cardNo"`
+			CardType   string `json:"cardType"`
+			Mode       string `json:"mode"` // "" = create, "modify" = update
+		}
+		if e := json.Unmarshal(c.Body(), &body); e != nil || body.EmployeeNo == "" || body.CardNo == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "employeeNo and cardNo required"})
+		}
+		client := NewISAPIClientForDevice(d, hub)
+		resp, err := client.SetCardInfo(body.EmployeeNo, body.CardNo, body.CardType, body.Mode)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+
+	// Delete a card by number.
+	api.Delete("/devices/:id/cards/:cardNo", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		client := NewISAPIClientForDevice(d, hub)
+		resp, err := client.DeleteCard(c.Params("cardNo"))
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+
+	// Upload a fingerprint template for a user.
+	api.Post("/devices/:id/fingerprints", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		var body struct {
+			EmployeeNo    string `json:"employeeNo"`
+			FingerPrintID int    `json:"fingerPrintID"`
+			FingerData    string `json:"fingerData"` // base64 template
+		}
+		if e := json.Unmarshal(c.Body(), &body); e != nil || body.EmployeeNo == "" || body.FingerData == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "employeeNo and fingerData required"})
+		}
+		client := NewISAPIClientForDevice(d, hub)
+		resp, err := client.SetFingerPrint(body.EmployeeNo, body.FingerPrintID, body.FingerData)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+
+	// Delete a user's fingerprint(s). ?finger=N for a single print, omit for all.
+	api.Delete("/devices/:id/fingerprints/:employeeNo", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		finger, _ := strconv.Atoi(c.Query("finger", "0"))
+		client := NewISAPIClientForDevice(d, hub)
+		resp, err := client.DeleteFingerPrint(c.Params("employeeNo"), finger)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+
+	// ---------- Phase 4: intercom (two-way audio) ----------
+
+	// Probe two-way audio channel capabilities.
+	api.Get("/devices/:id/intercom/channels", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		client := NewISAPIClientForDevice(d, hub)
+		raw, err := client.GetTwoWayAudioChannels()
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "raw": raw})
+		}
+		return c.JSON(fiber.Map{"ok": true, "raw": raw})
+	})
+
+	// Open / close the intercom channel. ?channel=N (default 1).
+	api.Post("/devices/:id/intercom/open", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		ch, _ := strconv.Atoi(c.Query("channel", "1"))
+		client := NewISAPIClientForDevice(d, hub)
+		resp, err := client.OpenTwoWayAudio(ch)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+
+	api.Post("/devices/:id/intercom/close", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		ch, _ := strconv.Atoi(c.Query("channel", "1"))
+		client := NewISAPIClientForDevice(d, hub)
+		resp, err := client.CloseTwoWayAudio(ch)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+
+	// ---------- Phase 3: health & access schedules ----------
+
+	// Device health (door / lock / tamper / battery / capacity).
+	api.Get("/devices/:id/work-status", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		client := NewISAPIClientForDevice(d, hub)
+		raw, err := client.GetAcsWorkStatus()
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "raw": raw})
+		}
+		return c.JSON(fiber.Map{"ok": true, "raw": raw})
+	})
+
+	// Read a week plan.
+	api.Get("/devices/:id/week-plan/:planNo", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		planNo, _ := strconv.Atoi(c.Params("planNo"))
+		client := NewISAPIClientForDevice(d, hub)
+		raw, err := client.GetWeekPlan(planNo)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "raw": raw})
+		}
+		return c.JSON(fiber.Map{"ok": true, "raw": raw})
+	})
+
+	// Write a week plan (one allow window per weekday).
+	api.Put("/devices/:id/week-plan/:planNo", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		planNo, _ := strconv.Atoi(c.Params("planNo"))
+		var body struct {
+			Days []WeekPlanDay `json:"days"`
+		}
+		if e := json.Unmarshal(c.Body(), &body); e != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "invalid body"})
+		}
+		client := NewISAPIClientForDevice(d, hub)
+		resp, err := client.SetWeekPlan(planNo, body.Days)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+
+	// Write a plan template referencing a week plan.
+	api.Put("/devices/:id/plan-template/:tplNo", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		tplNo, _ := strconv.Atoi(c.Params("tplNo"))
+		var body struct {
+			Name       string `json:"name"`
+			WeekPlanNo int    `json:"weekPlanNo"`
+		}
+		_ = json.Unmarshal(c.Body(), &body)
+		client := NewISAPIClientForDevice(d, hub)
+		resp, err := client.SetPlanTemplate(tplNo, body.Name, body.WeekPlanNo)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+
+	// ---------- QR-via-camera (device-native QR scanning) ----------
+
+	// Probe whether the device camera can read QR codes.
+	api.Get("/devices/:id/qr-capability", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		client := NewISAPIClientForDevice(d, hub)
+		supported, raw, err := client.SupportsCameraQR()
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "raw": raw})
+		}
+		return c.JSON(fiber.Map{"ok": true, "supported": supported, "raw": raw})
+	})
+
+	// Enable/disable device-native QR scanning. Body: {"enable": true|false}.
+	api.Post("/devices/:id/qr-scan", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		var body struct {
+			Enable bool `json:"enable"`
+		}
+		_ = json.Unmarshal(c.Body(), &body)
+		client := NewISAPIClientForDevice(d, hub)
+		resp, err := client.SetQRScanEnabled(body.Enable)
 		if err != nil {
 			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
 		}
@@ -1045,15 +1404,15 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		// Verify mode follows the current QR-2FA toggle so the new user lands in
 		// the correct state without a separate sync step.
 		hikUser := HikUserInfo{
-			EmployeeNo:    person.EmployeeNo,
-			Name:          person.Name,
-			UserType:      person.PersonType,
-			Gender:        person.Gender,
-			LongTerm:      person.LongTerm,
-			DoorRight:     person.DoorRight,
-			PlanTemplate:  person.PlanTemplate,
-			LocalUIRight:  person.PersonRole == "administrator",
-			CheckUser:     person.AttendanceOnly,
+			EmployeeNo:     person.EmployeeNo,
+			Name:           person.Name,
+			UserType:       person.PersonType,
+			Gender:         person.Gender,
+			LongTerm:       person.LongTerm,
+			DoorRight:      person.DoorRight,
+			PlanTemplate:   person.PlanTemplate,
+			LocalUIRight:   person.PersonRole == "administrator",
+			CheckUser:      person.AttendanceOnly,
 			UserVerifyMode: qrAuth.ModeForDevice(ctx, d.DeviceID),
 		}
 		if person.ValidBegin != nil {
@@ -1073,6 +1432,7 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		resp, err := client.EnrolFace(fdid, faceLibType, person.EmployeeNo, person.Name, jpeg)
 		if err != nil {
 			_ = store.UpdateFaceStatus(ctx, face.ID, "failed")
+			face.Status = "failed" // keep the returned object in sync with the DB
 			return c.Status(502).JSON(fiber.Map{
 				"ok":             false,
 				"face":           face,
@@ -1082,6 +1442,7 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 			})
 		}
 		_ = store.UpdateFaceStatus(ctx, face.ID, "enrolled")
+		face.Status = "enrolled" // keep the returned object in sync with the DB
 		return c.JSON(fiber.Map{
 			"ok":             true,
 			"face":           face,
@@ -1467,12 +1828,12 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		for _, d := range devs {
 			eff, _ := settings.DeviceRequiresQR(c.Context(), d.DeviceID)
 			out = append(out, fiber.Map{
-				"deviceId":         d.DeviceID,
-				"name":             d.Name,
-				"model":            d.Model,
-				"online":           d.Online,
-				"requireQR2FA":     eff,
-				"agentId":          d.AgentID,
+				"deviceId":     d.DeviceID,
+				"name":         d.Name,
+				"model":        d.Model,
+				"online":       d.Online,
+				"requireQR2FA": eff,
+				"agentId":      d.AgentID,
 			})
 		}
 		return c.JSON(out)
@@ -1733,24 +2094,26 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		_ = store.CreateFace(ctx, face)
 		client := NewISAPIClientForDevice(d, hub)
 		hikUser := HikUserInfo{
-			EmployeeNo:    person.EmployeeNo,
-			Name:          person.Name,
-			UserType:      person.PersonType,
-			Gender:        person.Gender,
-			LongTerm:      person.LongTerm,
-			DoorRight:     person.DoorRight,
-			PlanTemplate:  person.PlanTemplate,
-			LocalUIRight:  person.PersonRole == "administrator",
-			CheckUser:     person.AttendanceOnly,
+			EmployeeNo:     person.EmployeeNo,
+			Name:           person.Name,
+			UserType:       person.PersonType,
+			Gender:         person.Gender,
+			LongTerm:       person.LongTerm,
+			DoorRight:      person.DoorRight,
+			PlanTemplate:   person.PlanTemplate,
+			LocalUIRight:   person.PersonRole == "administrator",
+			CheckUser:      person.AttendanceOnly,
 			UserVerifyMode: qrAuth.ModeForDevice(ctx, d.DeviceID),
 		}
 		_, _ = client.UpsertUserOnDevice(hikUser)
 		resp, err := client.EnrolFace(fdid, faceLibType, person.EmployeeNo, person.Name, jpeg)
 		if err != nil {
 			_ = store.UpdateFaceStatus(ctx, face.ID, "failed")
+			face.Status = "failed" // keep the returned object in sync with the DB
 			return c.Status(502).JSON(fiber.Map{"ok": false, "face": face, "error": err.Error(), "deviceResponse": json.RawMessage(safeJSONFromBytes([]byte(resp)))})
 		}
 		_ = store.UpdateFaceStatus(ctx, face.ID, "enrolled")
+		face.Status = "enrolled" // keep the returned object in sync with the DB
 		return c.JSON(fiber.Map{"ok": true, "face": face, "deviceResponse": json.RawMessage(safeJSONFromBytes([]byte(resp)))})
 	})
 
@@ -1968,6 +2331,208 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		return c.Send(jpeg)
 	})
 
+	// ---------- v1: enrolment, schedules, health, intercom, QR (third-party) ----------
+	// These mirror the admin endpoints; reachable() allows direct / agent / OTAP.
+
+	v1.Post("/devices/:id/capture/face", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		resp, err := NewISAPIClientForDevice(d, hub).CaptureFaceData(c.Query("infrared") == "true")
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+	v1.Post("/devices/:id/capture/card", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		resp, err := NewISAPIClientForDevice(d, hub).CaptureCardInfo()
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+	v1.Post("/devices/:id/capture/fingerprint", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		finger, _ := strconv.Atoi(c.Query("finger", "1"))
+		resp, err := NewISAPIClientForDevice(d, hub).CaptureFingerPrint(finger)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+	v1.Post("/devices/:id/cards", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		var b struct{ EmployeeNo, CardNo, CardType, Mode string }
+		if e := json.Unmarshal(c.Body(), &b); e != nil || b.EmployeeNo == "" || b.CardNo == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "employeeNo and cardNo required"})
+		}
+		resp, err := NewISAPIClientForDevice(d, hub).SetCardInfo(b.EmployeeNo, b.CardNo, b.CardType, b.Mode)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+	v1.Delete("/devices/:id/cards/:cardNo", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		resp, err := NewISAPIClientForDevice(d, hub).DeleteCard(c.Params("cardNo"))
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+	v1.Post("/devices/:id/fingerprints", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		var b struct {
+			EmployeeNo    string `json:"employeeNo"`
+			FingerPrintID int    `json:"fingerPrintID"`
+			FingerData    string `json:"fingerData"`
+		}
+		if e := json.Unmarshal(c.Body(), &b); e != nil || b.EmployeeNo == "" || b.FingerData == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "employeeNo and fingerData required"})
+		}
+		resp, err := NewISAPIClientForDevice(d, hub).SetFingerPrint(b.EmployeeNo, b.FingerPrintID, b.FingerData)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+	v1.Delete("/devices/:id/fingerprints/:employeeNo", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		finger, _ := strconv.Atoi(c.Query("finger", "0"))
+		resp, err := NewISAPIClientForDevice(d, hub).DeleteFingerPrint(c.Params("employeeNo"), finger)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+	v1.Get("/devices/:id/work-status", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		raw, err := NewISAPIClientForDevice(d, hub).GetAcsWorkStatus()
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "raw": raw})
+		}
+		return c.JSON(fiber.Map{"ok": true, "raw": raw})
+	})
+	v1.Put("/devices/:id/week-plan/:planNo", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		planNo, _ := strconv.Atoi(c.Params("planNo"))
+		var b struct {
+			Days []WeekPlanDay `json:"days"`
+		}
+		if e := json.Unmarshal(c.Body(), &b); e != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "invalid body"})
+		}
+		resp, err := NewISAPIClientForDevice(d, hub).SetWeekPlan(planNo, b.Days)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+	v1.Put("/devices/:id/plan-template/:tplNo", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		tplNo, _ := strconv.Atoi(c.Params("tplNo"))
+		var b struct {
+			Name       string `json:"name"`
+			WeekPlanNo int    `json:"weekPlanNo"`
+		}
+		_ = json.Unmarshal(c.Body(), &b)
+		resp, err := NewISAPIClientForDevice(d, hub).SetPlanTemplate(tplNo, b.Name, b.WeekPlanNo)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+	v1.Get("/devices/:id/qr-capability", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		supported, raw, err := NewISAPIClientForDevice(d, hub).SupportsCameraQR()
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "raw": raw})
+		}
+		return c.JSON(fiber.Map{"ok": true, "supported": supported, "raw": raw})
+	})
+	v1.Post("/devices/:id/qr-scan", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		var b struct {
+			Enable bool `json:"enable"`
+		}
+		_ = json.Unmarshal(c.Body(), &b)
+		resp, err := NewISAPIClientForDevice(d, hub).SetQRScanEnabled(b.Enable)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+	v1.Get("/devices/:id/intercom/channels", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		raw, err := NewISAPIClientForDevice(d, hub).GetTwoWayAudioChannels()
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "raw": raw})
+		}
+		return c.JSON(fiber.Map{"ok": true, "raw": raw})
+	})
+	v1.Post("/devices/:id/intercom/open", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		ch, _ := strconv.Atoi(c.Query("channel", "1"))
+		resp, err := NewISAPIClientForDevice(d, hub).OpenTwoWayAudio(ch)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+	v1.Post("/devices/:id/intercom/close", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		ch, _ := strconv.Atoi(c.Query("channel", "1"))
+		resp, err := NewISAPIClientForDevice(d, hub).CloseTwoWayAudio(ch)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+
 	// ---------- Live MJPEG stream (admin + v1) ----------
 	//
 	// Pulls snapshots in a loop and re-multiplexes them as multipart/x-mixed-replace
@@ -2038,13 +2603,13 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 			}
 		}
 		return c.JSON(fiber.Map{
-			"ok":            true,
-			"devices":       len(devices),
-			"devicesOnline": online,
-			"time":          time.Now().UTC(),
-			"mode":          "isapi",
+			"ok":              true,
+			"devices":         len(devices),
+			"devicesOnline":   online,
+			"time":            time.Now().UTC(),
+			"mode":            "isapi",
 			"eventCallbackIP": cfg.EventCallbackIP,
-			"pushPort":      cfg.PushPort,
+			"pushPort":        cfg.PushPort,
 		})
 	})
 

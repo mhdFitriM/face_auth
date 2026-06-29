@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
@@ -19,6 +20,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // ISAPIClient calls a Hikvision device's ISAPI endpoints with HTTP Digest auth.
@@ -35,6 +38,13 @@ type ISAPIClient struct {
 	// Optional: route via agent
 	AgentID string
 	Hub     *AgentHub
+
+	// Optional: route via OTAP push command queue (device dials out to us).
+	// When OTAP is true, requests are enqueued for the device to fetch on its
+	// next CommandRequest poll and we block for the CommandResult.
+	OTAP     bool
+	DeviceID string
+	store    *Store
 }
 
 func NewISAPIClient(ip string, port int, useHTTPS bool, user, pass string) *ISAPIClient {
@@ -68,6 +78,14 @@ func NewISAPIClient(ip string, port int, useHTTPS bool, user, pass string) *ISAP
 // if the device has agent_id set and the hub knows that agent.
 func NewISAPIClientForDevice(d *Device, hub *AgentHub) *ISAPIClient {
 	c := NewISAPIClient(d.IP, d.Port, d.UseHTTPS, d.ISAPIUsername, d.ISAPIPassword)
+	// OTAP push takes precedence: the device dials out to us, so no LAN reach
+	// (IP/agent) is required. Needs the store to enqueue/await commands.
+	if d.Reach == "otap" && hub != nil && hub.store != nil {
+		c.OTAP = true
+		c.DeviceID = d.DeviceID
+		c.store = hub.store
+		return c
+	}
 	if d.AgentID != "" && hub != nil {
 		c.AgentID = d.AgentID
 		c.Hub = hub
@@ -77,6 +95,10 @@ func NewISAPIClientForDevice(d *Device, hub *AgentHub) *ISAPIClient {
 
 // Do executes an HTTP request, handling Digest 401 challenge transparently.
 func (c *ISAPIClient) Do(method, path string, contentType string, bodyBytes []byte) (*http.Response, []byte, error) {
+	// If routed via OTAP push queue, delegate completely
+	if c.OTAP && c.store != nil {
+		return c.doViaOTAP(method, path, contentType, bodyBytes)
+	}
 	// If routed via agent, delegate completely
 	if c.AgentID != "" && c.Hub != nil {
 		return c.doViaAgent(method, path, contentType, bodyBytes)
@@ -157,6 +179,52 @@ func (c *ISAPIClient) doViaAgent(method, path, contentType string, body []byte) 
 		Body:       http.NoBody,
 	}
 	return synth, resp.RespBody, nil
+}
+
+// doViaOTAP enqueues an ISAPI request into the device's OTAP push command
+// queue and blocks until the device fetches it (CommandRequest) and reports
+// the result (CommandResult). The device dials out to our push listener, so
+// no LAN reachability (direct IP or agent) is required. Mirrors doViaAgent.
+func (c *ISAPIClient) doViaOTAP(method, path, contentType string, body []byte) (*http.Response, []byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	id := uuid.NewString()
+	dataFormat := "json"
+	if strings.Contains(strings.ToLower(contentType), "xml") {
+		dataFormat = "xml"
+	}
+	cmd := Command{
+		ID:         id,
+		DeviceID:   c.DeviceID,
+		Method:     method,
+		URL:        path,
+		DataFormat: dataFormat,
+	}
+	if len(body) > 0 {
+		cmd.BodyBase64 = base64.StdEncoding.EncodeToString(body)
+	}
+	if err := c.store.EnqueueCommand(ctx, cmd); err != nil {
+		return nil, nil, fmt.Errorf("otap enqueue: %w", err)
+	}
+
+	respBody, status, err := c.store.AwaitCommandResult(ctx, id, 30*time.Second)
+	if err != nil {
+		return nil, nil, fmt.Errorf("otap await: %w", err)
+	}
+	if status == 0 {
+		status = 200
+	}
+
+	hdrs := http.Header{}
+	hdrs.Set("Content-Type", "application/json")
+	synth := &http.Response{
+		StatusCode: status,
+		Status:     fmt.Sprintf("%d", status),
+		Header:     hdrs,
+		Body:       http.NoBody,
+	}
+	return synth, []byte(respBody), nil
 }
 
 type digestChallenge struct {
@@ -279,12 +347,12 @@ func (c *ISAPIClient) buildDigestAuth(method, uri string, d *digestChallenge) (s
 // ---------- High-level helpers ----------
 
 type DeviceInfo struct {
-	DeviceName     string `xml:"deviceName" json:"deviceName"`
-	DeviceID       string `xml:"deviceID" json:"deviceID"`
-	Model          string `xml:"model" json:"model"`
-	SerialNumber   string `xml:"serialNumber" json:"serialNumber"`
+	DeviceName      string `xml:"deviceName" json:"deviceName"`
+	DeviceID        string `xml:"deviceID" json:"deviceID"`
+	Model           string `xml:"model" json:"model"`
+	SerialNumber    string `xml:"serialNumber" json:"serialNumber"`
 	FirmwareVersion string `xml:"firmwareVersion" json:"firmwareVersion"`
-	MACAddress     string `xml:"macAddress" json:"macAddress"`
+	MACAddress      string `xml:"macAddress" json:"macAddress"`
 }
 
 // GetDeviceInfo fetches `/ISAPI/System/deviceInfo`. Hik returns XML by default.
@@ -315,17 +383,17 @@ func (c *ISAPIClient) GetDeviceInfo() (*DeviceInfo, error) {
 
 // HikUserInfo mirrors the fields the device's UserInfo/Record endpoint expects.
 type HikUserInfo struct {
-	EmployeeNo    string
-	Name          string
-	UserType      string // normal | visitor | blackList
-	Gender        string // male | female | unknown
-	LongTerm      bool   // if true, validity is ignored
-	ValidBegin    string // ISO local, e.g. "2026-05-11T00:00:00"
-	ValidEnd      string // ISO local
-	DoorRight     string // e.g. "1"
-	PlanTemplate  string // e.g. "1"
-	LocalUIRight  bool   // true = administrator on the device touchscreen
-	CheckUser     bool   // attendance-only mode
+	EmployeeNo     string
+	Name           string
+	UserType       string // normal | visitor | blackList
+	Gender         string // male | female | unknown
+	LongTerm       bool   // if true, validity is ignored
+	ValidBegin     string // ISO local, e.g. "2026-05-11T00:00:00"
+	ValidEnd       string // ISO local
+	DoorRight      string // e.g. "1"
+	PlanTemplate   string // e.g. "1"
+	LocalUIRight   bool   // true = administrator on the device touchscreen
+	CheckUser      bool   // attendance-only mode
 	UserVerifyMode string // e.g. "face" | "cardAndPw" | "" (leave device default)
 }
 
@@ -381,17 +449,17 @@ func (c *ISAPIClient) DeleteUserOnDevice(employeeNo string) (string, error) {
 
 // DeviceUserRecord is what comes back from /ISAPI/AccessControl/UserInfo/Search.
 type DeviceUserRecord struct {
-	EmployeeNo string                 `json:"employeeNo"`
-	Name       string                 `json:"name"`
-	UserType   string                 `json:"userType"`
-	Gender     string                 `json:"gender"`
-	Valid      *DeviceUserValid       `json:"Valid,omitempty"`
-	UserVerifyMode string             `json:"userVerifyMode,omitempty"`
-	DoorRight  string                 `json:"doorRight,omitempty"`
-	RightPlan  []map[string]any       `json:"RightPlan,omitempty"`
-	LocalUIRight bool                 `json:"localUIRight"`
-	CheckUser  bool                   `json:"checkUser"`
-	Raw        map[string]any         `json:"-"`
+	EmployeeNo     string           `json:"employeeNo"`
+	Name           string           `json:"name"`
+	UserType       string           `json:"userType"`
+	Gender         string           `json:"gender"`
+	Valid          *DeviceUserValid `json:"Valid,omitempty"`
+	UserVerifyMode string           `json:"userVerifyMode,omitempty"`
+	DoorRight      string           `json:"doorRight,omitempty"`
+	RightPlan      []map[string]any `json:"RightPlan,omitempty"`
+	LocalUIRight   bool             `json:"localUIRight"`
+	CheckUser      bool             `json:"checkUser"`
+	Raw            map[string]any   `json:"-"`
 }
 
 type DeviceUserValid struct {
@@ -767,6 +835,421 @@ func (c *ISAPIClient) SearchFaces(fdid, faceLibType string, maxResults int) (str
 	return string(respBody), nil
 }
 
+// ============================================================================
+// Phase 2 — Better enrolment: capture-at-device + card / fingerprint write.
+//
+// "Capture" endpoints ask the reader to acquire a credential live (face shown
+// to the camera, card swiped, finger pressed) and return the captured data, so
+// enrolment happens at the door instead of uploading a photo. All of these flow
+// through Do(), so they inherit OTAP / agent / direct routing automatically.
+//
+// NOTE: exact ISAPI shapes vary by firmware. These follow the ISAPI Access
+// Control spec and return the device's raw response so the caller (and the
+// admin UI) can see what came back; verify against the live device firmware.
+// ============================================================================
+
+// CaptureFaceData asks the device to capture a live face from its camera and
+// return the face record (JSON, may include a faceURL or base64). Pass
+// infrared=true to also capture the IR image where supported.
+func (c *ISAPIClient) CaptureFaceData(infrared bool) (string, error) {
+	body, _ := json.Marshal(map[string]any{
+		"CaptureFaceDataCond": map[string]any{
+			"captureInfrared": infrared,
+			"dataType":        "url",
+		},
+	})
+	resp, respBody, err := c.Do("POST", "/ISAPI/AccessControl/CaptureFaceData?format=json", "application/json", body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 200 {
+		return string(respBody), fmt.Errorf("capture face: status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return string(respBody), nil
+}
+
+// CaptureCardInfo asks the device to wait for a card swipe on its reader and
+// returns the captured card number.
+func (c *ISAPIClient) CaptureCardInfo() (string, error) {
+	body, _ := json.Marshal(map[string]any{
+		"CaptureCardInfoCond": map[string]any{},
+	})
+	resp, respBody, err := c.Do("POST", "/ISAPI/AccessControl/CaptureCardInfo?format=json", "application/json", body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 200 {
+		return string(respBody), fmt.Errorf("capture card: status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return string(respBody), nil
+}
+
+// CaptureFingerPrint asks the device to capture a fingerprint live on its
+// sensor and returns the captured template (base64 in the JSON response).
+func (c *ISAPIClient) CaptureFingerPrint(fingerNo int) (string, error) {
+	if fingerNo <= 0 {
+		fingerNo = 1
+	}
+	body, _ := json.Marshal(map[string]any{
+		"CaptureFingerPrintCond": map[string]any{
+			"fingerNo": fingerNo,
+		},
+	})
+	resp, respBody, err := c.Do("POST", "/ISAPI/AccessControl/CaptureFingerPrint?format=json", "application/json", body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 200 {
+		return string(respBody), fmt.Errorf("capture fingerprint: status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return string(respBody), nil
+}
+
+// SetCardInfo creates (or, if mode=="modify", updates) a card bound to a user.
+// cardType is typically "normalCard". Mirrors UserInfo Record vs Modify.
+func (c *ISAPIClient) SetCardInfo(employeeNo, cardNo, cardType, mode string) (string, error) {
+	if cardType == "" {
+		cardType = "normalCard"
+	}
+	body, _ := json.Marshal(map[string]any{
+		"CardInfo": map[string]any{
+			"employeeNo": employeeNo,
+			"cardNo":     cardNo,
+			"cardType":   cardType,
+		},
+	})
+	method, path := "POST", "/ISAPI/AccessControl/CardInfo/Record?format=json"
+	if mode == "modify" {
+		method, path = "PUT", "/ISAPI/AccessControl/CardInfo/Modify?format=json"
+	}
+	resp, respBody, err := c.Do(method, path, "application/json", body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 200 {
+		return string(respBody), fmt.Errorf("set card: status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return string(respBody), nil
+}
+
+// DeleteCard removes a card by its number.
+func (c *ISAPIClient) DeleteCard(cardNo string) (string, error) {
+	body, _ := json.Marshal(map[string]any{
+		"CardInfoDelCond": map[string]any{
+			"CardNoList": []map[string]any{{"cardNo": cardNo}},
+		},
+	})
+	resp, respBody, err := c.Do("PUT", "/ISAPI/AccessControl/CardInfo/Delete?format=json", "application/json", body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 200 {
+		return string(respBody), fmt.Errorf("delete card: status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return string(respBody), nil
+}
+
+// SetFingerPrint uploads a fingerprint template (base64) for a user/finger.
+// enableCardReader binds the print so it works as a credential at the reader.
+func (c *ISAPIClient) SetFingerPrint(employeeNo string, fingerPrintID int, fingerData string) (string, error) {
+	if fingerPrintID <= 0 {
+		fingerPrintID = 1
+	}
+	body, _ := json.Marshal(map[string]any{
+		"FingerPrintCfg": map[string]any{
+			"employeeNo":    employeeNo,
+			"enableCardReader": []int{1},
+			"fingerPrintID": fingerPrintID,
+			"deleteFingerPrint": false,
+			"fingerType":    "normalFP",
+			"fingerData":    fingerData,
+		},
+	})
+	resp, respBody, err := c.Do("POST", "/ISAPI/AccessControl/FingerPrintCfg?format=json", "application/json", body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 200 {
+		return string(respBody), fmt.Errorf("set fingerprint: status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return string(respBody), nil
+}
+
+// DeleteFingerPrint removes a user's fingerprint(s). fingerPrintID<=0 deletes all.
+func (c *ISAPIClient) DeleteFingerPrint(employeeNo string, fingerPrintID int) (string, error) {
+	cond := map[string]any{
+		"mode":           "byEmployeeNo",
+		"EmployeeNoList": []map[string]any{{"employeeNo": employeeNo}},
+	}
+	if fingerPrintID > 0 {
+		cond["fingerPrintID"] = fingerPrintID
+	}
+	body, _ := json.Marshal(map[string]any{"FingerPrintDelete": cond})
+	resp, respBody, err := c.Do("PUT", "/ISAPI/AccessControl/FingerPrintDelete?format=json", "application/json", body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 200 {
+		return string(respBody), fmt.Errorf("delete fingerprint: status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return string(respBody), nil
+}
+
+// ============================================================================
+// Phase 4 — Live video & intercom (two-way audio).
+//
+// Live view itself already works via the MJPEG re-multiplexer (/stream.mjpg)
+// built on GetSnapshot. These add the intercom control plane: open/close a
+// two-way audio channel so an operator can talk to whoever is at the door.
+// The audio MEDIA pipeline (streaming G.711 to/from the browser) is a separate
+// follow-up; these methods set up and tear down the channel and report support.
+// ============================================================================
+
+// GetTwoWayAudioChannels returns the two-way audio channel capabilities JSON.
+func (c *ISAPIClient) GetTwoWayAudioChannels() (string, error) {
+	resp, body, err := c.Do("GET", "/ISAPI/System/TwoWayAudio/channels", "", nil)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 200 {
+		return string(body), fmt.Errorf("twoWayAudio channels: status %d", resp.StatusCode)
+	}
+	return string(body), nil
+}
+
+// OpenTwoWayAudio opens the intercom channel (default channel 1) and returns
+// the device's session response.
+func (c *ISAPIClient) OpenTwoWayAudio(channel int) (string, error) {
+	if channel <= 0 {
+		channel = 1
+	}
+	path := fmt.Sprintf("/ISAPI/System/TwoWayAudio/channels/%d/open", channel)
+	resp, body, err := c.Do("PUT", path, "application/xml", []byte(""))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 200 {
+		return string(body), fmt.Errorf("open twoWayAudio: status %d: %s", resp.StatusCode, string(body))
+	}
+	return string(body), nil
+}
+
+// CloseTwoWayAudio tears down the intercom channel.
+func (c *ISAPIClient) CloseTwoWayAudio(channel int) (string, error) {
+	if channel <= 0 {
+		channel = 1
+	}
+	path := fmt.Sprintf("/ISAPI/System/TwoWayAudio/channels/%d/close", channel)
+	resp, body, err := c.Do("PUT", path, "application/xml", []byte(""))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 200 {
+		return string(body), fmt.Errorf("close twoWayAudio: status %d: %s", resp.StatusCode, string(body))
+	}
+	return string(body), nil
+}
+
+// ============================================================================
+// Phase 3 — Health & access schedules.
+//
+// GetAcsWorkStatus reports device health (door/lock/tamper/battery/capacity).
+// Week plans + plan templates control WHEN a user is allowed through: a week
+// plan defines per-weekday time windows, a plan template references a week plan
+// (+ optional holiday group), and a user's RightPlan points at a template.
+// All route via OTAP / agent / direct through Do(); shapes are firmware-
+// dependent, so methods return the device's raw response.
+// ============================================================================
+
+// GetAcsWorkStatus returns the access controller's working status JSON.
+func (c *ISAPIClient) GetAcsWorkStatus() (string, error) {
+	resp, body, err := c.Do("GET", "/ISAPI/AccessControl/AcsWorkStatus?format=json", "", nil)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 200 {
+		return string(body), fmt.Errorf("work status: status %d", resp.StatusCode)
+	}
+	return string(body), nil
+}
+
+// WeekPlanDay is one weekday's allow window in a week plan.
+type WeekPlanDay struct {
+	Week   string `json:"week"`   // "Monday".."Sunday"
+	Enable bool   `json:"enable"`
+	Begin  string `json:"begin"`  // "HH:MM:SS"
+	End    string `json:"end"`    // "HH:MM:SS"
+}
+
+// SetWeekPlan writes a UserRight week plan (one time segment per weekday) under
+// the given plan number. Days not supplied default to a full-day allow window.
+func (c *ISAPIClient) SetWeekPlan(planNo int, days []WeekPlanDay) (string, error) {
+	if planNo <= 0 {
+		planNo = 1
+	}
+	weekdays := []string{"Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"}
+	byDay := map[string]WeekPlanDay{}
+	for _, d := range days {
+		byDay[d.Week] = d
+	}
+	cfg := make([]map[string]any, 0, len(weekdays))
+	for _, wd := range weekdays {
+		d, ok := byDay[wd]
+		if !ok {
+			d = WeekPlanDay{Week: wd, Enable: true, Begin: "00:00:00", End: "23:59:59"}
+		}
+		if d.Begin == "" {
+			d.Begin = "00:00:00"
+		}
+		if d.End == "" {
+			d.End = "23:59:59"
+		}
+		cfg = append(cfg, map[string]any{
+			"week":   wd,
+			"id":     1,
+			"enable": d.Enable,
+			"TimeSegment": map[string]any{
+				"beginTime": d.Begin,
+				"endTime":   d.End,
+			},
+		})
+	}
+	body, _ := json.Marshal(map[string]any{
+		"UserRightWeekPlanCfg": map[string]any{
+			"enable":      true,
+			"WeekPlanCfg": cfg,
+		},
+	})
+	path := fmt.Sprintf("/ISAPI/AccessControl/UserRightWeekPlanCfg/%d?format=json", planNo)
+	resp, respBody, err := c.Do("PUT", path, "application/json", body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 200 {
+		return string(respBody), fmt.Errorf("set week plan: status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return string(respBody), nil
+}
+
+// GetWeekPlan reads a week plan's raw JSON.
+func (c *ISAPIClient) GetWeekPlan(planNo int) (string, error) {
+	if planNo <= 0 {
+		planNo = 1
+	}
+	path := fmt.Sprintf("/ISAPI/AccessControl/UserRightWeekPlanCfg/%d?format=json", planNo)
+	_, body, err := c.Do("GET", path, "", nil)
+	return string(body), err
+}
+
+// SetPlanTemplate writes a plan template that references a week plan number.
+func (c *ISAPIClient) SetPlanTemplate(tplNo int, name string, weekPlanNo int) (string, error) {
+	if tplNo <= 0 {
+		tplNo = 1
+	}
+	if weekPlanNo <= 0 {
+		weekPlanNo = 1
+	}
+	if name == "" {
+		name = fmt.Sprintf("template%d", tplNo)
+	}
+	body, _ := json.Marshal(map[string]any{
+		"UserRightPlanTemplate": map[string]any{
+			"enable":       true,
+			"templateName": name,
+			"weekPlanNo":   weekPlanNo,
+		},
+	})
+	path := fmt.Sprintf("/ISAPI/AccessControl/UserRightPlanTemplate/%d?format=json", tplNo)
+	resp, respBody, err := c.Do("PUT", path, "application/json", body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 200 {
+		return string(respBody), fmt.Errorf("set plan template: status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return string(respBody), nil
+}
+
+// GetPlanTemplate reads a plan template's raw JSON.
+func (c *ISAPIClient) GetPlanTemplate(tplNo int) (string, error) {
+	if tplNo <= 0 {
+		tplNo = 1
+	}
+	path := fmt.Sprintf("/ISAPI/AccessControl/UserRightPlanTemplate/%d?format=json", tplNo)
+	_, body, err := c.Do("GET", path, "", nil)
+	return string(body), err
+}
+
+// ============================================================================
+// QR-via-camera — let the device's own camera read a user's QR code and
+// authenticate (no third-party USB scanner). Whether this is possible depends
+// entirely on the device firmware: many terminals report QRCode = notSupport.
+// We probe capability first and return the device's raw responses so the admin
+// can see exactly what the hardware allows.
+// ============================================================================
+
+// GetAccessControlCapabilities returns the raw AccessControl capabilities JSON.
+func (c *ISAPIClient) GetAccessControlCapabilities() (string, error) {
+	resp, body, err := c.Do("GET", "/ISAPI/AccessControl/capabilities?format=json", "", nil)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 200 {
+		return string(body), fmt.Errorf("capabilities: status %d", resp.StatusCode)
+	}
+	return string(body), nil
+}
+
+// SupportsCameraQR best-effort detects whether the device camera can scan QR
+// codes, scanning the capabilities JSON for the various flag names firmware
+// uses. Returns (supported, rawCapabilities, error).
+func (c *ISAPIClient) SupportsCameraQR() (bool, string, error) {
+	raw, err := c.GetAccessControlCapabilities()
+	if err != nil {
+		return false, raw, err
+	}
+	low := strings.ToLower(raw)
+	// Firmware exposes QR support under several names; treat an explicit
+	// "...QRCode...":true / "support" as supported, "notSupport" as not.
+	for _, key := range []string{"issupportscanqrcode", "issupportqrcode", "qrcode", "scanqrcode"} {
+		if !strings.Contains(low, key) {
+			continue
+		}
+		// Find the snippet after the key and check its value.
+		idx := strings.Index(low, key)
+		win := low[idx:min(idx+60, len(low))]
+		if strings.Contains(win, "true") || strings.Contains(win, "\"support\"") || strings.Contains(win, ">support<") {
+			return true, raw, nil
+		}
+		if strings.Contains(win, "notsupport") || strings.Contains(win, "false") {
+			return false, raw, nil
+		}
+		// Key present but value unclear — report present (caller shows raw).
+		return true, raw, nil
+	}
+	return false, raw, nil
+}
+
+// SetQRScanEnabled enables/disables camera QR-code recognition on the device.
+// The exact config endpoint is firmware-dependent; this targets the documented
+// QR config and returns the device's raw response (a 4xx here usually means the
+// firmware has no camera-QR support).
+func (c *ISAPIClient) SetQRScanEnabled(enable bool) (string, error) {
+	body, _ := json.Marshal(map[string]any{
+		"QRCodeCfg": map[string]any{
+			"enable": enable,
+		},
+	})
+	resp, respBody, err := c.Do("PUT", "/ISAPI/AccessControl/QRCodeCfg?format=json", "application/json", body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 200 {
+		return string(respBody), fmt.Errorf("set QR scan: status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return string(respBody), nil
+}
+
 // SetAlarmHost configures the device to push events to our HTTP listener.
 // callbackURL is the path on our server (e.g., "/hik-event").
 func (c *ISAPIClient) SetAlarmHost(hostIP string, hostPort int, callbackPath string, slot int) (string, error) {
@@ -794,6 +1277,202 @@ func (c *ISAPIClient) SetAlarmHost(hostIP string, hostPort int, callbackPath str
 		return string(respBody), fmt.Errorf("setAlarmHost: status %d: %s", resp.StatusCode, string(respBody))
 	}
 	return string(respBody), nil
+}
+
+// ---------- Wi-Fi (wireless network) ----------
+//
+// Hikvision face terminals that ship a Wi-Fi module expose it as an extra
+// network interface (the wired NIC is id 1, the wireless NIC is usually id 2).
+// The relevant ISAPI nodes are:
+//
+//	GET  /ISAPI/System/Network/interfaces                      — list interfaces
+//	GET  /ISAPI/System/Network/interfaces/<id>/wireless        — current Wi-Fi config
+//	PUT  /ISAPI/System/Network/interfaces/<id>/wireless        — set Wi-Fi config
+//	GET  /ISAPI/System/Network/interfaces/<id>/wireless/accessPointList — scan APs
+//
+// Schemas vary across firmware, so the read/scan helpers return the raw device
+// body and we only construct XML for the write path.
+
+// WifiAccessPoint is one entry from a Wi-Fi scan.
+type WifiAccessPoint struct {
+	SSID         string `json:"ssid"`
+	SignalLevel  int    `json:"signalStrength"`
+	SecurityMode string `json:"securityMode"`
+	Channel      int    `json:"channel"`
+}
+
+// netInterfaceList mirrors /ISAPI/System/Network/interfaces enough to spot the
+// wireless NIC's id.
+type netInterfaceList struct {
+	XMLName    xml.Name `xml:"NetworkInterfaceList"`
+	Interfaces []struct {
+		ID          string `xml:"id"`
+		IfType      string `xml:"ifType"` // e.g. "wireless", "ethernet"
+		HasWireless string `xml:"Wireless>enabled"`
+	} `xml:"NetworkInterface"`
+}
+
+// FindWirelessInterface inspects the device's interface list and returns the id
+// of the wireless NIC. Returns ("", error) if the device has no Wi-Fi NIC.
+func (c *ISAPIClient) FindWirelessInterface() (string, error) {
+	resp, body, err := c.Do("GET", "/ISAPI/System/Network/interfaces", "", nil)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("interfaces: status %d: %s", resp.StatusCode, string(body))
+	}
+	var list netInterfaceList
+	if err := xml.Unmarshal(body, &list); err != nil {
+		return "", fmt.Errorf("interfaces decode: %w", err)
+	}
+	for _, ni := range list.Interfaces {
+		if strings.EqualFold(ni.IfType, "wireless") || ni.HasWireless != "" {
+			if ni.ID != "" {
+				return ni.ID, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("device reports no wireless interface")
+}
+
+// wirelessIfaceID resolves the interface id to use: the caller's value if set,
+// otherwise auto-detected, otherwise the common default "2".
+func (c *ISAPIClient) wirelessIfaceID(ifID string) string {
+	if ifID != "" {
+		return ifID
+	}
+	if detected, err := c.FindWirelessInterface(); err == nil {
+		return detected
+	}
+	return "2"
+}
+
+// GetWifi returns the device's current wireless config as the raw device body
+// (XML on most firmware). ifID may be empty to auto-detect.
+func (c *ISAPIClient) GetWifi(ifID string) (string, error) {
+	ifID = c.wirelessIfaceID(ifID)
+	path := fmt.Sprintf("/ISAPI/System/Network/interfaces/%s/wireless", ifID)
+	resp, body, err := c.Do("GET", path, "", nil)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 200 {
+		return string(body), fmt.Errorf("getWifi: status %d", resp.StatusCode)
+	}
+	return string(body), nil
+}
+
+// ScanWifi asks the device to scan for nearby access points. Not all firmware
+// supports this; the raw body is returned alongside any parsed list.
+func (c *ISAPIClient) ScanWifi(ifID string) ([]WifiAccessPoint, string, error) {
+	ifID = c.wirelessIfaceID(ifID)
+	path := fmt.Sprintf("/ISAPI/System/Network/interfaces/%s/wireless/accessPointList", ifID)
+	resp, body, err := c.Do("GET", path, "", nil)
+	if err != nil {
+		return nil, "", err
+	}
+	if resp.StatusCode != 200 {
+		return nil, string(body), fmt.Errorf("scanWifi: status %d", resp.StatusCode)
+	}
+	var parsed struct {
+		XMLName xml.Name `xml:"AccessPointList"`
+		APs     []struct {
+			SSID         string `xml:"ssid"`
+			SignalLevel  int    `xml:"signalStrength"`
+			SecurityMode string `xml:"WirelessSecurity>securityMode"`
+			Channel      int    `xml:"channel"`
+		} `xml:"AccessPoint"`
+	}
+	out := []WifiAccessPoint{}
+	if xml.Unmarshal(body, &parsed) == nil {
+		for _, ap := range parsed.APs {
+			out = append(out, WifiAccessPoint{
+				SSID:         ap.SSID,
+				SignalLevel:  ap.SignalLevel,
+				SecurityMode: ap.SecurityMode,
+				Channel:      ap.Channel,
+			})
+		}
+	}
+	return out, string(body), nil
+}
+
+// WifiConfig is the subset of wireless settings we let callers change.
+type WifiConfig struct {
+	SSID         string // network name to join
+	Key          string // pre-shared key / passphrase
+	SecurityMode string // disable | WEP | WPA-personal | WPA2-personal (default WPA2-personal)
+	Algorithm    string // TKIP | AES | TKIP/AES (default AES)
+	Enabled      bool   // turn the radio on (default true)
+}
+
+// SetWifi configures the device to join an infrastructure Wi-Fi network. The
+// wireless interface keeps DHCP for its IP; only the SSID/security are written.
+func (c *ISAPIClient) SetWifi(ifID string, w WifiConfig) (string, error) {
+	ifID = c.wirelessIfaceID(ifID)
+	if w.SecurityMode == "" {
+		w.SecurityMode = "WPA2-personal"
+	}
+	if w.Algorithm == "" {
+		w.Algorithm = "AES"
+	}
+
+	var security string
+	if strings.EqualFold(w.SecurityMode, "disable") || w.SecurityMode == "" {
+		security = `    <WirelessSecurity>
+        <securityMode>disable</securityMode>
+    </WirelessSecurity>`
+	} else if strings.EqualFold(w.SecurityMode, "WEP") {
+		security = fmt.Sprintf(`    <WirelessSecurity>
+        <securityMode>WEP</securityMode>
+        <WEP>
+            <authenticationType>open</authenticationType>
+            <defaultTransmitKeyIndex>1</defaultTransmitKeyIndex>
+            <wepKeyLength>64bit</wepKeyLength>
+            <EncryptionKeyList>
+                <EncryptionKey>
+                    <id>1</id>
+                    <WEPEncryptionKey>%s</WEPEncryptionKey>
+                </EncryptionKey>
+            </EncryptionKeyList>
+        </WEP>
+    </WirelessSecurity>`, xmlEscape(w.Key))
+	} else {
+		security = fmt.Sprintf(`    <WirelessSecurity>
+        <securityMode>%s</securityMode>
+        <WPA>
+            <algorithmType>%s</algorithmType>
+            <sharedKey>%s</sharedKey>
+        </WPA>
+    </WirelessSecurity>`, xmlEscape(w.SecurityMode), xmlEscape(w.Algorithm), xmlEscape(w.Key))
+	}
+
+	xmlBody := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<Wireless version="2.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+    <enabled>%t</enabled>
+    <wirelessNetworkMode>infrastructure</wirelessNetworkMode>
+    <ssid>%s</ssid>
+    <channel>auto</channel>
+%s
+</Wireless>`, w.Enabled, xmlEscape(w.SSID), security)
+
+	path := fmt.Sprintf("/ISAPI/System/Network/interfaces/%s/wireless", ifID)
+	resp, respBody, err := c.Do("PUT", path, "application/xml", []byte(xmlBody))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 200 {
+		return string(respBody), fmt.Errorf("setWifi: status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return string(respBody), nil
+}
+
+// xmlEscape escapes a value for safe interpolation into an XML element body.
+func xmlEscape(s string) string {
+	var buf bytes.Buffer
+	_ = xml.EscapeText(&buf, []byte(s))
+	return buf.String()
 }
 
 // ---------- Helpers ----------
