@@ -439,37 +439,54 @@ function DevicesTab() {
 // Live view (MJPEG re-multiplexed snapshots) + snapshot grab + intercom control.
 function LiveViewModal({ device, onClose }: { device: any; onClose: () => void }) {
   const id = device.deviceID
-  const [intercom, setIntercom] = useState<'idle' | 'opening' | 'open' | 'closing'>('idle')
+  const [supported, setSupported] = useState<boolean | null>(null) // null = checking
+  const [status, setStatus] = useState('') // device call status (idle/ring/onCall…)
+  const [busy, setBusy] = useState('')
   const [msg, setMsg] = useState('')
   const [err, setErr] = useState('')
 
-  const openIntercom = async () => {
-    setIntercom('opening'); setErr(''); setMsg('')
-    try { await api.intercomOpen(id); setIntercom('open'); setMsg('Intercom channel open. (Audio media pipeline is a follow-up — this opens the device channel.)') }
-    catch (e: any) { setErr(String(e)); setIntercom('idle') }
+  const refreshStatus = () => api.intercomStatus(id)
+    .then((r) => { try { setStatus(JSON.parse(r.raw).CallStatus?.status || '') } catch { setStatus('') } })
+    .catch(() => {})
+
+  // Probe intercom support (VideoIntercom call signaling) when the modal opens.
+  useEffect(() => {
+    api.intercomCapabilities(id)
+      .then((r) => { setSupported(!!r.supported); if (r.supported) refreshStatus() })
+      .catch(() => setSupported(false))
+  }, [id])
+
+  const signal = async (cmd: string, label: string) => {
+    setBusy(cmd); setErr(''); setMsg('')
+    try {
+      await api.intercomSignal(id, cmd)
+      setMsg(`${label} sent.`)
+      await refreshStatus()
+    } catch (e: any) { setErr(String(e)) } finally { setBusy('') }
   }
-  const closeIntercom = async () => {
-    setIntercom('closing'); setErr('')
-    try { await api.intercomClose(id); setIntercom('idle'); setMsg('Intercom channel closed.') }
-    catch (e: any) { setErr(String(e)); setIntercom('open') }
-  }
-  // Close the channel on unmount if it was left open.
-  useEffect(() => () => { if (intercom === 'open') api.intercomClose(id).catch(() => {}) }, [intercom, id])
+  // Best-effort hang up if the modal closes mid-call.
+  useEffect(() => () => { if (status && status !== 'idle') api.intercomSignal(id, 'hangUp').catch(() => {}) }, [status, id])
 
   return (
     <Modal title={`Live — ${device.name || id}`} onClose={onClose}>
       <div className="live-frame" style={{ marginBottom: 12 }}>
         <img className="snap-img" alt="live" src={api.mjpegUrl(id, 6)} />
       </div>
-      <div className="form-row" style={{ gap: 8, flexWrap: 'wrap' }}>
+      <div className="form-row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
         <a className="btn-ghost" href={`${api.snapshotUrl(id)}${api.snapshotUrl(id).includes('?') ? '&' : '?'}t=${Date.now()}`} target="_blank" rel="noreferrer">Open snapshot</a>
-        {intercom === 'open'
-          ? <button type="button" className="btn-danger" onClick={closeIntercom} disabled={intercom !== 'open'}>Hang up</button>
-          : <button type="button" className="btn-primary" onClick={openIntercom} disabled={intercom === 'opening'}>{intercom === 'opening' ? 'Calling…' : 'Intercom call'}</button>}
+        {supported === false && <span className="badge">Intercom not supported on this device</span>}
+        {supported === null && <span className="badge">Checking intercom…</span>}
+        {supported === true && <>
+          <button type="button" className="btn-primary" disabled={!!busy} onClick={() => signal('request', 'Call')}>{busy === 'request' ? 'Calling…' : 'Call'}</button>
+          <button type="button" className="btn-ghost" disabled={!!busy} onClick={() => signal('answer', 'Answer')}>{busy === 'answer' ? 'Answering…' : 'Answer'}</button>
+          <button type="button" className="btn-danger" disabled={!!busy} onClick={() => signal('hangUp', 'Hang up')}>{busy === 'hangUp' ? 'Hanging up…' : 'Hang up'}</button>
+          {status && <span className="muted small">status: <b>{status}</b></span>}
+        </>}
       </div>
       <p className="muted small" style={{ marginTop: 8 }}>
-        Live view streams re-multiplexed snapshots (MJPEG). Intercom opens the device's two-way audio channel;
-        carrying microphone/speaker audio in the browser is a follow-up that needs the device online.
+        Live view streams re-multiplexed snapshots (MJPEG). Intercom uses the device's VideoIntercom call
+        signaling — Call rings it, Answer picks up an incoming call, Hang up ends it. Two-way audio media
+        between the browser and the device is a follow-up.
       </p>
       {msg && <div className="muted small">{msg}</div>}
       {err && <div className="err">{err}</div>}
@@ -3014,9 +3031,9 @@ const ENDPOINTS: EndpointDef[] = [
   // ---- QR-via-camera + intercom (v1) ----
   { method: 'GET', path: '/api/v1/devices/:id/qr-capability', group: 'v1 — QR & Intercom', summary: 'Does the camera support QR?', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
   { method: 'POST', path: '/api/v1/devices/:id/qr-scan', group: 'v1 — QR & Intercom', summary: 'Enable/disable camera QR scanning', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { enable: true } },
-  { method: 'GET', path: '/api/v1/devices/:id/intercom/channels', group: 'v1 — QR & Intercom', summary: 'Two-way audio capabilities', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
-  { method: 'POST', path: '/api/v1/devices/:id/intercom/open', group: 'v1 — QR & Intercom', summary: 'Open the intercom channel', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'channel', in: 'query', type: 'int', description: 'default 1' }] },
-  { method: 'POST', path: '/api/v1/devices/:id/intercom/close', group: 'v1 — QR & Intercom', summary: 'Close the intercom channel', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'channel', in: 'query', type: 'int', description: 'default 1' }] },
+  { method: 'GET', path: '/api/v1/devices/:id/intercom/capabilities', group: 'v1 — QR & Intercom', summary: 'VideoIntercom support (isSupportCallSignal)', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'GET', path: '/api/v1/devices/:id/intercom/status', group: 'v1 — QR & Intercom', summary: 'Current call status (idle/ring/onCall)', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'POST', path: '/api/v1/devices/:id/intercom/signal', group: 'v1 — QR & Intercom', summary: 'Drive the call (request/answer/hangUp/…)', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'cmd', in: 'query', description: 'request|answer|hangUp|cancel|reject, default request' }] },
 
   // ---- Same features on the admin mount (session auth) ----
   { method: 'POST', path: '/api/devices/:id/capture/face', group: 'admin — Enrolment', summary: 'Capture a live face at the reader', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'infrared', in: 'query' }] },
@@ -3032,9 +3049,9 @@ const ENDPOINTS: EndpointDef[] = [
   { method: 'PUT', path: '/api/devices/:id/plan-template/:tplNo', group: 'admin — Health & Schedules', summary: 'Bind a template to a week plan', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'tplNo', in: 'path', required: true }], bodyExample: { name: 'office-hours', weekPlanNo: 1 } },
   { method: 'GET', path: '/api/devices/:id/qr-capability', group: 'admin — QR & Intercom', summary: 'Does the camera support QR?', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
   { method: 'POST', path: '/api/devices/:id/qr-scan', group: 'admin — QR & Intercom', summary: 'Enable/disable camera QR scanning', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { enable: true } },
-  { method: 'GET', path: '/api/devices/:id/intercom/channels', group: 'admin — QR & Intercom', summary: 'Two-way audio capabilities', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
-  { method: 'POST', path: '/api/devices/:id/intercom/open', group: 'admin — QR & Intercom', summary: 'Open the intercom channel', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'channel', in: 'query', type: 'int' }] },
-  { method: 'POST', path: '/api/devices/:id/intercom/close', group: 'admin — QR & Intercom', summary: 'Close the intercom channel', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'channel', in: 'query', type: 'int' }] },
+  { method: 'GET', path: '/api/devices/:id/intercom/capabilities', group: 'admin — QR & Intercom', summary: 'VideoIntercom support (isSupportCallSignal)', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'GET', path: '/api/devices/:id/intercom/status', group: 'admin — QR & Intercom', summary: 'Current call status', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'POST', path: '/api/devices/:id/intercom/signal', group: 'admin — QR & Intercom', summary: 'Drive the call (request/answer/hangUp/…)', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'cmd', in: 'query', description: 'request|answer|hangUp|cancel|reject' }] },
 ]
 
 const METHOD_COLOR: Record<string, string> = { GET: '#3b82f6', POST: '#10b981', PUT: '#f59e0b', DELETE: '#ef4444' }
