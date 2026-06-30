@@ -141,13 +141,13 @@ export const api = {
   deleteFingerprint: (deviceId: string, employeeNo: string, finger = 0) =>
     req(`/api/devices/${encodeURIComponent(deviceId)}/fingerprints/${encodeURIComponent(employeeNo)}${finger ? `?finger=${finger}` : ''}`, { method: 'DELETE' }),
 
-  // Phase 4 — intercom (two-way audio)
-  intercomChannels: (deviceId: string) =>
-    req(`/api/devices/${encodeURIComponent(deviceId)}/intercom/channels`),
-  intercomOpen: (deviceId: string, channel = 1) =>
-    req(`/api/devices/${encodeURIComponent(deviceId)}/intercom/open?channel=${channel}`, { method: 'POST' }),
-  intercomClose: (deviceId: string, channel = 1) =>
-    req(`/api/devices/${encodeURIComponent(deviceId)}/intercom/close?channel=${channel}`, { method: 'POST' }),
+  // Phase 4 — intercom (VideoIntercom call signaling)
+  intercomCapabilities: (deviceId: string) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/intercom/capabilities`),
+  intercomStatus: (deviceId: string) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/intercom/status`),
+  intercomSignal: (deviceId: string, cmd: string) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/intercom/signal?cmd=${encodeURIComponent(cmd)}`, { method: 'POST' }),
 
   // Phase 3 — health & access schedules
   workStatus: (deviceId: string) =>

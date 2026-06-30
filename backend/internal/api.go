@@ -1185,45 +1185,41 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		return c.JSON(fiber.Map{"ok": true, "response": resp})
 	})
 
-	// ---------- Phase 4: intercom (two-way audio) ----------
+	// ---------- Phase 4: intercom (VideoIntercom call signaling) ----------
 
-	// Probe two-way audio channel capabilities.
-	api.Get("/devices/:id/intercom/channels", func(c *fiber.Ctx) error {
+	// Probe intercom support (VideoIntercom capabilities).
+	api.Get("/devices/:id/intercom/capabilities", func(c *fiber.Ctx) error {
 		d, err := reachable(c)
 		if err != nil {
 			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
 		}
-		client := NewISAPIClientForDevice(d, hub)
-		raw, err := client.GetTwoWayAudioChannels()
+		raw, err := NewISAPIClientForDevice(d, hub).GetIntercomCapabilities()
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "raw": raw})
+		}
+		return c.JSON(fiber.Map{"ok": true, "supported": strings.Contains(raw, "isSupportCallSignal") && strings.Contains(raw, "true"), "raw": raw})
+	})
+
+	// Current call status (idle / ring / onCall / …).
+	api.Get("/devices/:id/intercom/status", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		raw, err := NewISAPIClientForDevice(d, hub).GetCallStatus()
 		if err != nil {
 			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "raw": raw})
 		}
 		return c.JSON(fiber.Map{"ok": true, "raw": raw})
 	})
 
-	// Open / close the intercom channel. ?channel=N (default 1).
-	api.Post("/devices/:id/intercom/open", func(c *fiber.Ctx) error {
+	// Drive the call. ?cmd=request|answer|hangUp|cancel|reject (default request).
+	api.Post("/devices/:id/intercom/signal", func(c *fiber.Ctx) error {
 		d, err := reachable(c)
 		if err != nil {
 			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
 		}
-		ch, _ := strconv.Atoi(c.Query("channel", "1"))
-		client := NewISAPIClientForDevice(d, hub)
-		resp, err := client.OpenTwoWayAudio(ch)
-		if err != nil {
-			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
-		}
-		return c.JSON(fiber.Map{"ok": true, "response": resp})
-	})
-
-	api.Post("/devices/:id/intercom/close", func(c *fiber.Ctx) error {
-		d, err := reachable(c)
-		if err != nil {
-			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
-		}
-		ch, _ := strconv.Atoi(c.Query("channel", "1"))
-		client := NewISAPIClientForDevice(d, hub)
-		resp, err := client.CloseTwoWayAudio(ch)
+		resp, err := NewISAPIClientForDevice(d, hub).SendCallSignal(c.Query("cmd", "request"))
 		if err != nil {
 			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
 		}
@@ -2497,36 +2493,34 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		}
 		return c.JSON(fiber.Map{"ok": true, "response": resp})
 	})
-	v1.Get("/devices/:id/intercom/channels", func(c *fiber.Ctx) error {
+	v1.Get("/devices/:id/intercom/capabilities", func(c *fiber.Ctx) error {
 		d, err := reachable(c)
 		if err != nil {
 			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
 		}
-		raw, err := NewISAPIClientForDevice(d, hub).GetTwoWayAudioChannels()
+		raw, err := NewISAPIClientForDevice(d, hub).GetIntercomCapabilities()
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "raw": raw})
+		}
+		return c.JSON(fiber.Map{"ok": true, "supported": strings.Contains(raw, "isSupportCallSignal") && strings.Contains(raw, "true"), "raw": raw})
+	})
+	v1.Get("/devices/:id/intercom/status", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		raw, err := NewISAPIClientForDevice(d, hub).GetCallStatus()
 		if err != nil {
 			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "raw": raw})
 		}
 		return c.JSON(fiber.Map{"ok": true, "raw": raw})
 	})
-	v1.Post("/devices/:id/intercom/open", func(c *fiber.Ctx) error {
+	v1.Post("/devices/:id/intercom/signal", func(c *fiber.Ctx) error {
 		d, err := reachable(c)
 		if err != nil {
 			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
 		}
-		ch, _ := strconv.Atoi(c.Query("channel", "1"))
-		resp, err := NewISAPIClientForDevice(d, hub).OpenTwoWayAudio(ch)
-		if err != nil {
-			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
-		}
-		return c.JSON(fiber.Map{"ok": true, "response": resp})
-	})
-	v1.Post("/devices/:id/intercom/close", func(c *fiber.Ctx) error {
-		d, err := reachable(c)
-		if err != nil {
-			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
-		}
-		ch, _ := strconv.Atoi(c.Query("channel", "1"))
-		resp, err := NewISAPIClientForDevice(d, hub).CloseTwoWayAudio(ch)
+		resp, err := NewISAPIClientForDevice(d, hub).SendCallSignal(c.Query("cmd", "request"))
 		if err != nil {
 			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
 		}

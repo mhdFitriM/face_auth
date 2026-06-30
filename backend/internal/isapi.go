@@ -957,12 +957,12 @@ func (c *ISAPIClient) SetFingerPrint(employeeNo string, fingerPrintID int, finge
 	}
 	body, _ := json.Marshal(map[string]any{
 		"FingerPrintCfg": map[string]any{
-			"employeeNo":    employeeNo,
-			"enableCardReader": []int{1},
-			"fingerPrintID": fingerPrintID,
+			"employeeNo":        employeeNo,
+			"enableCardReader":  []int{1},
+			"fingerPrintID":     fingerPrintID,
 			"deleteFingerPrint": false,
-			"fingerType":    "normalFP",
-			"fingerData":    fingerData,
+			"fingerType":        "normalFP",
+			"fingerData":        fingerData,
 		},
 	})
 	resp, respBody, err := c.Do("POST", "/ISAPI/AccessControl/FingerPrintCfg?format=json", "application/json", body)
@@ -1005,49 +1005,52 @@ func (c *ISAPIClient) DeleteFingerPrint(employeeNo string, fingerPrintID int) (s
 // follow-up; these methods set up and tear down the channel and report support.
 // ============================================================================
 
-// GetTwoWayAudioChannels returns the two-way audio channel capabilities JSON.
-func (c *ISAPIClient) GetTwoWayAudioChannels() (string, error) {
-	resp, body, err := c.Do("GET", "/ISAPI/System/TwoWayAudio/channels", "", nil)
+// Intercom on Hikvision access terminals runs over the VideoIntercom protocol
+// (call signaling to a master/indoor station), NOT /ISAPI/System/TwoWayAudio
+// (which is for NVR/camera talkback and returns notSupport on these readers).
+
+// GetIntercomCapabilities returns VideoIntercom capabilities (use isSupportCallSignal
+// to decide whether intercom is available).
+func (c *ISAPIClient) GetIntercomCapabilities() (string, error) {
+	resp, body, err := c.Do("GET", "/ISAPI/VideoIntercom/capabilities?format=json", "", nil)
 	if err != nil {
 		return "", err
 	}
 	if resp.StatusCode != 200 {
-		return string(body), fmt.Errorf("twoWayAudio channels: status %d", resp.StatusCode)
+		return string(body), fmt.Errorf("videoIntercom capabilities: status %d", resp.StatusCode)
 	}
 	return string(body), nil
 }
 
-// OpenTwoWayAudio opens the intercom channel (default channel 1) and returns
-// the device's session response.
-func (c *ISAPIClient) OpenTwoWayAudio(channel int) (string, error) {
-	if channel <= 0 {
-		channel = 1
-	}
-	path := fmt.Sprintf("/ISAPI/System/TwoWayAudio/channels/%d/open", channel)
-	resp, body, err := c.Do("PUT", path, "application/xml", []byte(""))
+// GetCallStatus reports the current call state (idle / ring / onCall / …).
+func (c *ISAPIClient) GetCallStatus() (string, error) {
+	resp, body, err := c.Do("GET", "/ISAPI/VideoIntercom/callStatus?format=json", "", nil)
 	if err != nil {
 		return "", err
 	}
 	if resp.StatusCode != 200 {
-		return string(body), fmt.Errorf("open twoWayAudio: status %d: %s", resp.StatusCode, string(body))
+		return string(body), fmt.Errorf("callStatus: status %d", resp.StatusCode)
 	}
 	return string(body), nil
 }
 
-// CloseTwoWayAudio tears down the intercom channel.
-func (c *ISAPIClient) CloseTwoWayAudio(channel int) (string, error) {
-	if channel <= 0 {
-		channel = 1
+// SendCallSignal drives the intercom call. cmd is one of:
+// request | cancel | answer | reject | bellTimeout | hangUp | deviceOnCall.
+func (c *ISAPIClient) SendCallSignal(cmd string) (string, error) {
+	if cmd == "" {
+		cmd = "request"
 	}
-	path := fmt.Sprintf("/ISAPI/System/TwoWayAudio/channels/%d/close", channel)
-	resp, body, err := c.Do("PUT", path, "application/xml", []byte(""))
+	body, _ := json.Marshal(map[string]any{
+		"CallSignal": map[string]any{"cmdType": cmd},
+	})
+	resp, respBody, err := c.Do("PUT", "/ISAPI/VideoIntercom/callSignal?format=json", "application/json", body)
 	if err != nil {
 		return "", err
 	}
 	if resp.StatusCode != 200 {
-		return string(body), fmt.Errorf("close twoWayAudio: status %d: %s", resp.StatusCode, string(body))
+		return string(respBody), fmt.Errorf("callSignal %s: status %d: %s", cmd, resp.StatusCode, string(respBody))
 	}
-	return string(body), nil
+	return string(respBody), nil
 }
 
 // ============================================================================
@@ -1075,10 +1078,10 @@ func (c *ISAPIClient) GetAcsWorkStatus() (string, error) {
 
 // WeekPlanDay is one weekday's allow window in a week plan.
 type WeekPlanDay struct {
-	Week   string `json:"week"`   // "Monday".."Sunday"
+	Week   string `json:"week"` // "Monday".."Sunday"
 	Enable bool   `json:"enable"`
-	Begin  string `json:"begin"`  // "HH:MM:SS"
-	End    string `json:"end"`    // "HH:MM:SS"
+	Begin  string `json:"begin"` // "HH:MM:SS"
+	End    string `json:"end"`   // "HH:MM:SS"
 }
 
 // SetWeekPlan writes a UserRight week plan (one time segment per weekday) under
