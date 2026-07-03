@@ -166,9 +166,23 @@ export const api = {
   // QR-via-camera (device-native QR scanning)
   qrCapability: (deviceId: string) =>
     req(`/api/devices/${encodeURIComponent(deviceId)}/qr-capability`),
+  qrDiagnose: (deviceId: string) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/qr-diagnose`),
   setQrScan: (deviceId: string, enable: boolean) =>
     req(`/api/devices/${encodeURIComponent(deviceId)}/qr-scan`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enable }),
+    }),
+  qrPush: (deviceId: string, body: { personId: string; mode?: string; validSec?: number; times?: number }) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/qr-push`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    }),
+  qrModeAll: (deviceId: string, body: { mode: string; validSec?: number; times?: number }) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/qr-mode-all`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    }),
+  qrEncryption: (deviceId: string, body: { key: string; iv: string }) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/qr-encryption`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     }),
 
   listPersons: () => req('/api/persons'),

@@ -1314,6 +1314,18 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		return c.JSON(fiber.Map{"ok": true, "supported": supported, "raw": raw})
 	})
 
+	// Sweep every ISAPI namespace where Hik firmwares expose camera-QR support.
+	// Read-only — the UI shows the raw responses so an admin can see which URL
+	// their firmware actually accepts before we wire the "Enable" toggle to it.
+	api.Get("/devices/:id/qr-diagnose", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		results := NewISAPIClientForDevice(d, hub).DiagnoseQR()
+		return c.JSON(fiber.Map{"ok": true, "results": results})
+	})
+
 	// Enable/disable device-native QR scanning. Body: {"enable": true|false}.
 	api.Post("/devices/:id/qr-scan", func(c *fiber.Ctx) error {
 		d, err := reachable(c)
@@ -1326,6 +1338,145 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		_ = json.Unmarshal(c.Body(), &body)
 		client := NewISAPIClientForDevice(d, hub)
 		resp, err := client.SetQRScanEnabled(body.Enable)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp})
+	})
+
+	// Push one person's QR to the device and (optionally) set their
+	// userVerifyMode. Body: {"personId":"...", "mode":"face|faceAndPw|…",
+	// "validSec": 43200, "times": 0}. Because DS-K1T671MF v3.7.60's
+	// userVerifyMode enum has no QR value, the device cannot auto-prompt QR
+	// as an auth factor — QR always requires the on-screen "Camera QR" button.
+	// Once pushed, the device will match the presented QR to this employee.
+	api.Post("/devices/:id/qr-push", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		var body struct {
+			PersonID string `json:"personId"`
+			Mode     string `json:"mode"`
+			ValidSec int    `json:"validSec"`
+			Times    int    `json:"times"`
+		}
+		_ = json.Unmarshal(c.Body(), &body)
+		if body.PersonID == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "personId required"})
+		}
+		if body.Mode == "" {
+			body.Mode = "faceAndQRCode"
+		}
+		p, err := store.GetPerson(c.Context(), body.PersonID)
+		if err != nil || p == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "person not found"})
+		}
+		if p.QRToken == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "person has no QR token — rotate first"})
+		}
+		if p.EmployeeNo == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "person has no employeeNo"})
+		}
+		client := NewISAPIClientForDevice(d, hub)
+		// DS-K1T671MF v3.7.60's userVerifyMode enum does NOT include any QR
+		// value (confirmed via /UserInfo/capabilities: cardAndPw, card,
+		// faceAndPw, faceAndCard, face, cardOrfaceOrPw, cardOrFace). So we
+		// cannot make the device auto-prompt QR as part of user auth. We only
+		// set verifyMode if the caller asked for a valid enum value; QR modes
+		// are silently skipped. QR still gets pushed so the on-screen
+		// "Camera QR" button matches against it.
+		var modeResp string
+		modeSkipped := false
+		if isValidUserVerifyMode(body.Mode) {
+			r, err := client.SetUserVerifyMode(p.EmployeeNo, p.Name, body.Mode)
+			modeResp = r
+			if err != nil {
+				return c.Status(502).JSON(fiber.Map{"ok": false, "step": "set-verifyMode", "error": err.Error(), "response": modeResp})
+			}
+		} else {
+			modeSkipped = true
+		}
+		pushResp, err := client.PushQRCodeInfo(p.EmployeeNo, p.QRToken, body.ValidSec, body.Times)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "step": "push-qr", "error": err.Error(), "response": pushResp, "modeResponse": modeResp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "person": p.Name, "employeeNo": p.EmployeeNo, "mode": body.Mode, "modeSkipped": modeSkipped, "pushResponse": pushResp, "modeResponse": modeResp})
+	})
+
+	// Global QR+face 2FA — push every enrolled person's QR to the device and
+	// set all their verifyMode to the requested value. Body:
+	// {"mode":"faceAndQRCode"|"face"|"faceOrQRCode", "validSec":43200, "times":0}.
+	// mode="face" reverts everyone back to face-only.
+	api.Post("/devices/:id/qr-mode-all", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		var body struct {
+			Mode     string `json:"mode"`
+			ValidSec int    `json:"validSec"`
+			Times    int    `json:"times"`
+		}
+		_ = json.Unmarshal(c.Body(), &body)
+		if body.Mode == "" {
+			body.Mode = "faceAndQRCode"
+		}
+		persons, err := store.ListPersons(c.Context())
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		client := NewISAPIClientForDevice(d, hub)
+		var pushed, skipped, failed int
+		var errs []string
+		wantQR := body.Mode != "face"
+		for _, p := range persons {
+			if p.EmployeeNo == "" {
+				skipped++
+				continue
+			}
+			// verifyMode only when the caller asked for one this firmware
+			// supports (see /qr-push comment on the enum limitation).
+			if isValidUserVerifyMode(body.Mode) {
+				if _, err := client.SetUserVerifyMode(p.EmployeeNo, p.Name, body.Mode); err != nil {
+					failed++
+					errs = append(errs, p.EmployeeNo+": mode "+err.Error())
+					continue
+				}
+			}
+			if wantQR {
+				if p.QRToken == "" {
+					skipped++
+					continue
+				}
+				if _, err := client.PushQRCodeInfo(p.EmployeeNo, p.QRToken, body.ValidSec, body.Times); err != nil {
+					failed++
+					errs = append(errs, p.EmployeeNo+": push "+err.Error())
+					continue
+				}
+			}
+			pushed++
+		}
+		return c.JSON(fiber.Map{"ok": failed == 0, "mode": body.Mode, "pushed": pushed, "skipped": skipped, "failed": failed, "errors": errs})
+	})
+
+	// Configure device-side QR AES128-CBC verification. Body: {"key":"…32 chars…",
+	// "iv":"…32 chars…"} — pass empty strings to clear.
+	api.Post("/devices/:id/qr-encryption", func(c *fiber.Ctx) error {
+		d, err := reachable(c)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		var body struct {
+			Key string `json:"key"`
+			IV  string `json:"iv"`
+		}
+		_ = json.Unmarshal(c.Body(), &body)
+		if (body.Key != "" || body.IV != "") && (len(body.Key) != 32 || len(body.IV) != 32) {
+			return c.Status(400).JSON(fiber.Map{"error": "key and iv must be exactly 32 characters each"})
+		}
+		client := NewISAPIClientForDevice(d, hub)
+		resp, err := client.SetQRCodeEncryption(body.Key, body.IV)
 		if err != nil {
 			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
 		}

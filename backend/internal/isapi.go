@@ -425,7 +425,7 @@ func (c *ISAPIClient) UpsertUserOnDevice(u HikUserInfo) (string, error) {
 		return string(respBody), err
 	}
 	if resp2.StatusCode != 200 {
-		return string(body2), fmt.Errorf("modify user: status %d", resp2.StatusCode)
+		return string(body2), fmt.Errorf("modify user: status %d: create-resp=%s modify-resp=%s", resp2.StatusCode, string(respBody), string(body2))
 	}
 	return string(body2), nil
 }
@@ -1233,6 +1233,103 @@ func (c *ISAPIClient) SupportsCameraQR() (bool, string, error) {
 	return false, raw, nil
 }
 
+// QRProbeResult is one row in a diagnostic sweep — the exact URL hit, the HTTP
+// status the device returned, and the raw response body. Used by DiagnoseQR to
+// let an admin see which ISAPI namespace their firmware actually exposes.
+type QRProbeResult struct {
+	Label    string   `json:"label"`
+	Method   string   `json:"method"`
+	Path     string   `json:"path"`
+	Status   int      `json:"status"`
+	Body     string   `json:"body"`
+	QRHits   []string `json:"qrHits,omitempty"` // lines/snippets containing "qr" — the useful bits
+	Error    string   `json:"error,omitempty"`
+}
+
+// extractQRHits pulls the interesting lines from an ISAPI response — anything
+// mentioning QR, verifyMode, or auth mode enum options. Works on both JSON
+// (line per key) and XML.
+func extractQRHits(body string) []string {
+	hits := []string{}
+	for _, line := range strings.Split(body, "\n") {
+		low := strings.ToLower(line)
+		if strings.Contains(low, "qr") || strings.Contains(low, "verify") || strings.Contains(low, "authmode") ||
+			strings.Contains(low, "verifymode") || strings.Contains(low, "multicard") || strings.Contains(low, "cardreaderfunction") ||
+			strings.Contains(low, "reader") && strings.Contains(low, "func") {
+			trim := strings.TrimSpace(line)
+			if trim != "" {
+				hits = append(hits, trim)
+			}
+		}
+	}
+	return hits
+}
+
+// DiagnoseQR sweeps every known ISAPI location where Hikvision firmwares have
+// historically exposed camera-QR support, so the admin UI can show which
+// namespace this specific device/firmware understands. All calls are GETs — no
+// state change on the device.
+func (c *ISAPIClient) DiagnoseQR() []QRProbeResult {
+	probes := []struct{ label, path string }{
+		{"AccessControl capabilities", "/ISAPI/AccessControl/capabilities?format=json"},
+		// Flagged by isSupportQRCodeInfo=true — likely the endpoint that
+		// accepts a QR payload / configures the camera QR reader.
+		{"QRCodeInfo capabilities", "/ISAPI/AccessControl/QRCodeInfo/capabilities?format=json"},
+		{"QRCodeInfo", "/ISAPI/AccessControl/QRCodeInfo?format=json"},
+		{"QRCodeInfo/Record capabilities", "/ISAPI/AccessControl/QRCodeInfo/Record/capabilities?format=json"},
+		{"QRCodeInfo/Record", "/ISAPI/AccessControl/QRCodeInfo/Record?format=json"},
+		{"QRCodeInfo/Search capabilities", "/ISAPI/AccessControl/QRCodeInfo/Search/capabilities?format=json"},
+		{"QRCodeInfo/Search", "/ISAPI/AccessControl/QRCodeInfo/Search?format=json"},
+		{"QRCodeInfo/Delete capabilities", "/ISAPI/AccessControl/QRCodeInfo/Delete/capabilities?format=json"},
+		// Flagged by isSupportQRCodeEncryption=true — QR-code signing config.
+		{"QRCodeEncryption capabilities", "/ISAPI/AccessControl/QRCodeEncryption/capabilities?format=json"},
+		{"QRCodeEncryption", "/ISAPI/AccessControl/QRCodeEncryption?format=json"},
+		// On-demand camera-QR capture triggers seen on other face terminals.
+		{"CaptureQRCode capabilities", "/ISAPI/AccessControl/CaptureQRCode/capabilities?format=json"},
+		{"CaptureQRCode", "/ISAPI/AccessControl/CaptureQRCode?format=json"},
+		{"ScanQRCode capabilities", "/ISAPI/AccessControl/ScanQRCode/capabilities?format=json"},
+		{"ScanQRCode", "/ISAPI/AccessControl/ScanQRCode?format=json"},
+		// Verify-mode is how the terminal switches its reader between face,
+		// card, QR, etc. If QR is a mode, it'll show up here.
+		{"Verify capabilities", "/ISAPI/AccessControl/Verify/capabilities?format=json"},
+		// Original 3.x-era paths (kept for firmwares in between).
+		{"QRCode capabilities", "/ISAPI/AccessControl/QRCode/capabilities?format=json"},
+		{"QRCode", "/ISAPI/AccessControl/QRCode?format=json"},
+		{"QRCodeCfg (legacy)", "/ISAPI/AccessControl/QRCodeCfg?format=json"},
+		{"AcsCfg capabilities", "/ISAPI/AccessControl/AcsCfg/capabilities?format=json"},
+		{"AcsCfg", "/ISAPI/AccessControl/AcsCfg?format=json"},
+		{"CardReaderCfg/1 capabilities", "/ISAPI/AccessControl/CardReaderCfg/1/capabilities?format=json"},
+		{"CardReaderCfg/1", "/ISAPI/AccessControl/CardReaderCfg/1?format=json"},
+		// UserInfo caps advertises the enum of valid userVerifyMode strings.
+		{"UserInfo capabilities", "/ISAPI/AccessControl/UserInfo/capabilities?format=json"},
+		// MultiCardCfg is Hik's multi-factor group config — if QR can be a
+		// factor, it'll show up here.
+		{"MultiCardCfg capabilities", "/ISAPI/AccessControl/MultiCardCfg/capabilities?format=json"},
+		{"MultiCardCfg", "/ISAPI/AccessControl/MultiCardCfg?format=json"},
+		// CardReaderCfg's cardReaderFunction enum (what modes the reader can
+		// cycle through). Currently ["face"] — if "QR" is allowed here we can
+		// force face → QR at the reader.
+		{"CardReaderCfg supported functions", "/ISAPI/AccessControl/CardReaderCfg/capabilities?format=json"},
+	}
+	out := make([]QRProbeResult, 0, len(probes))
+	for _, p := range probes {
+		r := QRProbeResult{Label: p.label, Method: "GET", Path: p.path}
+		resp, body, err := c.Do("GET", p.path, "", nil)
+		if err != nil {
+			r.Error = err.Error()
+		}
+		if resp != nil {
+			r.Status = resp.StatusCode
+		}
+		r.Body = string(body)
+		if r.Status == 200 {
+			r.QRHits = extractQRHits(r.Body)
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
 // SetQRScanEnabled enables/disables camera QR-code recognition on the device.
 // The exact config endpoint is firmware-dependent; this targets the documented
 // QR config and returns the device's raw response (a 4xx here usually means the
@@ -1251,6 +1348,95 @@ func (c *ISAPIClient) SetQRScanEnabled(enable bool) (string, error) {
 		return string(respBody), fmt.Errorf("set QR scan: status %d: %s", resp.StatusCode, string(respBody))
 	}
 	return string(respBody), nil
+}
+
+// PushQRCodeInfo registers a QR string against an employee on the device. Once
+// registered, the user can present the QR to the device's camera (via the
+// on-screen scanner or when their verifyMode includes QR) and be authenticated
+// as that employee. validSec ∈ [5, 43200], times ∈ [0, 1000] (0 = unlimited).
+// Confirmed schema from /ISAPI/AccessControl/QRCodeInfo/capabilities on DS-K1T671MF v3.7.60.
+func (c *ISAPIClient) PushQRCodeInfo(employeeNo, qrString string, validSec, times int) (string, error) {
+	if validSec < 5 {
+		validSec = 43200
+	}
+	if validSec > 43200 {
+		validSec = 43200
+	}
+	// The device rejects a bare {QRCodeInfo:{…}} body with
+	// "MessageParametersLack: QRCodeInfoCond" — the required top-level key is
+	// QRCodeInfoCond. /Record and /Modify sub-paths return "notSupport" on
+	// v3.7.60, so the single endpoint handles create/update via QRCodeInfoCond.
+	// `times` is REQUIRED (omitting it → MessageParametersLack: times) but the
+	// device rejects both 0 and 1000 with "Device Error: times" — cap schema
+	// advertises [0,1000] but runtime is stricter. Default to 1 unless caller
+	// provided something in-between.
+	if times < 1 || times > 1000 {
+		times = 1
+	}
+	inner := map[string]any{
+		"employeeNo":   sanitizeFPID(employeeNo),
+		"QRCodeString": qrString,
+		"valid":        validSec,
+		"times":        times,
+	}
+	body, _ := json.Marshal(map[string]any{"QRCodeInfoCond": inner})
+	resp, respBody, err := c.Do("POST", "/ISAPI/AccessControl/QRCodeInfo?format=json", "application/json", body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 200 {
+		return string(respBody), fmt.Errorf("push QR: status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return string(respBody), nil
+}
+
+// SetQRCodeEncryption enables device-side AES128-CBC verification of QR strings
+// so only QRs signed with the shared key/IV will be accepted. Both key and iv
+// must be exactly 32 characters. Passing empty strings clears encryption.
+// Confirmed schema from /ISAPI/AccessControl/QRCodeEncryption/capabilities.
+func (c *ISAPIClient) SetQRCodeEncryption(key, iv string) (string, error) {
+	payload := map[string]any{
+		"encryptType": "AES128_CBC",
+		"key":         key,
+		"vector":      iv,
+	}
+	if key == "" || iv == "" {
+		payload = map[string]any{"encryptType": ""}
+	}
+	body, _ := json.Marshal(map[string]any{"QRCodeEncryption": payload})
+	resp, respBody, err := c.Do("PUT", "/ISAPI/AccessControl/QRCodeEncryption?format=json", "application/json", body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != 200 {
+		return string(respBody), fmt.Errorf("set QR encryption: status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return string(respBody), nil
+}
+
+// isValidUserVerifyMode gates callers from sending a value the device will
+// reject with badJsonContent. The enum is model+firmware specific; this list
+// matches DS-K1T671MF v3.7.60 (from /UserInfo/capabilities). Firmwares without
+// QR in this enum cannot auto-prompt QR as part of user auth — QR is only
+// reachable via the on-screen "Camera QR" button.
+func isValidUserVerifyMode(m string) bool {
+	switch m {
+	case "cardAndPw", "card", "faceAndPw", "faceAndCard", "face", "cardOrfaceOrPw", "cardOrFace":
+		return true
+	}
+	return false
+}
+
+// SetUserVerifyMode changes just the userVerifyMode field for an existing user
+// on the device. Common values on DS-K1T671MF: "face", "faceAndQRCode",
+// "faceOrQRCode", "QRCode", "cardAndPw" (locked). Wraps UpsertUserOnDevice's
+// Modify path so it doesn't touch face/card data.
+func (c *ISAPIClient) SetUserVerifyMode(employeeNo, name, mode string) (string, error) {
+	return c.UpsertUserOnDevice(HikUserInfo{
+		EmployeeNo:     employeeNo,
+		Name:           name,
+		UserVerifyMode: mode,
+	})
 }
 
 // SetAlarmHost configures the device to push events to our HTTP listener.

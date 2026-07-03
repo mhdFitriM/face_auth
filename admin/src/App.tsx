@@ -599,11 +599,19 @@ function ScheduleModal({ device, onClose }: { device: any; onClose: () => void }
 // Probe + toggle device-native QR-code scanning (user shows QR to the device camera).
 function QRCameraModal({ device, onClose }: { device: any; onClose: () => void }) {
   const id = device.deviceID
-  const [busy, setBusy] = useState<'' | 'probe' | 'on' | 'off'>('')
+  const [busy, setBusy] = useState<'' | 'probe' | 'on' | 'off' | 'diag' | 'push' | 'all' | 'enc' | 'persons'>('')
   const [supported, setSupported] = useState<boolean | null>(null)
   const [raw, setRaw] = useState('')
   const [result, setResult] = useState<any>(null)
   const [err, setErr] = useState('')
+  const [diag, setDiag] = useState<Array<{ label: string; method: string; path: string; status: number; body: string; qrHits?: string[]; error?: string }> | null>(null)
+  const [persons, setPersons] = useState<any[]>([])
+  const [personId, setPersonId] = useState('')
+  const [mode, setMode] = useState('face')
+  const [validSec, setValidSec] = useState(43200)
+  const [times, setTimes] = useState(0)
+  const [encKey, setEncKey] = useState('')
+  const [encIV, setEncIV] = useState('')
 
   const probe = async () => {
     setBusy('probe'); setErr(''); setResult(null)
@@ -613,12 +621,61 @@ function QRCameraModal({ device, onClose }: { device: any; onClose: () => void }
     } catch (e: any) { setErr(String(e)) } finally { setBusy('') }
   }
 
-  useEffect(() => { probe() }, [])
+  const loadPersons = async () => {
+    setBusy('persons')
+    try {
+      const r = await api.listPersons()
+      const list = (r?.persons || r || []) as any[]
+      setPersons(list)
+      if (!personId && list.length > 0) setPersonId(list[0].id)
+    } catch (e: any) { setErr(String(e)) } finally { setBusy('') }
+  }
+
+  useEffect(() => { probe(); loadPersons() }, [])
+
+  const diagnose = async () => {
+    setBusy('diag'); setErr(''); setDiag(null)
+    try {
+      const r = await api.qrDiagnose(id)
+      setDiag(r.results || [])
+    } catch (e: any) { setErr(String(e)) } finally { setBusy('') }
+  }
 
   const toggle = async (enable: boolean) => {
     setBusy(enable ? 'on' : 'off'); setErr(''); setResult(null)
     try { setResult(await api.setQrScan(id, enable)) }
     catch (e: any) { setErr(String(e)) } finally { setBusy('') }
+  }
+
+  const pushOne = async () => {
+    if (!personId) { setErr('Pick a person first'); return }
+    setBusy('push'); setErr(''); setResult(null)
+    try { setResult(await api.qrPush(id, { personId, mode, validSec, times })) }
+    catch (e: any) { setErr(String(e)) } finally { setBusy('') }
+  }
+
+  const applyAll = async () => {
+    if (!confirm(`Set verifyMode to "${mode}" for EVERY enrolled person on this device? This will overwrite their current verify mode.`)) return
+    setBusy('all'); setErr(''); setResult(null)
+    try { setResult(await api.qrModeAll(id, { mode, validSec, times })) }
+    catch (e: any) { setErr(String(e)) } finally { setBusy('') }
+  }
+
+  const saveEncryption = async () => {
+    if (encKey && encKey.length !== 32) { setErr('Key must be exactly 32 characters'); return }
+    if (encIV && encIV.length !== 32) { setErr('IV must be exactly 32 characters'); return }
+    setBusy('enc'); setErr(''); setResult(null)
+    try { setResult(await api.qrEncryption(id, { key: encKey, iv: encIV })) }
+    catch (e: any) { setErr(String(e)) } finally { setBusy('') }
+  }
+
+  const gen32 = () => {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+    let s = ''
+    const buf = new Uint32Array(32)
+    crypto.getRandomValues(buf)
+    for (let i = 0; i < 32; i++) s += chars[buf[i] % chars.length]
+    return s
   }
 
   return (
@@ -641,18 +698,107 @@ function QRCameraModal({ device, onClose }: { device: any; onClose: () => void }
       )}
       <div className="form-row" style={{ gap: 8, marginTop: 12 }}>
         <button type="button" className="btn-ghost" disabled={!!busy} onClick={probe}>Re-probe</button>
-        <button type="button" className="btn-primary" disabled={!!busy || supported === false} onClick={() => toggle(true)}>
-          {busy === 'on' ? 'Enabling…' : 'Enable camera QR'}
-        </button>
-        <button type="button" className="btn-ghost" disabled={!!busy} onClick={() => toggle(false)}>
-          {busy === 'off' ? 'Disabling…' : 'Disable'}
+        <button type="button" className="btn-ghost" disabled={!!busy} onClick={diagnose}>
+          {busy === 'diag' ? 'Diagnosing…' : 'Diagnose ISAPI paths'}
         </button>
       </div>
-      <p className="muted small" style={{ marginTop: 10 }}>
-        After enabling, the user's QR must encode their employee number so the device can match it to the enrolled user.
+
+      <div className="form-section-label" style={{ marginTop: 18 }}>Register QR + set verify mode</div>
+      <p className="muted small">
+        Registers this person's QR token on the device so the on-screen <strong>Camera QR</strong> button can
+        authenticate them. Optionally updates their verify mode (face / card / password combinations).
       </p>
+      <p className="muted small" style={{ padding: 8, background: 'var(--surface-2)', borderRadius: 4 }}>
+        ⚠️ <strong>Firmware limitation:</strong> DS-K1T671MF v3.7.60's <code>userVerifyMode</code> enum has no QR value,
+        so the device cannot auto-prompt the QR scanner as part of user auth. A registered QR is only matched when
+        the user (or operator) presses <strong>Camera QR</strong> on the touchscreen. Confirmed against
+        <code>/UserInfo/capabilities</code>.
+      </p>
+      <div className="form-row" style={{ gap: 8 }}>
+        <select value={personId} onChange={e => setPersonId(e.target.value)} disabled={!!busy}>
+          <option value="">— pick a person —</option>
+          {persons.map(p => (
+            <option key={p.id} value={p.id} disabled={!p.qrToken || !p.employeeNo}>
+              {p.name} ({p.employeeNo || 'no employeeNo'}){!p.qrToken ? ' — no QR token' : ''}
+            </option>
+          ))}
+        </select>
+        <select value={mode} onChange={e => setMode(e.target.value)} disabled={!!busy}>
+          <option value="face">face</option>
+          <option value="faceAndPw">face + password</option>
+          <option value="faceAndCard">face + card</option>
+          <option value="card">card only</option>
+          <option value="cardAndPw">card + password (locked)</option>
+          <option value="cardOrFace">card OR face</option>
+          <option value="cardOrfaceOrPw">card OR face OR password</option>
+        </select>
+        <input type="number" value={validSec} onChange={e => setValidSec(+e.target.value)} min={5} max={43200} title="TTL seconds (5–43200)" style={{ width: 100 }} disabled={!!busy} />
+        <input type="number" value={times} onChange={e => setTimes(+e.target.value)} min={0} max={1000} title="Max uses (0=unlimited; the times field is omitted from the request when 0)" style={{ width: 80 }} disabled={!!busy} />
+      </div>
+      <div className="form-row" style={{ gap: 8, marginTop: 8 }}>
+        <button type="button" className="btn-primary" disabled={!!busy || !personId} onClick={pushOne}>
+          {busy === 'push' ? 'Pushing…' : 'Push + set mode (one person)'}
+        </button>
+        <button type="button" className="btn-ghost" disabled={!!busy} onClick={applyAll}>
+          {busy === 'all' ? 'Applying…' : `Apply "${mode}" to ALL persons`}
+        </button>
+      </div>
+
+      <div className="form-section-label" style={{ marginTop: 18 }}>QR encryption (optional)</div>
+      <p className="muted small">
+        AES128-CBC signs QR strings so only your backend can mint valid QRs. Both fields must be exactly 32 characters.
+        Leave both blank and save to clear.
+      </p>
+      <div className="form-row" style={{ gap: 8 }}>
+        <input value={encKey} onChange={e => setEncKey(e.target.value)} placeholder="key (32 chars)" maxLength={32} style={{ flex: 1 }} disabled={!!busy} />
+        <input value={encIV} onChange={e => setEncIV(e.target.value)} placeholder="iv (32 chars)" maxLength={32} style={{ flex: 1 }} disabled={!!busy} />
+        <button type="button" className="btn-ghost" disabled={!!busy} onClick={() => { setEncKey(gen32()); setEncIV(gen32()) }}>Generate</button>
+        <button type="button" className="btn-primary" disabled={!!busy} onClick={saveEncryption}>
+          {busy === 'enc' ? 'Saving…' : 'Save'}
+        </button>
+      </div>
       {err && <div className="err">{err}</div>}
       {result && <pre className="result">{JSON.stringify(result, null, 2)}</pre>}
+      {diag && (
+        <div style={{ marginTop: 12 }}>
+          <div className="muted small" style={{ marginBottom: 6 }}>
+            ISAPI sweep — look for a <span className="badge ok">200</span> row; that's the namespace this firmware exposes.
+          </div>
+          {(() => {
+            const winners = diag.filter(r => r.qrHits && r.qrHits.length > 0)
+            if (winners.length === 0) {
+              return <div className="err" style={{ marginBottom: 10 }}>No QR-related fields found in any 200 response. This firmware likely doesn't expose camera-QR via ISAPI — we'll need to use the per-user verifyMode flip instead.</div>
+            }
+            return (
+              <div style={{ marginBottom: 12, padding: 10, background: 'var(--surface-2)', borderRadius: 6 }}>
+                <div className="muted small" style={{ marginBottom: 6 }}>QR fields found ({winners.length} endpoint{winners.length > 1 ? 's' : ''}) — full body shown, not just matched lines:</div>
+                {winners.map((w, i) => (
+                  <div key={i} style={{ marginBottom: 8 }}>
+                    <div style={{ fontWeight: 600, fontSize: 12 }}><code>{w.path}</code></div>
+                    <pre className="result" style={{ marginTop: 4, maxHeight: 400, overflow: 'auto' }}>{w.body}</pre>
+                  </div>
+                ))}
+              </div>
+            )
+          })()}
+          {diag.map((r, i) => (
+            <details key={i} style={{ marginTop: 6 }}>
+              <summary>
+                <span className={`badge ${r.status === 200 ? 'ok' : ''}`}>{r.status || 'ERR'}</span>{' '}
+                <code>{r.method} {r.path}</code> — {r.label}
+              </summary>
+              {r.error && <div className="err">{r.error}</div>}
+              {r.qrHits && r.qrHits.length > 0 && (
+                <div style={{ margin: '6px 0' }}>
+                  <div className="muted small">QR-related lines:</div>
+                  <pre className="result" style={{ background: 'var(--surface-2)' }}>{r.qrHits.join('\n')}</pre>
+                </div>
+              )}
+              <pre className="result">{r.body}</pre>
+            </details>
+          ))}
+        </div>
+      )}
       {raw && <details style={{ marginTop: 10 }}><summary className="muted small">Raw capabilities</summary><pre className="result">{raw}</pre></details>}
     </Modal>
   )
@@ -3049,6 +3195,10 @@ const ENDPOINTS: EndpointDef[] = [
   { method: 'PUT', path: '/api/devices/:id/plan-template/:tplNo', group: 'admin — Health & Schedules', summary: 'Bind a template to a week plan', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'tplNo', in: 'path', required: true }], bodyExample: { name: 'office-hours', weekPlanNo: 1 } },
   { method: 'GET', path: '/api/devices/:id/qr-capability', group: 'admin — QR & Intercom', summary: 'Does the camera support QR?', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
   { method: 'POST', path: '/api/devices/:id/qr-scan', group: 'admin — QR & Intercom', summary: 'Enable/disable camera QR scanning', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { enable: true } },
+  { method: 'GET', path: '/api/devices/:id/qr-diagnose', group: 'admin — QR & Intercom', summary: 'Sweep every ISAPI namespace where firmwares expose camera QR', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'POST', path: '/api/devices/:id/qr-push', group: 'admin — QR & Intercom', summary: 'Push one person\'s QR to device + set their verifyMode', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { personId: 'psn_xxx', mode: 'faceAndQRCode', validSec: 43200, times: 0 } },
+  { method: 'POST', path: '/api/devices/:id/qr-mode-all', group: 'admin — QR & Intercom', summary: 'Push all persons\' QRs + set their verifyMode', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { mode: 'faceAndQRCode', validSec: 43200, times: 0 } },
+  { method: 'POST', path: '/api/devices/:id/qr-encryption', group: 'admin — QR & Intercom', summary: 'Set AES128-CBC QR verification key/IV (32 chars each)', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { key: '…32 chars…', iv: '…32 chars…' } },
   { method: 'GET', path: '/api/devices/:id/intercom/capabilities', group: 'admin — QR & Intercom', summary: 'VideoIntercom support (isSupportCallSignal)', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
   { method: 'GET', path: '/api/devices/:id/intercom/status', group: 'admin — QR & Intercom', summary: 'Current call status', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
   { method: 'POST', path: '/api/devices/:id/intercom/signal', group: 'admin — QR & Intercom', summary: 'Drive the call (request/answer/hangUp/…)', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'cmd', in: 'query', description: 'request|answer|hangUp|cancel|reject' }] },
