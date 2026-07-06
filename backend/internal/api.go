@@ -96,6 +96,12 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if p == "/api/auth/login" || p == "/api/healthz" || p == "/api/qr-auth/scan" {
 			return c.Next()
 		}
+		// /api/v1/* is the third-party surface — it carries its own apiKeyAuth
+		// on the group (registered below). Without this skip the session check
+		// above rejects every API-key request with "session expired".
+		if strings.HasPrefix(p, "/api/v1/") || p == "/api/v1" {
+			return c.Next()
+		}
 		// Agent binaries and companion scripts are generic, secret-free downloads
 		// (the per-agent token is generated separately and shown once in the UI),
 		// so they're served without a session — no token needed in the URL.
@@ -1984,6 +1990,75 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 			})
 		}
 		return c.JSON(out)
+	})
+
+	// R6: register a device via the public API, tenant-scoped from the key.
+	// Mirrors the admin POST /devices so qstudio can add devices self-serve.
+	v1.Post("/devices", func(c *fiber.Ctx) error {
+		// v1 is API-key authed (no session user) — tenant comes from the
+		// X-Tenant-Id header the caller sends, NOT tenantScope (session-only).
+		tid := c.Get("X-Tenant-Id")
+		var body struct {
+			DeviceID      string `json:"deviceId"`
+			Name          string `json:"name"`
+			Password      string `json:"password"`
+			IP            string `json:"ip"`
+			Port          int    `json:"port"`
+			UseHTTPS      bool   `json:"useHttps"`
+			ISAPIUsername string `json:"isapiUsername"`
+			ISAPIPassword string `json:"isapiPassword"`
+			FDID          string `json:"fdid"`
+			FaceLibType   string `json:"faceLibType"`
+			AgentID       string `json:"agentId"`
+			Reach         string `json:"reach"`
+		}
+		if err := json.Unmarshal(c.Body(), &body); err != nil || body.DeviceID == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "deviceId required"})
+		}
+		dev := Device{
+			DeviceID: body.DeviceID, Name: body.Name, IP: body.IP, Port: body.Port,
+			UseHTTPS: body.UseHTTPS, ISAPIUsername: body.ISAPIUsername, ISAPIPassword: body.ISAPIPassword,
+			FDID: body.FDID, FaceLibType: body.FaceLibType, AgentID: body.AgentID, Reach: body.Reach,
+		}
+		dev.SetPassword(body.Password)
+		if err := store.RegisterDevice(c.Context(), dev); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		if tid != "" {
+			_ = store.SetDeviceTenant(c.Context(), dev.DeviceID, tid)
+		}
+		var probe map[string]any
+		if body.IP != "" && body.ISAPIUsername != "" {
+			if d, _ := store.GetDevice(c.Context(), body.DeviceID); d != nil {
+				client := NewISAPIClientForDevice(d, hub)
+				if info, err := client.GetDeviceInfo(); err == nil {
+					_ = store.SetDeviceOnline(c.Context(), d.DeviceID, info.Model, info.FirmwareVersion, true)
+					probe = map[string]any{"reachable": true, "info": info}
+				} else {
+					_ = store.SetDeviceOnline(c.Context(), d.DeviceID, "", "", false)
+					probe = map[string]any{"reachable": false, "error": err.Error()}
+				}
+			}
+		}
+		return c.JSON(fiber.Map{"ok": true, "probe": probe})
+	})
+
+	// R6: delete a device, but only within the caller's tenant.
+	v1.Delete("/devices/:id", func(c *fiber.Ctx) error {
+		tid := c.Get("X-Tenant-Id")
+		d, _ := store.GetDevice(c.Context(), c.Params("id"))
+		if d == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "device not found"})
+		}
+		if tid != "" {
+			if dtid, _ := store.GetDeviceTenant(c.Context(), c.Params("id")); dtid != tid {
+				return c.Status(404).JSON(fiber.Map{"error": "device not found"})
+			}
+		}
+		if err := store.DeleteDevice(c.Context(), c.Params("id")); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"ok": true})
 	})
 
 	v1.Get("/persons", func(c *fiber.Ctx) error {

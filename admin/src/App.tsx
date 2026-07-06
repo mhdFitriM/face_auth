@@ -122,7 +122,13 @@ function LoginScreen({ onLoggedIn }: { onLoggedIn: () => void }) {
 
 function Dashboard({ me, onMe, onLogout, theme, setTheme }: { me: any; onMe: (m: any) => void; onLogout: () => void; theme: 'light' | 'dark'; setTheme: (t: 'light' | 'dark') => void }) {
   const isHQ = me.user?.role === 'hq_admin'
-  const [tab, setTab] = useState<Tab>(isHQ ? 'hq' : 'devices')
+  // Deep-linkable initial tab (?tab=devices|persons|…) — lets an embedding
+  // console (e.g. qstudio backoffice) open a specific screen directly.
+  const [tab, setTab] = useState<Tab>(() => {
+    const all: Tab[] = ['devices', 'live', 'persons', 'enrol', 'events', 'qr-auth', 'agents', 'console', 'test', 'settings', 'guide', 'api-docs', 'plugin-faceapp', 'plans', 'access-log', 'hq']
+    const q = new URLSearchParams(window.location.search).get('tab') as Tab | null
+    return q && all.includes(q) ? q : (isHQ ? 'hq' : 'devices')
+  })
   // When the user clicks "Enrol face" on a person, jump to the Enrol tab with
   // that person preselected. Consumed (and cleared) by EnrolTab on mount.
   const [enrolPersonId, setEnrolPersonId] = useState('')

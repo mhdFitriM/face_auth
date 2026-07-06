@@ -1,0 +1,4 @@
+.DS_Store
+agent-local/
+*.bak
+db-dump-*.sql

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"log"
 	"strings"
@@ -101,6 +102,24 @@ func (ps *PushServer) handleHikISAPIEvent(c *fiber.Ctx) error {
 		jsonPayload = bytes.TrimSpace(body)
 	}
 
+	// Salvage path: some access-terminal firmwares (e.g. DS-K1T671MF V3.7.60)
+	// emit multipart bodies Go's reader rejects (boundary/CRLF quirks). Rather
+	// than dropping the event, scan the raw body for the embedded JSON or XML
+	// event and the JPEG snapshot directly.
+	if len(jsonPayload) == 0 && len(body) > 0 {
+		jsonPayload = salvageHikEventJSON(body)
+		if imageBytes == nil {
+			imageBytes = salvageJPEG(body)
+		}
+		if len(jsonPayload) == 0 {
+			preview := body
+			if len(preview) > 200 {
+				preview = preview[:200]
+			}
+			log.Printf("hik-event unparseable: ct=%q len=%d head=%q", ct, len(body), string(preview))
+		}
+	}
+
 	// Extract metadata from the JSON
 	if len(jsonPayload) > 0 {
 		var probe map[string]json.RawMessage
@@ -174,6 +193,89 @@ func (ps *PushServer) handleHikISAPIEvent(c *fiber.Ctx) error {
 	})
 
 	return c.Status(200).SendString("OK")
+}
+
+// salvageHikEventJSON pulls the event out of a raw (possibly malformed
+// multipart) body: first JSON object if present, else the Hikvision XML
+// EventNotificationAlert converted to the same JSON shape the rest of the
+// pipeline expects (top-level eventType + AccessControllerEvent object).
+func salvageHikEventJSON(body []byte) []byte {
+	// JSON: decode exactly one value starting at the first '{' — a
+	// json.Decoder tolerates the trailing multipart junk after it.
+	if i := bytes.IndexByte(body, '{'); i >= 0 {
+		var raw json.RawMessage
+		dec := json.NewDecoder(bytes.NewReader(body[i:]))
+		if err := dec.Decode(&raw); err == nil && len(raw) > 2 {
+			return raw
+		}
+	}
+	// XML: minimal conversion of EventNotificationAlert.
+	start := bytes.Index(body, []byte("<EventNotificationAlert"))
+	if start < 0 {
+		return nil
+	}
+	end := bytes.Index(body[start:], []byte("</EventNotificationAlert>"))
+	if end < 0 {
+		return nil
+	}
+	xmlBody := body[start : start+end+len("</EventNotificationAlert>")]
+	var alert struct {
+		EventType   string `xml:"eventType"`
+		DateTime    string `xml:"dateTime"`
+		MacAddress  string `xml:"macAddress"`
+		IPAddress   string `xml:"ipAddress"`
+		EventState  string `xml:"eventState"`
+		Description string `xml:"eventDescription"`
+		ACE         struct {
+			EmployeeNoString  string `xml:"employeeNoString"`
+			EmployeeNo        string `xml:"employeeNo"`
+			Name              string `xml:"name"`
+			MajorEventType    int    `xml:"majorEventType"`
+			SubEventType      int    `xml:"subEventType"`
+			CurrentVerifyMode string `xml:"currentVerifyMode"`
+			SerialNo          int64  `xml:"serialNo"`
+		} `xml:"AccessControllerEvent"`
+	}
+	if err := xml.Unmarshal(xmlBody, &alert); err != nil {
+		return nil
+	}
+	out := map[string]any{
+		"eventType":        alert.EventType,
+		"dateTime":         alert.DateTime,
+		"macAddress":       alert.MacAddress,
+		"ipAddress":        alert.IPAddress,
+		"eventState":       alert.EventState,
+		"eventDescription": alert.Description,
+		"salvagedFrom":     "xml",
+	}
+	if alert.ACE.EmployeeNoString != "" || alert.ACE.EmployeeNo != "" || alert.ACE.SubEventType != 0 {
+		out["AccessControllerEvent"] = map[string]any{
+			"employeeNoString":  firstNonEmptyStr(alert.ACE.EmployeeNoString, alert.ACE.EmployeeNo),
+			"name":              alert.ACE.Name,
+			"majorEventType":    alert.ACE.MajorEventType,
+			"subEventType":      alert.ACE.SubEventType,
+			"currentVerifyMode": alert.ACE.CurrentVerifyMode,
+			"serialNo":          alert.ACE.SerialNo,
+		}
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// salvageJPEG extracts the first JPEG (FFD8FF … FFD9) embedded in a body.
+func salvageJPEG(body []byte) []byte {
+	start := bytes.Index(body, []byte{0xFF, 0xD8, 0xFF})
+	if start < 0 {
+		return nil
+	}
+	end := bytes.LastIndex(body, []byte{0xFF, 0xD9})
+	if end <= start {
+		return nil
+	}
+	return body[start : end+2]
 }
 
 func firstNonEmptyStr(values ...string) string {
