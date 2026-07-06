@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/minio/minio-go/v7"
@@ -166,6 +167,17 @@ ALTER TABLE persons ADD COLUMN IF NOT EXISTS valid_begin TIMESTAMPTZ;
 ALTER TABLE persons ADD COLUMN IF NOT EXISTS valid_end TIMESTAMPTZ;
 ALTER TABLE persons ADD COLUMN IF NOT EXISTS qr_token TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_persons_qr_token ON persons(qr_token) WHERE qr_token IS NOT NULL AND qr_token <> '';
+
+CREATE TABLE IF NOT EXISTS cards (
+    card_id    TEXT PRIMARY KEY,
+    person_id  TEXT NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+    card_no    TEXT NOT NULL,
+    card_type  TEXT NOT NULL DEFAULT 'normalCard',
+    device_id  TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(person_id, card_no)
+);
+CREATE INDEX IF NOT EXISTS idx_cards_person ON cards(person_id);
 
 CREATE TABLE IF NOT EXISTS faces (
     id TEXT PRIMARY KEY,
@@ -346,6 +358,41 @@ CREATE TABLE IF NOT EXISTS settings (
     value JSONB NOT NULL,
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- One-entry-per-day flag on plans; last daily entry date on person_plans.
+ALTER TABLE plans        ADD COLUMN IF NOT EXISTS one_per_day      BOOLEAN DEFAULT FALSE;
+ALTER TABLE person_plans ADD COLUMN IF NOT EXISTS last_entry_date  DATE;
+
+-- Branches: one physical site (outlet/office) per tenant. A branch owns its
+-- LAN agent and its devices; device commands route via the branch's agent.
+CREATE TABLE IF NOT EXISTS branches (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT,
+    name TEXT NOT NULL DEFAULT '',
+    address TEXT DEFAULT '',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_branches_tenant ON branches(tenant_id);
+ALTER TABLE agents  ADD COLUMN IF NOT EXISTS branch_id TEXT;
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS branch_id TEXT;
+-- Strict rule: at most ONE agent per branch (partial unique index).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_branch_unique
+    ON agents(branch_id) WHERE branch_id IS NOT NULL AND branch_id <> '';
+CREATE INDEX IF NOT EXISTS idx_devices_branch ON devices(branch_id);
+
+-- Backfill: every pre-branch agent becomes its own branch (deterministic id
+-- 'br-<agent id>' keeps this idempotent), and devices that pointed at the
+-- agent directly are attached to that branch.
+INSERT INTO branches (id, tenant_id, name)
+SELECT 'br-' || a.id, a.tenant_id, COALESCE(NULLIF(a.name,''), a.id)
+FROM agents a
+WHERE a.branch_id IS NULL OR a.branch_id = ''
+ON CONFLICT (id) DO NOTHING;
+UPDATE agents SET branch_id = 'br-' || id WHERE branch_id IS NULL OR branch_id = '';
+UPDATE devices d SET branch_id = a.branch_id
+FROM agents a
+WHERE (d.branch_id IS NULL OR d.branch_id = '')
+  AND d.agent_id IS NOT NULL AND d.agent_id <> '' AND a.id = d.agent_id;
 `
 
 // ---------- Device ops ----------
@@ -393,12 +440,12 @@ func (s *Store) GetDevice(ctx context.Context, deviceID string) (*Device, error)
 	row := s.PG.QueryRow(ctx, `
 		SELECT device_id, name, salt, challenge, iterations, username, digest_type, is_auth,
 		       ip, port, use_https, isapi_username, isapi_password, fdid, face_lib_type,
-		       online, last_seen, model, firmware, COALESCE(agent_id,''), COALESCE(reach,''), created_at
+		       online, last_seen, model, firmware, `+effectiveAgentSQL+`, COALESCE(branch_id,''), COALESCE(reach,''), created_at
 		FROM devices WHERE device_id=$1`, deviceID)
 	d := &Device{}
 	err := row.Scan(&d.DeviceID, &d.Name, &d.Salt, &d.Challenge, &d.Iterations, &d.Username, &d.DigestType,
 		&d.IsAuth, &d.IP, &d.Port, &d.UseHTTPS, &d.ISAPIUsername, &d.ISAPIPassword, &d.FDID, &d.FaceLibType,
-		&d.Online, &d.LastSeen, &d.Model, &d.Firmware, &d.AgentID, &d.Reach, &d.CreatedAt)
+		&d.Online, &d.LastSeen, &d.Model, &d.Firmware, &d.AgentID, &d.BranchID, &d.Reach, &d.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -418,7 +465,7 @@ func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 	rows, err := s.PG.Query(ctx, `
 		SELECT device_id, name, username, digest_type, is_auth,
 		       ip, port, use_https, isapi_username, fdid, face_lib_type,
-		       online, last_seen, model, firmware, COALESCE(agent_id,''), COALESCE(reach,''), created_at
+		       online, last_seen, model, firmware, `+effectiveAgentSQL+`, COALESCE(branch_id,''), COALESCE(reach,''), created_at
 		FROM devices ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -429,7 +476,7 @@ func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 		var d Device
 		if err := rows.Scan(&d.DeviceID, &d.Name, &d.Username, &d.DigestType, &d.IsAuth,
 			&d.IP, &d.Port, &d.UseHTTPS, &d.ISAPIUsername, &d.FDID, &d.FaceLibType,
-			&d.Online, &d.LastSeen, &d.Model, &d.Firmware, &d.AgentID, &d.Reach, &d.CreatedAt); err != nil {
+			&d.Online, &d.LastSeen, &d.Model, &d.Firmware, &d.AgentID, &d.BranchID, &d.Reach, &d.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, d)
@@ -451,16 +498,17 @@ func (s *Store) RegisterDevice(ctx context.Context, d Device) error {
 		d.FaceLibType = "blackFD"
 	}
 	_, err := s.PG.Exec(ctx, `
-		INSERT INTO devices (device_id, name, password, ip, port, use_https, isapi_username, isapi_password, fdid, face_lib_type, agent_id, reach)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULLIF($11,''), $12)
+		INSERT INTO devices (device_id, name, password, ip, port, use_https, isapi_username, isapi_password, fdid, face_lib_type, agent_id, reach, branch_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULLIF($11,''), $12, NULLIF($13,''))
 		ON CONFLICT (device_id) DO UPDATE
 		SET name=$2, password=COALESCE(NULLIF($3,''), devices.password),
 		    ip=$4, port=$5, use_https=$6,
 		    isapi_username=$7, isapi_password=COALESCE(NULLIF($8,''), devices.isapi_password),
 		    fdid=$9, face_lib_type=$10,
 		    agent_id=NULLIF($11,''),
-		    reach=$12
-	`, d.DeviceID, d.Name, d.Password(), d.IP, d.Port, d.UseHTTPS, d.ISAPIUsername, d.ISAPIPassword, d.FDID, d.FaceLibType, d.AgentID, d.Reach)
+		    reach=$12,
+		    branch_id=NULLIF($13,'')
+	`, d.DeviceID, d.Name, d.Password(), d.IP, d.Port, d.UseHTTPS, d.ISAPIUsername, d.ISAPIPassword, d.FDID, d.FaceLibType, d.AgentID, d.Reach, d.BranchID)
 	return err
 }
 
@@ -704,6 +752,53 @@ func (s *Store) ListPersons(ctx context.Context) ([]Person, error) {
 
 func (s *Store) DeletePerson(ctx context.Context, id string) error {
 	_, err := s.PG.Exec(ctx, `DELETE FROM persons WHERE id=$1`, id)
+	return err
+}
+
+// ---------- Card ops ----------
+
+func (s *Store) UpsertCard(ctx context.Context, personID, cardNo, cardType, deviceID string) (*Card, error) {
+	if cardType == "" {
+		cardType = "normalCard"
+	}
+	cardID := "crd_" + uuid.NewString()[:12]
+	var c Card
+	err := s.PG.QueryRow(ctx, `
+		INSERT INTO cards (card_id, person_id, card_no, card_type, device_id)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (person_id, card_no) DO UPDATE
+		SET card_type = EXCLUDED.card_type, device_id = EXCLUDED.device_id
+		RETURNING card_id, person_id, card_no, card_type, device_id, created_at
+	`, cardID, personID, cardNo, cardType, deviceID).Scan(
+		&c.CardID, &c.PersonID, &c.CardNo, &c.CardType, &c.DeviceID, &c.CreatedAt,
+	)
+	return &c, err
+}
+
+func (s *Store) ListCardsByPerson(ctx context.Context, personID string) ([]Card, error) {
+	rows, err := s.PG.Query(ctx,
+		`SELECT card_id, person_id, card_no, card_type, device_id, created_at FROM cards WHERE person_id=$1 ORDER BY created_at`,
+		personID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Card
+	for rows.Next() {
+		var c Card
+		if err := rows.Scan(&c.CardID, &c.PersonID, &c.CardNo, &c.CardType, &c.DeviceID, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	if out == nil {
+		out = []Card{}
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeleteCardByNo(ctx context.Context, personID, cardNo string) error {
+	_, err := s.PG.Exec(ctx, `DELETE FROM cards WHERE person_id=$1 AND card_no=$2`, personID, cardNo)
 	return err
 }
 

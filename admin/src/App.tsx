@@ -1,7 +1,7 @@
-import { useEffect, useState, useRef, useMemo } from 'react'
+import { Fragment, useEffect, useState, useRef, useMemo } from 'react'
 import { api, apiUrl, auth, subscribeEvents, DeviceForm, PersonForm } from './api'
 
-type Tab = 'devices' | 'live' | 'persons' | 'enrol' | 'events' | 'qr-auth' | 'agents' | 'console' | 'test' | 'settings' | 'guide' | 'api-docs' | 'plugin-faceapp' | 'plans' | 'access-log' | 'hq'
+type Tab = 'devices' | 'branches' | 'live' | 'persons' | 'enrol' | 'events' | 'qr-auth' | 'agents' | 'console' | 'test' | 'settings' | 'guide' | 'api-docs' | 'plugin-faceapp' | 'plans' | 'access-log' | 'hq'
 
 export default function App() {
   const [me, setMe] = useState<any>(null)
@@ -76,7 +76,7 @@ function LoginScreen({ onLoggedIn }: { onLoggedIn: () => void }) {
         </div>
         <h1>Sign in</h1>
         <p className="login-sub">
-          Use your HQ or tenant admin email and password.
+          Use your HQ or merchant admin email and password.
         </p>
 
         <div className={`backend-status ${backend}`}>
@@ -168,6 +168,7 @@ function Dashboard({ me, onMe, onLogout, theme, setTheme }: { me: any; onMe: (m:
   const allTabs: { id: Tab; label: string; group?: string; hq?: boolean }[] = [
     { id: 'hq',      label: 'HQ overview', group: 'HQ', hq: true },
     { id: 'devices', label: 'Devices', group: 'Operate' },
+    { id: 'branches', label: 'Outlets', group: 'Operate' },
     { id: 'live',    label: 'Live cameras', group: 'Operate' },
     { id: 'persons', label: 'Members', group: 'Operate' },
     { id: 'enrol',   label: 'Enrol', group: 'Operate' },
@@ -249,9 +250,9 @@ function Dashboard({ me, onMe, onLogout, theme, setTheme }: { me: any; onMe: (m:
                 className="tenant-switcher"
                 value={activeTenantId}
                 onChange={(e) => setActiveTenantId(e.target.value)}
-                title="Active tenant for tenant-scoped pages"
+                title="Active merchant for merchant-scoped pages"
               >
-                <option value="">— pick a tenant —</option>
+                <option value="">— pick a merchant —</option>
                 {tenants.map((row: any) => (
                   <option key={row.tenant.id} value={row.tenant.id}>{row.tenant.name}</option>
                 ))}
@@ -274,6 +275,7 @@ function Dashboard({ me, onMe, onLogout, theme, setTheme }: { me: any; onMe: (m:
         </header>
         <main>
           {tab === 'devices' && <DevicesTab />}
+          {tab === 'branches' && <BranchesTab />}
           {tab === 'live' && <LiveTab />}
           {tab === 'persons' && <PersonsTab onEnrol={goEnrol} />}
           {tab === 'enrol' && <EnrolTab initialPersonId={enrolPersonId} onConsumeInitial={() => setEnrolPersonId('')} />}
@@ -299,6 +301,7 @@ function Dashboard({ me, onMe, onLogout, theme, setTheme }: { me: any; onMe: (m:
 
 function DevicesTab() {
   const [devices, setDevices] = useState<any[]>([])
+  const [branches, setBranches] = useState<any[]>([])
   const [editing, setEditing] = useState<any | null>(null)
   const [creating, setCreating] = useState(false)
   const [wifiDevice, setWifiDevice] = useState<any | null>(null)
@@ -309,7 +312,9 @@ function DevicesTab() {
   const [search, setSearch] = useState('')
   const [err, setErr] = useState('')
 
-  const load = () => api.listDevices().then((d) => setDevices(d || [])).catch((e) => setErr(String(e)))
+  const load = () => Promise.all([api.listDevices(), api.listBranches().catch(() => [])])
+    .then(([d, b]) => { setDevices(d || []); setBranches(b || []) })
+    .catch((e) => setErr(String(e)))
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t) }, [])
 
   const filtered = useMemo(() => {
@@ -322,6 +327,22 @@ function DevicesTab() {
       (d.model || '').toLowerCase().includes(s)
     )
   }, [devices, search])
+
+  // Group devices by outlet: every outlet with devices gets a section, and
+  // devices without an outlet fall into a trailing "No outlet" section.
+  const groups = useMemo(() => {
+    const byBranch: Record<string, any[]> = {}
+    for (const d of filtered) {
+      const k = d.branchId || ''
+      if (!byBranch[k]) byBranch[k] = []
+      byBranch[k].push(d)
+    }
+    const out = branches
+      .filter((b) => byBranch[b.id])
+      .map((b) => ({ id: b.id, name: b.name, agentId: b.agentId, agentName: b.agentName, agentOnline: b.agentOnline, devices: byBranch[b.id] }))
+    if (byBranch['']) out.push({ id: '', name: 'No outlet', agentId: '', agentName: '', agentOnline: false, devices: byBranch[''] })
+    return out
+  }, [filtered, branches])
 
   const del = async (id: string) => {
     if (!confirm(`Delete device ${id}?`)) return
@@ -373,7 +394,18 @@ function DevicesTab() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((d) => (
+              {groups.map((g) => (
+                <Fragment key={g.id || 'no-outlet'}>
+                  <tr className="group-row">
+                    <td colSpan={6} style={{ paddingTop: 14 }}>
+                      <strong>{g.name}</strong>
+                      <span className="muted small"> · {g.devices.length} device{g.devices.length === 1 ? '' : 's'}</span>
+                      {g.id !== '' && (g.agentId
+                        ? <span className={`badge ${g.agentOnline ? 'ok' : ''}`} style={{ marginLeft: 10 }}><span className="status-dot" />agent: {g.agentName || g.agentId} · {g.agentOnline ? 'online' : 'offline'}</span>
+                        : <span className="badge" style={{ marginLeft: 10 }}>no agent assigned</span>)}
+                    </td>
+                  </tr>
+                  {g.devices.map((d: any) => (
                 <tr key={d.deviceID}>
                   <td data-label="Preview" className="cell-preview">
                     <div className="snap-box small">
@@ -422,6 +454,8 @@ function DevicesTab() {
                     </div>
                   </td>
                 </tr>
+                  ))}
+                </Fragment>
               ))}
               {filtered.length === 0 && (
                 <tr><td colSpan={6}><div className="empty">{search ? 'No devices match the search.' : 'No devices yet. Click "Add device".'}</div></td></tr>
@@ -898,18 +932,19 @@ function DeviceModal({ device, onClose, onSaved }: { device?: any; onClose: () =
     isapiUsername: device.isapiUsername || 'admin', isapiPassword: '',
     fdid: device.fdid || '1', faceLibType: device.faceLibType || 'blackFD',
     agentId: device.agentId || '',
+    branchId: device.branchId || '',
     reach: device.reach || (device.agentId ? 'agent' : 'direct'),
   } : {
     deviceId: '', name: '', ip: '', port: 80, useHttps: false,
     isapiUsername: 'admin', isapiPassword: '',
-    fdid: '1', faceLibType: 'blackFD', agentId: '', reach: 'direct',
+    fdid: '1', faceLibType: 'blackFD', agentId: '', branchId: '', reach: 'direct',
   })
-  const [agents, setAgents] = useState<any[]>([])
+  const [branches, setBranches] = useState<any[]>([])
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [probe, setProbe] = useState<any>(null)
 
-  useEffect(() => { api.listAgents().then((a) => setAgents(a || [])).catch(() => {}) }, [])
+  useEffect(() => { api.listBranches().then((b) => setBranches(b || [])).catch(() => {}) }, [])
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -970,15 +1005,21 @@ function DeviceModal({ device, onClose, onSaved }: { device?: any; onClose: () =
           <Field label="FDID"><input value={form.fdid} onChange={(e) => setForm({ ...form, fdid: e.target.value })} /></Field>
           <Field label="Face lib type"><input value={form.faceLibType} onChange={(e) => setForm({ ...form, faceLibType: e.target.value })} /></Field>
         </div>
-        {form.reach === 'agent' && (
-          <Field label="Agent" hint="which on-prem agent bridges to this device">
-            <select value={form.agentId || ''} onChange={(e) => setForm({ ...form, agentId: e.target.value })}>
-              <option value="">— select an agent —</option>
-              {agents.map((a) => (
-                <option key={a.id} value={a.id}>{a.name || a.id} {a.online ? '· online' : '· offline'}</option>
-              ))}
-            </select>
-          </Field>
+        <Field label="Outlet" hint={form.reach === 'agent' ? "the device routes through this outlet's agent" : 'which outlet this device belongs to (optional)'}>
+          <select value={form.branchId || ''} onChange={(e) => setForm({ ...form, branchId: e.target.value, agentId: '' })}>
+            <option value="">— no outlet —</option>
+            {branches.map((b) => (
+              <option key={b.id} value={b.id}>
+                {b.name}{b.agentId ? ` · agent: ${b.agentName || b.agentId}${b.agentOnline ? ' (online)' : ' (offline)'}` : ' · no agent yet'}
+              </option>
+            ))}
+          </select>
+        </Field>
+        {form.reach === 'agent' && !form.branchId && (
+          <p className="muted small">Pick an outlet — commands reach this device through the outlet's agent. Create outlets (and their agent) on the Outlets tab.</p>
+        )}
+        {form.reach === 'agent' && form.branchId && !branches.find((b) => b.id === form.branchId)?.agentId && (
+          <p className="err">This outlet has no agent yet — assign one on the Outlets tab or commands will fail.</p>
         )}
         <div className="form-actions">
           <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
@@ -1232,11 +1273,79 @@ function PersonModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
 
+  // Optional credentials
+  const [devices, setDevices] = useState<any[]>([])
+  const [credDeviceId, setCredDeviceId] = useState('')
+  const [cardNo, setCardNo] = useState('')
+  const [fingerData, setFingerData] = useState('')
+  const [capBusy, setCapBusy] = useState('')
+
+  // Face photo
+  const [faceFile, setFaceFile] = useState<File | null>(null)
+  const [facePreview, setFacePreview] = useState<string | null>(null)
+  const [cameraOpen, setCameraOpen] = useState(false)
+
+  useEffect(() => {
+    api.listDevices().then((d: any[]) => {
+      const list = d || []
+      setDevices(list)
+      const online = list.find((x: any) => x.online)
+      if (online) setCredDeviceId(online.deviceID)
+      else if (list.length === 1) setCredDeviceId(list[0].deviceID)
+    }).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    if (!faceFile) { setFacePreview(null); return }
+    const url = URL.createObjectURL(faceFile)
+    setFacePreview(url)
+    return () => URL.revokeObjectURL(url)
+  }, [faceFile])
+
+  const swipeCard = async () => {
+    if (!credDeviceId) return
+    setCapBusy('card'); setErr('')
+    try {
+      const r = await api.captureCard(credDeviceId)
+      if (r?.cardNo) setCardNo(r.cardNo)
+      else setErr('No card detected — swipe the card on the reader and try again')
+    } catch (e: any) { setErr(String(e)) }
+    setCapBusy('')
+  }
+
+  const captureFingerprint = async () => {
+    if (!credDeviceId) return
+    setCapBusy('finger'); setErr('')
+    try {
+      const r = await api.captureFingerprint(credDeviceId)
+      // Backend now parses FingerPrintInfo and returns fingerData directly
+      if (r?.fingerData) setFingerData(r.fingerData)
+      else setErr('No fingerprint data returned — press finger firmly on the reader')
+    } catch (e: any) { setErr(String(e)) }
+    setCapBusy('')
+  }
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     setBusy(true); setErr('')
-    try { await api.createPerson(form); onSaved() }
-    catch (e: any) { setErr(String(e)) } finally { setBusy(false) }
+    try {
+      const person = await api.createPerson(form)
+      const empNo = person.employeeNo || form.employeeNo || ''
+      const pid = person.id || ''
+      // Enrol face if photo taken
+      if (credDeviceId && faceFile) {
+        await api.enrolFace(credDeviceId, pid, faceFile)
+      }
+      // Bind card if provided
+      if (credDeviceId && cardNo) {
+        await api.setCard(credDeviceId, { employeeNo: empNo, personId: pid, cardNo })
+      }
+      // Bind fingerprint if captured
+      if (credDeviceId && fingerData) {
+        await api.setFingerprint(credDeviceId, { employeeNo: empNo, fingerData })
+      }
+      onSaved()
+    } catch (e: any) { setErr(String(e)) } finally { setBusy(false) }
   }
 
   return (
@@ -1289,12 +1398,81 @@ function PersonModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
           <input type="checkbox" checked={form.attendanceOnly} onChange={(e) => setForm({ ...form, attendanceOnly: e.target.checked })} />
           <span>Attendance check only</span>
         </label>
+
+        <hr style={{ margin: '12px 0', border: 'none', borderTop: '1px solid var(--border, #e2e8f0)' }} />
+        <div className="small muted" style={{ marginBottom: 8 }}>Face, card &amp; fingerprint — optional, requires a device</div>
+        <Field label="Device">
+          <select value={credDeviceId} onChange={(e) => setCredDeviceId(e.target.value)}>
+            <option value="">— none —</option>
+            {devices.map((d: any) => (
+              <option key={d.deviceID} value={d.deviceID}>
+                {(d.name || d.deviceID) + (d.online ? ' (online)' : '')}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Face photo (optional)">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            {facePreview && (
+              <img src={facePreview} alt="face" style={{ width: 64, height: 64, objectFit: 'cover', borderRadius: 6, border: '1px solid var(--border, #e2e8f0)' }} />
+            )}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button type="button" className="btn-ghost" disabled={!credDeviceId || !!busy}
+                  onClick={() => setCameraOpen(true)}>
+                  {facePreview ? 'Retake' : 'Take photo'}
+                </button>
+                <label className="btn-ghost" style={{ cursor: 'pointer', padding: '6px 12px', display: 'inline-block' }}>
+                  Upload
+                  <input type="file" accept="image/*" style={{ display: 'none' }}
+                    onChange={(e) => { const f = e.target.files?.[0]; if (f) setFaceFile(f) }} />
+                </label>
+                {faceFile && (
+                  <button type="button" className="btn-ghost" style={{ color: 'var(--danger, #e53e3e)' }}
+                    onClick={() => setFaceFile(null)}>Clear</button>
+                )}
+              </div>
+              {!credDeviceId && <span className="small muted">Select a device first</span>}
+            </div>
+          </div>
+        </Field>
+        <div className="form-row" style={{ alignItems: 'flex-end', gap: 8 }}>
+          <Field label="Card number (optional)" grow={2}>
+            <input value={cardNo} onChange={(e) => setCardNo(e.target.value)}
+              placeholder="Type number or swipe at reader" disabled={!credDeviceId} />
+          </Field>
+          <button type="button" className="btn-ghost" disabled={!credDeviceId || !!capBusy || !!busy}
+            style={{ marginBottom: 1 }} onClick={swipeCard}>
+            {capBusy === 'card' ? 'Swipe card now…' : 'Swipe at reader'}
+          </button>
+        </div>
+        <div className="form-row" style={{ alignItems: 'center', gap: 8 }}>
+          <Field label="Fingerprint (optional)" grow={2}>
+            <input value={fingerData ? '✓ Captured' : ''} readOnly placeholder="Not captured" style={{ background: fingerData ? 'var(--success-bg, #f0fff4)' : undefined }} />
+          </Field>
+          <button type="button" className="btn-ghost" disabled={!credDeviceId || !!capBusy || !!busy}
+            style={{ marginTop: 18 }}
+            onClick={captureFingerprint}>
+            {capBusy === 'finger' ? 'Press finger on reader…' : fingerData ? 'Re-capture' : 'Capture at reader'}
+          </button>
+          {fingerData && (
+            <button type="button" className="btn-ghost" style={{ marginTop: 18, color: 'var(--danger, #e53e3e)' }}
+              onClick={() => setFingerData('')}>Clear</button>
+          )}
+        </div>
+
         <div className="form-actions">
           <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
           <button type="submit" className="btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Save person'}</button>
         </div>
       </form>
       {err && <div className="err">{err}</div>}
+      {cameraOpen && (
+        <CameraCapture
+          onClose={() => setCameraOpen(false)}
+          onCapture={(f) => { setFaceFile(f); setCameraOpen(false) }}
+        />
+      )}
     </Modal>
   )
 }
@@ -1303,9 +1481,25 @@ function PersonDetailModal({ personId, onClose, onDeleted, onEnrol }: { personId
   const [data, setData] = useState<any>(null)
   const [err, setErr] = useState('')
   const [qrBust, setQrBust] = useState(0)
+  const [cards, setCards] = useState<any[]>([])
+  const [cardsBusy, setCardsBusy] = useState(false)
+  const [devices, setDevices] = useState<any[]>([])
+  const [addCardDeviceId, setAddCardDeviceId] = useState('')
+  const [addCardNo, setAddCardNo] = useState('')
+  const [addCardErr, setAddCardErr] = useState('')
+
+  const loadCards = () => api.listCards(personId).then((r) => setCards(r?.cards || [])).catch(() => {})
 
   useEffect(() => {
     api.getPerson(personId).then(setData).catch((e) => setErr(String(e)))
+    loadCards()
+    api.listDevices().then((d: any[]) => {
+      const list = d || []
+      setDevices(list)
+      const online = list.find((x: any) => x.online)
+      if (online) setAddCardDeviceId(online.deviceID)
+      else if (list.length === 1) setAddCardDeviceId(list[0].deviceID)
+    }).catch(() => {})
   }, [personId])
 
   const rotateQR = async () => {
@@ -1323,7 +1517,6 @@ function PersonDetailModal({ personId, onClose, onDeleted, onEnrol }: { personId
 
   const p = data.person
   const faces = data.faces || []
-  const cards: string[] = p?.metadata?.cards || []
 
   return (
     <Modal title={p.name} onClose={onClose}>
@@ -1357,10 +1550,68 @@ function PersonDetailModal({ personId, onClose, onDeleted, onEnrol }: { personId
               : '—')
           } />
           <DetailRow label="Attendance only" value={p.attendanceOnly ? 'yes' : 'no'} />
-          <DetailRow label="Cards" value={cards.length ? cards.join(', ') : <span className="muted">none</span>} />
           <DetailRow label="ID" value={<span className="mono small">{p.id}</span>} />
           <DetailRow label="Created" value={<span className="small muted">{new Date(p.createdAt).toLocaleString()}</span>} />
         </div>
+      </div>
+
+      <div className="qr-block">
+        <h3 className="section-title">Cards</h3>
+        {cards.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12 }}>
+            {cards.map((card: any) => (
+              <div key={card.cardId} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span className="mono">{card.cardNo}</span>
+                <span className="chip" style={{ fontSize: 11 }}>{card.cardType}</span>
+                <span className="small muted" style={{ fontSize: 10, flex: 1 }}>{card.cardId}</span>
+                <button
+                  className="btn-ghost"
+                  style={{ fontSize: 11, padding: '2px 8px', color: 'var(--danger, #e53e3e)' }}
+                  disabled={cardsBusy}
+                  onClick={async () => {
+                    if (!confirm(`Remove card ${card.cardNo}?`)) return
+                    setCardsBusy(true)
+                    try { await api.deleteCard(card.deviceId || addCardDeviceId, card.cardNo, personId) } catch (_) {}
+                    await loadCards()
+                    setCardsBusy(false)
+                  }}
+                >Remove</button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="form-row" style={{ alignItems: 'flex-end', gap: 8, flexWrap: 'wrap' }}>
+          <Field label="Device">
+            <select value={addCardDeviceId} onChange={(e) => setAddCardDeviceId(e.target.value)} style={{ minWidth: 140 }}>
+              <option value="">— Select device —</option>
+              {devices.map((d: any) => (
+                <option key={d.deviceID} value={d.deviceID}>
+                  {(d.name || d.deviceID) + (d.online ? ' (online)' : '')}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Card number" grow={2}>
+            <input value={addCardNo} onChange={(e) => { setAddCardNo(e.target.value); setAddCardErr('') }}
+              placeholder="e.g. 1234567890" />
+          </Field>
+          <button
+            className="btn-primary"
+            disabled={cardsBusy || !addCardDeviceId || !addCardNo || !p.employeeNo}
+            style={{ marginBottom: 1 }}
+            onClick={async () => {
+              setCardsBusy(true); setAddCardErr('')
+              try {
+                await api.setCard(addCardDeviceId, { employeeNo: p.employeeNo, personId, cardNo: addCardNo })
+                setAddCardNo('')
+                await loadCards()
+              } catch (e: any) { setAddCardErr(String(e)) }
+              setCardsBusy(false)
+            }}
+          >{cardsBusy ? 'Adding…' : 'Add card'}</button>
+        </div>
+        {addCardErr && <div className="err" style={{ marginTop: 6 }}>{addCardErr}</div>}
+        {!p.employeeNo && <div className="muted small" style={{ marginTop: 4 }}>Person needs an employee number to bind a card.</div>}
       </div>
 
       <div className="qr-block">
@@ -1451,7 +1702,12 @@ function EnrolTab({ initialPersonId, onConsumeInitial }: { initialPersonId?: str
   const runCapture = async (label: string, fn: () => Promise<any>) => {
     if (!deviceId) { setErr('Pick a device first'); return }
     setCapBusy(label); setErr(''); setCapResult(null)
-    try { setCapResult(await fn()) }
+    try {
+      const r = await fn()
+      setCapResult(r)
+      // Auto-fill card number when a card swipe is captured
+      if (label === 'card' && r?.cardNo) setCardNo(r.cardNo)
+    }
     catch (e: any) { setErr(String(e)) }
     finally { setCapBusy('') }
   }
@@ -1538,7 +1794,7 @@ function EnrolTab({ initialPersonId, onConsumeInitial }: { initialPersonId?: str
             <input value={cardNo} onChange={(e) => setCardNo(e.target.value)} placeholder="e.g. 1234567890" />
           </Field>
           <button type="button" className="btn-primary" disabled={!!capBusy || !employeeNo || !cardNo}
-            onClick={() => runCapture('bindcard', () => api.setCard(deviceId, { employeeNo, cardNo }))}>
+            onClick={() => runCapture('bindcard', () => api.setCard(deviceId, { employeeNo, personId, cardNo }))}>
             {capBusy === 'bindcard' ? 'Binding…' : 'Bind card to person'}
           </button>
         </div>
@@ -1881,6 +2137,150 @@ function ConsoleTab() {
 
 // ===================== Agents =====================
 
+// ===================== Branches =====================
+// One branch = one physical site: it owns exactly one LAN agent and any
+// number of devices. Devices in a branch route commands via the branch agent.
+
+function BranchesTab() {
+  const [branches, setBranches] = useState<any[]>([])
+  const [agents, setAgents] = useState<any[]>([])
+  const [creating, setCreating] = useState(false)
+  const [editing, setEditing] = useState<any | null>(null)
+  const [err, setErr] = useState('')
+
+  const load = () => Promise.all([api.listBranches(), api.listAgents()])
+    .then(([b, a]) => { setBranches(b || []); setAgents(a || []) })
+    .catch((e) => setErr(String(e)))
+  useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t) }, [])
+
+  const freeAgents = agents.filter((a) => !a.branchId)
+
+  const del = async (b: any) => {
+    if (!confirm(`Delete outlet "${b.name}"? Its agent and devices are detached, not deleted.`)) return
+    try { await api.deleteBranch(b.id); load() } catch (e: any) { setErr(String(e)) }
+  }
+  const assign = async (branchId: string, agentId: string) => {
+    if (!agentId) return
+    setErr('')
+    try { await api.assignBranchAgent(branchId, agentId); load() } catch (e: any) { setErr(String(e)) }
+  }
+  const unassign = async (b: any) => {
+    if (!confirm(`Unassign agent "${b.agentName || b.agentId}" from ${b.name}? Devices in this outlet lose their command route until a new agent is assigned.`)) return
+    try { await api.unassignBranchAgent(b.id); load() } catch (e: any) { setErr(String(e)) }
+  }
+
+  return (
+    <>
+      <div className="page-toolbar">
+        <div className="toolbar-left">
+          <h1 className="page-title">Outlets <span className="muted">· {branches.length}</span></h1>
+        </div>
+        <div className="toolbar-right">
+          <button className="btn-primary" onClick={() => setCreating(true)}>Add outlet</button>
+        </div>
+      </div>
+
+      {err && <div className="err">{err}</div>}
+
+      <Card>
+        <p className="card-sub">
+          An outlet is one physical site (shop, office, floor). Each outlet runs <strong>exactly one agent</strong> on its LAN,
+          and every device you attach to the outlet reaches the cloud through that agent. Install the agent binary from the Agents tab.
+        </p>
+        <div className="table-wrap">
+          <table className="data-table">
+            <thead>
+              <tr><th>Outlet</th><th>Agent</th><th>Devices</th><th>Created</th><th className="ta-right">Actions</th></tr>
+            </thead>
+            <tbody>
+              {branches.map((b) => (
+                <tr key={b.id}>
+                  <td data-label="Outlet">
+                    <div className="cell-stack">
+                      <strong>{b.name}</strong>
+                      <span className="muted mono small">{b.id}{b.address ? ` · ${b.address}` : ''}</span>
+                    </div>
+                  </td>
+                  <td data-label="Agent">
+                    {b.agentId ? (
+                      <div className="cell-stack">
+                        <span className={`badge ${b.agentOnline ? 'ok' : ''}`}>
+                          <span className="status-dot" />{b.agentName || b.agentId}
+                        </span>
+                        <span className="muted small">{b.agentOnline ? 'connected' : 'disconnected'}</span>
+                      </div>
+                    ) : freeAgents.length > 0 ? (
+                      <select defaultValue="" onChange={(e) => assign(b.id, e.target.value)}>
+                        <option value="" disabled>— assign an agent —</option>
+                        {freeAgents.map((a) => (
+                          <option key={a.id} value={a.id}>{a.name || a.id}{a.online ? ' · online' : ''}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <span className="muted small">no agent — create one on the Agents tab</span>
+                    )}
+                  </td>
+                  <td data-label="Devices">{b.deviceCount}</td>
+                  <td data-label="Created" className="small muted">{new Date(b.createdAt).toLocaleString()}</td>
+                  <td data-label="Actions" className="ta-right">
+                    <div className="cell-actions">
+                      {b.agentId && <button className="btn-ghost" onClick={() => unassign(b)}>Unassign agent</button>}
+                      <button className="btn-ghost" onClick={() => setEditing(b)}>Edit</button>
+                      <button className="btn-danger" onClick={() => del(b)}>Delete</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {branches.length === 0 && (
+                <tr><td colSpan={5}><div className="empty">No outlets yet. Click "Add outlet" — then assign an agent and attach devices to it.</div></td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      {creating && <BranchModal onClose={() => setCreating(false)} onSaved={() => { setCreating(false); load() }} />}
+      {editing && <BranchModal branch={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load() }} />}
+    </>
+  )
+}
+
+function BranchModal({ branch, onClose, onSaved }: { branch?: any; onClose: () => void; onSaved: () => void }) {
+  const editing = !!branch
+  const [name, setName] = useState(branch?.name || '')
+  const [address, setAddress] = useState(branch?.address || '')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setBusy(true); setErr('')
+    try {
+      if (editing) await api.updateBranch(branch.id, name, address)
+      else await api.createBranch(name, address)
+      onSaved()
+    } catch (e: any) { setErr(String(e)) } finally { setBusy(false) }
+  }
+
+  return (
+    <Modal title={editing ? `Edit ${branch.name}` : 'Add outlet'} onClose={onClose}>
+      <form onSubmit={submit} className="form">
+        <Field label="Outlet name" hint="e.g. KL Sentral outlet, HQ level 3">
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="KL Sentral outlet" required autoFocus />
+        </Field>
+        <Field label="Address (optional)">
+          <input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="Jalan Stesen Sentral 5" />
+        </Field>
+        <div className="form-actions">
+          <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
+          <button type="submit" className="btn-primary" disabled={busy}>{busy ? 'Saving…' : (editing ? 'Save changes' : 'Create outlet')}</button>
+        </div>
+      </form>
+      {err && <div className="err">{err}</div>}
+    </Modal>
+  )
+}
+
 function AgentsTab() {
   const [agents, setAgents] = useState<any[]>([])
   const [downloads, setDownloads] = useState<any[]>([])
@@ -2097,7 +2497,7 @@ AGENT_TOKEN=${credentials.token} \\
         <div className="table-wrap">
           <table className="data-table">
             <thead>
-              <tr><th>Agent</th><th>Status</th><th>Created</th><th className="ta-right">Actions</th></tr>
+              <tr><th>Agent</th><th>Outlet</th><th>Status</th><th>Created</th><th className="ta-right">Actions</th></tr>
             </thead>
             <tbody>
               {agents.map((a) => (
@@ -2107,6 +2507,11 @@ AGENT_TOKEN=${credentials.token} \\
                       <strong>{a.name || a.id}</strong>
                       <span className="muted mono small">{a.id}</span>
                     </div>
+                  </td>
+                  <td data-label="Outlet">
+                    {a.branchId
+                      ? <span className="badge">{a.branchName || a.branchId}</span>
+                      : <span className="muted">—</span>}
                   </td>
                   <td data-label="Status">
                     <span className={`badge ${a.online ? 'ok' : ''}`}>
@@ -2123,7 +2528,7 @@ AGENT_TOKEN=${credentials.token} \\
                 </tr>
               ))}
               {agents.length === 0 && (
-                <tr><td colSpan={4}><div className="empty">No agents yet. Click "Add agent" to generate credentials, then install the agent on a LAN machine.</div></td></tr>
+                <tr><td colSpan={5}><div className="empty">No agents yet. Click "Add agent" to generate credentials, then install the agent on a LAN machine.</div></td></tr>
               )}
             </tbody>
           </table>
@@ -2138,14 +2543,18 @@ AGENT_TOKEN=${credentials.token} \\
 function AgentModal({ onClose, onCreated }: { onClose: () => void; onCreated: (c: { id: string; token: string }) => void }) {
   const [id, setId] = useState('')
   const [name, setName] = useState('')
+  const [branchId, setBranchId] = useState('')
+  const [branches, setBranches] = useState<any[]>([])
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
+
+  useEffect(() => { api.listBranches().then((b) => setBranches(b || [])).catch(() => {}) }, [])
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     setBusy(true); setErr('')
     try {
-      const r = await api.createAgent(id, name)
+      const r = await api.createAgent(id, name, branchId || undefined)
       onCreated({ id: r.id, token: r.token })
     } catch (e: any) { setErr(String(e)) } finally { setBusy(false) }
   }
@@ -2158,6 +2567,14 @@ function AgentModal({ onClose, onCreated }: { onClose: () => void; onCreated: (c
         </Field>
         <Field label="Name">
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Office front-door LAN" />
+        </Field>
+        <Field label="Outlet" hint="each outlet runs exactly one agent">
+          <select value={branchId} onChange={(e) => setBranchId(e.target.value)}>
+            <option value="">— assign later —</option>
+            {branches.filter((b) => !b.agentId).map((b) => (
+              <option key={b.id} value={b.id}>{b.name}</option>
+            ))}
+          </select>
         </Field>
         <div className="form-actions">
           <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
@@ -4211,18 +4628,18 @@ function HQTab() {
           <h3 style={{ marginTop: 0 }}>HQ access required</h3>
           <p className="muted">
             You're signed in as <strong>{me.user?.role}</strong>. This page is only available to
-            <strong> hq_admin</strong> accounts — the top-level operators who can see and manage every tenant in the system.
+            <strong> hq_admin</strong> accounts — the top-level operators who can see and manage every merchant in the system.
           </p>
           <p className="muted">
             Sign out and sign in as your HQ admin (the default is <code>hq@faceauth.local</code> if you haven't customised it) to see this page.
-            Your current role can manage everything within your own tenant — Devices, Members, Plans, Settings, etc.
+            Your current role can manage everything within your own merchant — Devices, Members, Plans, Settings, etc.
           </p>
         </div>
       </>
     )
   }
   const del = async (id: string) => {
-    if (!confirm(`Delete tenant ${id}? This cascades — all its devices, persons, plans, users will be removed.`)) return
+    if (!confirm(`Delete merchant ${id}? This cascades — all its devices, persons, plans, users will be removed.`)) return
     await api.hqDeleteTenant(id); load()
   }
   const createUser = async () => {
@@ -4245,28 +4662,28 @@ function HQTab() {
     <>
       <div className="page-toolbar">
         <div className="toolbar-left">
-          <h1 className="page-title">HQ overview <span className="muted">· {rows.length} tenant{rows.length === 1 ? '' : 's'}</span></h1>
+          <h1 className="page-title">HQ overview <span className="muted">· {rows.length} merchant{rows.length === 1 ? '' : 's'}</span></h1>
         </div>
         <div className="toolbar-right">
-          <button className="btn-primary" onClick={() => setCreating(true)}>+ New tenant</button>
+          <button className="btn-primary" onClick={() => setCreating(true)}>+ New merchant</button>
         </div>
       </div>
       {err && <div className="err">{err}</div>}
 
       <div className="stat-grid">
-        <StatTile label="Tenants" value={String(rows.length)} />
+        <StatTile label="Merchants" value={String(rows.length)} />
         <StatTile label="Devices online" value={`${total.online}/${total.devices}`} tone={total.online > 0 ? 'ok' : 'muted'} />
         <StatTile label="Persons" value={String(total.persons)} />
         <StatTile label="Plans" value={String(total.plans)} />
       </div>
 
-      <Card title="Tenants">
+      <Card title="Merchants">
         <div className="table-wrap">
           <table className="data-table">
             <thead><tr><th>Name</th><th>Premise</th><th>Devices</th><th>Persons</th><th>Plans</th><th>Status</th><th className="ta-right">Actions</th></tr></thead>
             <tbody>
               {rows.length === 0 ? (
-                <tr><td colSpan={7}><div className="empty" style={{ padding: 16 }}>No tenants yet. Click <strong>New tenant</strong> above to create one.</div></td></tr>
+                <tr><td colSpan={7}><div className="empty" style={{ padding: 16 }}>No merchants yet. Click <strong>New merchant</strong> above to create one.</div></td></tr>
               ) : rows.map((r: any) => (
                 <tr key={r.tenant.id}>
                   <td data-label="Name"><strong>{r.tenant.name}</strong><div className="muted small mono">{r.tenant.slug}</div></td>
@@ -4288,7 +4705,7 @@ function HQTab() {
 
       <Card title="Users">
         <div className="muted small" style={{ marginBottom: 12 }}>
-          All login accounts. <code>hq_admin</code> sees everything. <code>tenant_admin</code> manages one tenant.
+          All login accounts. <code>hq_admin</code> sees everything. <code>tenant_admin</code> manages one merchant.
         </div>
         <div className="form-row" style={{ gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
           <input placeholder="email" value={newUser.email} onChange={(e) => setNewUser({ ...newUser, email: e.target.value })} />
@@ -4300,14 +4717,14 @@ function HQTab() {
             <option value="tenant_operator">tenant_operator</option>
           </select>
           <select value={newUser.tenantId} onChange={(e) => setNewUser({ ...newUser, tenantId: e.target.value })}>
-            <option value="">— no tenant (HQ) —</option>
+            <option value="">— no merchant (HQ) —</option>
             {rows.map((r: any) => <option key={r.tenant.id} value={r.tenant.id}>{r.tenant.name}</option>)}
           </select>
           <button className="btn-primary" onClick={createUser} disabled={!newUser.email || !newUser.password}>+ Create user</button>
         </div>
         <div className="table-wrap">
           <table className="data-table">
-            <thead><tr><th>Email</th><th>Role</th><th>Tenant</th><th>Last login</th><th className="ta-right">Actions</th></tr></thead>
+            <thead><tr><th>Email</th><th>Role</th><th>Merchant</th><th>Last login</th><th className="ta-right">Actions</th></tr></thead>
             <tbody>
               {users.map((u: any) => (
                 <tr key={u.id}>
@@ -4424,6 +4841,7 @@ function PlansTab() {
                   <div className="muted small mono">{p.id}</div>
                   {p.type === 'credit' && <div className="muted small">Default credits: {p.defaultCredits}</div>}
                   {p.mustExitBeforeReentry && <div className="muted small">↳ Must exit before re-enter</div>}
+                  {p.onePerDay && <div className="muted small">↳ One entry per day</div>}
                   {p.type === 'rule' && (p.rules || []).length > 0 && (
                     <div style={{ marginTop: 8 }}>
                       <div className="muted small">Rules:</div>
@@ -4486,6 +4904,7 @@ function PlanEditor({ plan, onClose, onSaved }: { plan: any; onClose: () => void
   const [type, setType] = useState<string>(plan.type || 'unlimited')
   const [credits, setCredits] = useState<number>(plan.defaultCredits || 0)
   const [mustExit, setMustExit] = useState<boolean>(!!plan.mustExitBeforeReentry)
+  const [onePerDay, setOnePerDay] = useState<boolean>(!!plan.onePerDay)
   const [rules, setRules] = useState<any[]>(plan.rules || [])
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
@@ -4501,7 +4920,7 @@ function PlanEditor({ plan, onClose, onSaved }: { plan: any; onClose: () => void
   const save = async () => {
     setBusy(true); setErr('')
     try {
-      const body = { name, type, defaultCredits: credits, mustExitBeforeReentry: mustExit, rules, active: true }
+      const body = { name, type, defaultCredits: credits, mustExitBeforeReentry: mustExit, onePerDay, rules, active: true }
       if (plan.id) await api.updatePlan(plan.id, body)
       else await api.createPlan(body)
       onSaved()
@@ -4527,6 +4946,12 @@ function PlanEditor({ plan, onClose, onSaved }: { plan: any; onClose: () => void
         <label className="toggle">
           <input type="checkbox" checked={mustExit} onChange={(e) => setMustExit(e.target.checked)} />
           <span>{mustExit ? 'on' : 'off'}</span>
+        </label>
+      </Field>
+      <Field label="One entry per day" hint="Each person may enter only once per calendar day. The limit resets at midnight.">
+        <label className="toggle">
+          <input type="checkbox" checked={onePerDay} onChange={(e) => setOnePerDay(e.target.checked)} />
+          <span>{onePerDay ? 'on' : 'off'}</span>
         </label>
       </Field>
 
@@ -4658,7 +5083,7 @@ function NewTenantModal({ onClose, onCreated }: { onClose: () => void; onCreated
   }
 
   return (
-    <Modal title="New tenant" onClose={onClose}>
+    <Modal title="New merchant" onClose={onClose}>
       <Field label="Name">
         <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Acme Gym" autoFocus />
       </Field>
@@ -4688,7 +5113,7 @@ function NewTenantModal({ onClose, onCreated }: { onClose: () => void; onCreated
       {err && <div className="err">{err}</div>}
       <div className="form-actions">
         <button className="btn-ghost" onClick={onClose}>Cancel</button>
-        <button className="btn-primary" onClick={submit} disabled={!name || busy}>{busy ? 'Creating…' : 'Create tenant'}</button>
+        <button className="btn-primary" onClick={submit} disabled={!name || busy}>{busy ? 'Creating…' : 'Create merchant'}</button>
       </div>
     </Modal>
   )

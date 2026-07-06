@@ -48,11 +48,11 @@ func (s *Store) CreatePlan(ctx context.Context, p Plan) (*Plan, error) {
 		p.Type = PlanUnlimited
 	}
 	_, err := s.PG.Exec(ctx, `
-		INSERT INTO plans (id, tenant_id, name, type, default_credits, must_exit_before_reentry, active)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)
+		INSERT INTO plans (id, tenant_id, name, type, default_credits, must_exit_before_reentry, one_per_day, active)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 		ON CONFLICT (id) DO UPDATE
-		SET name=$3, type=$4, default_credits=$5, must_exit_before_reentry=$6, active=$7
-	`, p.ID, p.TenantID, p.Name, p.Type, p.DefaultCredits, p.MustExitBeforeReentry, p.Active)
+		SET name=$3, type=$4, default_credits=$5, must_exit_before_reentry=$6, one_per_day=$7, active=$8
+	`, p.ID, p.TenantID, p.Name, p.Type, p.DefaultCredits, p.MustExitBeforeReentry, p.OnePerDay, p.Active)
 	if err != nil {
 		return nil, err
 	}
@@ -62,9 +62,9 @@ func (s *Store) CreatePlan(ctx context.Context, p Plan) (*Plan, error) {
 func (s *Store) GetPlan(ctx context.Context, id string) (*Plan, error) {
 	p := &Plan{}
 	err := s.PG.QueryRow(ctx, `
-		SELECT id, tenant_id, name, type, default_credits, must_exit_before_reentry, active, created_at
+		SELECT id, tenant_id, name, type, default_credits, must_exit_before_reentry, one_per_day, active, created_at
 		FROM plans WHERE id=$1
-	`, id).Scan(&p.ID, &p.TenantID, &p.Name, &p.Type, &p.DefaultCredits, &p.MustExitBeforeReentry, &p.Active, &p.CreatedAt)
+	`, id).Scan(&p.ID, &p.TenantID, &p.Name, &p.Type, &p.DefaultCredits, &p.MustExitBeforeReentry, &p.OnePerDay, &p.Active, &p.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -76,7 +76,7 @@ func (s *Store) GetPlan(ctx context.Context, id string) (*Plan, error) {
 }
 
 func (s *Store) ListPlans(ctx context.Context, tenantID string) ([]Plan, error) {
-	q := `SELECT id, tenant_id, name, type, default_credits, must_exit_before_reentry, active, created_at FROM plans`
+	q := `SELECT id, tenant_id, name, type, default_credits, must_exit_before_reentry, one_per_day, active, created_at FROM plans`
 	args := []any{}
 	if tenantID != "" {
 		q += ` WHERE tenant_id=$1`
@@ -91,7 +91,7 @@ func (s *Store) ListPlans(ctx context.Context, tenantID string) ([]Plan, error) 
 	out := []Plan{}
 	for rows.Next() {
 		var p Plan
-		if err := rows.Scan(&p.ID, &p.TenantID, &p.Name, &p.Type, &p.DefaultCredits, &p.MustExitBeforeReentry, &p.Active, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.TenantID, &p.Name, &p.Type, &p.DefaultCredits, &p.MustExitBeforeReentry, &p.OnePerDay, &p.Active, &p.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -173,9 +173,9 @@ func (s *Store) GetPersonPlan(ctx context.Context, personID string) (*PersonPlan
 	pp := &PersonPlan{}
 	var planID *string
 	err := s.PG.QueryRow(ctx, `
-		SELECT person_id, plan_id, credits_remaining, inside, last_event_at, assigned_at
+		SELECT person_id, plan_id, credits_remaining, inside, last_event_at, last_entry_date, assigned_at
 		FROM person_plans WHERE person_id=$1
-	`, personID).Scan(&pp.PersonID, &planID, &pp.CreditsRemaining, &pp.Inside, &pp.LastEventAt, &pp.AssignedAt)
+	`, personID).Scan(&pp.PersonID, &planID, &pp.CreditsRemaining, &pp.Inside, &pp.LastEventAt, &pp.LastEntryDate, &pp.AssignedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -201,6 +201,13 @@ func (s *Store) SetPersonInside(ctx context.Context, personID string, inside boo
 	_, err := s.PG.Exec(ctx, `
 		UPDATE person_plans SET inside=$1, last_event_at=NOW() WHERE person_id=$2
 	`, inside, personID)
+	return err
+}
+
+func (s *Store) SetLastEntryDate(ctx context.Context, personID string, date time.Time) error {
+	_, err := s.PG.Exec(ctx, `
+		UPDATE person_plans SET last_entry_date=$1 WHERE person_id=$2
+	`, date.Format("2006-01-02"), personID)
 	return err
 }
 
@@ -327,6 +334,15 @@ func (s *Store) EvaluateAccess(ctx context.Context, personID string, when time.T
 		direction = "out"
 	}
 
+	// One-per-day: block a second "in" on the same calendar day.
+	if plan.OnePerDay && direction == "in" && pp.LastEntryDate != nil {
+		todayStr := when.Format("2006-01-02")
+		lastStr := pp.LastEntryDate.Format("2006-01-02")
+		if todayStr == lastStr {
+			return AccessDecision{Allow: false, PlanID: plan.ID, PlanType: plan.Type, Reason: "already entered today"}
+		}
+	}
+
 	switch plan.Type {
 	case PlanUnlimited:
 		return AccessDecision{Allow: true, PlanID: plan.ID, PlanType: plan.Type, Direction: direction, Reason: "unlimited"}
@@ -361,6 +377,7 @@ func (s *Store) CommitAccess(ctx context.Context, decision AccessDecision, perso
 		// Toggle inside state
 		if decision.Direction == "in" {
 			_ = s.SetPersonInside(ctx, personID, true)
+			_ = s.SetLastEntryDate(ctx, personID, time.Now())
 		} else if decision.Direction == "out" {
 			_ = s.SetPersonInside(ctx, personID, false)
 		}

@@ -11,7 +11,7 @@ func (s *Store) ListDevicesByTenant(ctx context.Context, tenantID string) ([]Dev
 	rows, err := s.PG.Query(ctx, `
 		SELECT device_id, name, username, digest_type, is_auth,
 		       ip, port, use_https, isapi_username, fdid, face_lib_type,
-		       online, last_seen, model, firmware, COALESCE(agent_id,''), created_at
+		       online, last_seen, model, firmware, `+effectiveAgentSQL+`, COALESCE(branch_id,''), created_at
 		FROM devices
 		WHERE tenant_id=$1
 		ORDER BY created_at DESC`, tenantID)
@@ -24,7 +24,7 @@ func (s *Store) ListDevicesByTenant(ctx context.Context, tenantID string) ([]Dev
 		var d Device
 		if err := rows.Scan(&d.DeviceID, &d.Name, &d.Username, &d.DigestType, &d.IsAuth,
 			&d.IP, &d.Port, &d.UseHTTPS, &d.ISAPIUsername, &d.FDID, &d.FaceLibType,
-			&d.Online, &d.LastSeen, &d.Model, &d.Firmware, &d.AgentID, &d.CreatedAt); err != nil {
+			&d.Online, &d.LastSeen, &d.Model, &d.Firmware, &d.AgentID, &d.BranchID, &d.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, d)
@@ -64,7 +64,11 @@ func (s *Store) ListPersonsByTenant(ctx context.Context, tenantID string) ([]Per
 }
 
 func (s *Store) ListAgentsByTenant(ctx context.Context, tenantID string) ([]Agent, error) {
-	rows, err := s.PG.Query(ctx, `SELECT id, name, created_at FROM agents WHERE tenant_id=$1 ORDER BY created_at DESC`, tenantID)
+	rows, err := s.PG.Query(ctx, `
+		SELECT a.id, a.name, COALESCE(a.branch_id,''), COALESCE(b.name,''), a.created_at
+		FROM agents a
+		LEFT JOIN branches b ON b.id = a.branch_id
+		WHERE a.tenant_id=$1 ORDER BY a.created_at DESC`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +76,7 @@ func (s *Store) ListAgentsByTenant(ctx context.Context, tenantID string) ([]Agen
 	out := []Agent{}
 	for rows.Next() {
 		var a Agent
-		if err := rows.Scan(&a.ID, &a.Name, &a.CreatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.BranchID, &a.BranchName, &a.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, a)

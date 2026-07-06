@@ -49,6 +49,7 @@ type Plan struct {
 	Type                     string     `json:"type"`         // unlimited | credit | rule
 	DefaultCredits           int        `json:"defaultCredits"`
 	MustExitBeforeReentry    bool       `json:"mustExitBeforeReentry"`
+	OnePerDay                bool       `json:"onePerDay"`    // allow at most one entry per calendar day
 	Active                   bool       `json:"active"`
 	CreatedAt                time.Time  `json:"createdAt"`
 	Rules                    []PlanRule `json:"rules,omitempty"`
@@ -69,6 +70,7 @@ type PersonPlan struct {
 	CreditsRemaining int        `json:"creditsRemaining"`
 	Inside           bool       `json:"inside"`
 	LastEventAt      *time.Time `json:"lastEventAt,omitempty"`
+	LastEntryDate    *time.Time `json:"lastEntryDate,omitempty"` // date of last allowed "in" entry
 	AssignedAt       time.Time  `json:"assignedAt"`
 }
 
@@ -85,11 +87,28 @@ type AccessLog struct {
 }
 
 type Agent struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Token     string    `json:"token,omitempty"` // only shown right after creation
-	Online    bool      `json:"online"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	Token      string    `json:"token,omitempty"` // only shown right after creation
+	Online     bool      `json:"online"`
+	BranchID   string    `json:"branchId,omitempty"`
+	BranchName string    `json:"branchName,omitempty"`
+	CreatedAt  time.Time `json:"createdAt"`
+}
+
+// Branch is one physical site (outlet, office, floor) inside a tenant.
+// It owns at most one LAN agent; devices attached to the branch route their
+// ISAPI commands through that agent.
+type Branch struct {
+	ID          string    `json:"id"`
+	TenantID    string    `json:"tenantId,omitempty"`
+	Name        string    `json:"name"`
+	Address     string    `json:"address,omitempty"`
+	AgentID     string    `json:"agentId,omitempty"`   // joined: the branch's agent
+	AgentName   string    `json:"agentName,omitempty"` // joined
+	AgentOnline bool      `json:"agentOnline"`         // live, filled from hub
+	DeviceCount int       `json:"deviceCount"`
+	CreatedAt   time.Time `json:"createdAt"`
 }
 
 type Device struct {
@@ -112,8 +131,9 @@ type Device struct {
 	LastSeen      *time.Time `json:"lastSeen,omitempty"`
 	Model         string     `json:"model,omitempty"`
 	Firmware      string     `json:"firmware,omitempty"`
-	AgentID       string     `json:"agentId,omitempty"` // if set, ISAPI is routed via this agent
-	Reach         string     `json:"reach,omitempty"`   // command transport: "direct" | "agent" | "otap" (empty = direct/agent auto)
+	AgentID       string     `json:"agentId,omitempty"`  // effective routing agent: the branch's agent when a branch is set, else the direct assignment
+	BranchID      string     `json:"branchId,omitempty"` // physical site the device belongs to
+	Reach         string     `json:"reach,omitempty"`    // command transport: "direct" | "agent" | "otap" (empty = direct/agent auto)
 	CreatedAt     time.Time  `json:"createdAt"`
 
 	// Password is a transient field used only when writing; never serialized
@@ -151,6 +171,15 @@ type Face struct {
 	DeviceID  string    `json:"deviceId"`
 	ImageKey  string    `json:"imageKey"`
 	Status    string    `json:"status"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+type Card struct {
+	CardID    string    `json:"cardId"`
+	PersonID  string    `json:"personId"`
+	CardNo    string    `json:"cardNo"`
+	CardType  string    `json:"cardType"`
+	DeviceID  string    `json:"deviceId"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 

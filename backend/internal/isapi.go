@@ -86,11 +86,25 @@ func NewISAPIClientForDevice(d *Device, hub *AgentHub) *ISAPIClient {
 		c.store = hub.store
 		return c
 	}
-	if d.AgentID != "" && hub != nil {
+	// Reach "direct" is an explicit opt-out: a device can live in a branch
+	// (whose agent would normally carry its traffic) yet still be dialled
+	// straight over the LAN/VPN.
+	if d.AgentID != "" && hub != nil && d.Reach != "direct" {
 		c.AgentID = d.AgentID
 		c.Hub = hub
 	}
 	return c
+}
+
+// isapiClientDirect returns a client that prefers a direct TCP connection.
+// When the device's assigned agent is offline it falls back to direct IP
+// rather than waiting for the agent to timeout, making it safe for slow
+// capability-probe calls (functions/activation/events/capabilities endpoints).
+func isapiClientDirect(d *Device, hub *AgentHub) *ISAPIClient {
+	if d.AgentID != "" && hub != nil && !hub.IsOnline(d.AgentID) {
+		return NewISAPIClient(d.IP, d.Port, d.UseHTTPS, d.ISAPIUsername, d.ISAPIPassword)
+	}
+	return NewISAPIClientForDevice(d, hub)
 }
 
 // Do executes an HTTP request, handling Digest 401 challenge transparently.

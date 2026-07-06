@@ -3,3 +3,6 @@ agent-local/
 *.bak
 db-dump-*.sql
 minio-bucket-*.tar.gz
+backend/bin/
+backend/debug/
+.env.*

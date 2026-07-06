@@ -485,6 +485,7 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 			FDID          string `json:"fdid"`
 			FaceLibType   string `json:"faceLibType"`
 			AgentID       string `json:"agentId"`
+			BranchID      string `json:"branchId"`
 			Reach         string `json:"reach"`
 		}
 		if err := json.Unmarshal(c.Body(), &body); err != nil || body.DeviceID == "" {
@@ -501,6 +502,7 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 			FDID:          body.FDID,
 			FaceLibType:   body.FaceLibType,
 			AgentID:       body.AgentID,
+			BranchID:      body.BranchID,
 			Reach:         body.Reach,
 		}
 		dev.SetPassword(body.Password)
@@ -675,6 +677,109 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		return c.JSON(results)
 	})
 
+	// ---------- Branches ----------
+	//
+	// A branch = one physical site inside a tenant. It owns at most ONE agent
+	// (strictly enforced) and any number of devices; devices attached to a
+	// branch route their ISAPI commands through the branch's agent.
+
+	api.Get("/branches", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		branches, err := store.ListBranchesByTenant(c.Context(), tid)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		for i := range branches {
+			if branches[i].AgentID != "" {
+				branches[i].AgentOnline = hub.IsOnline(branches[i].AgentID)
+			}
+		}
+		return c.JSON(branches)
+	})
+
+	api.Post("/branches", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		var body struct {
+			ID      string `json:"id"`
+			Name    string `json:"name"`
+			Address string `json:"address"`
+		}
+		if err := json.Unmarshal(c.Body(), &body); err != nil || strings.TrimSpace(body.Name) == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "name required"})
+		}
+		if body.ID == "" {
+			body.ID = "br-" + RandomString(10, charset+hexCharset)
+		}
+		b := Branch{ID: body.ID, TenantID: tid, Name: body.Name, Address: body.Address}
+		if err := store.CreateBranch(c.Context(), b); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(b)
+	})
+
+	api.Put("/branches/:id", func(c *fiber.Ctx) error {
+		var body struct {
+			Name    string `json:"name"`
+			Address string `json:"address"`
+		}
+		if err := json.Unmarshal(c.Body(), &body); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "bad body"})
+		}
+		if err := store.UpdateBranch(c.Context(), c.Params("id"), body.Name, body.Address); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"ok": true})
+	})
+
+	api.Delete("/branches/:id", func(c *fiber.Ctx) error {
+		if err := store.DeleteBranch(c.Context(), c.Params("id")); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"ok": true})
+	})
+
+	// Assign an agent to the branch (strict: one agent per branch, and an
+	// agent can serve only one branch).
+	api.Post("/branches/:id/agent", func(c *fiber.Ctx) error {
+		var body struct {
+			AgentID string `json:"agentId"`
+		}
+		if err := json.Unmarshal(c.Body(), &body); err != nil || body.AgentID == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "agentId required"})
+		}
+		if err := store.AssignAgentToBranch(c.Context(), c.Params("id"), body.AgentID); err != nil {
+			return c.Status(409).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"ok": true})
+	})
+
+	api.Delete("/branches/:id/agent", func(c *fiber.Ctx) error {
+		if err := store.UnassignAgentFromBranch(c.Context(), c.Params("id")); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"ok": true})
+	})
+
+	// Attach/detach a device to a branch (empty branchId detaches).
+	api.Post("/devices/:id/branch", func(c *fiber.Ctx) error {
+		var body struct {
+			BranchID string `json:"branchId"`
+		}
+		if err := json.Unmarshal(c.Body(), &body); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "bad body"})
+		}
+		if err := store.SetDeviceBranch(c.Context(), c.Params("id"), body.BranchID); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"ok": true})
+	})
+
 	// ---------- Agents ----------
 
 	api.Get("/agents", func(c *fiber.Ctx) error {
@@ -690,10 +795,12 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		out := make([]fiber.Map, 0, len(agents))
 		for _, a := range agents {
 			out = append(out, fiber.Map{
-				"id":        a.ID,
-				"name":      a.Name,
-				"online":    hub.IsOnline(a.ID),
-				"createdAt": a.CreatedAt,
+				"id":         a.ID,
+				"name":       a.Name,
+				"online":     hub.IsOnline(a.ID),
+				"branchId":   a.BranchID,
+				"branchName": a.BranchName,
+				"createdAt":  a.CreatedAt,
 			})
 		}
 		return c.JSON(out)
@@ -701,8 +808,9 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 
 	api.Post("/agents", func(c *fiber.Ctx) error {
 		var body struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
+			ID       string `json:"id"`
+			Name     string `json:"name"`
+			BranchID string `json:"branchId"`
 		}
 		if err := json.Unmarshal(c.Body(), &body); err != nil || body.ID == "" {
 			return c.Status(400).JSON(fiber.Map{"error": "id required"})
@@ -713,6 +821,13 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		}
 		if tid, err := tenantScope(c); err == nil {
 			_ = store.SetAgentTenant(c.Context(), a.ID, tid)
+		}
+		if body.BranchID != "" {
+			if err := store.AssignAgentToBranch(c.Context(), body.BranchID, a.ID); err != nil {
+				// Agent exists but the branch already has one — surface it.
+				return c.Status(409).JSON(fiber.Map{"error": err.Error(), "id": a.ID, "token": a.Token})
+			}
+			a.BranchID = body.BranchID
 		}
 		return c.JSON(a) // Token is included here ONCE — for the user to copy
 	})
@@ -1097,9 +1212,17 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		client := NewISAPIClientForDevice(d, hub)
 		resp, err := client.CaptureCardInfo()
 		if err != nil {
-			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "raw": resp})
 		}
-		return c.JSON(fiber.Map{"ok": true, "response": resp})
+		// Parse device response: {"CardInfo":{"cardNo":"...","cardType":"..."}}
+		var parsed struct {
+			CardInfo struct {
+				CardNo   string `json:"cardNo"`
+				CardType string `json:"cardType"`
+			} `json:"CardInfo"`
+		}
+		_ = json.Unmarshal([]byte(resp), &parsed)
+		return c.JSON(fiber.Map{"ok": true, "cardNo": parsed.CardInfo.CardNo, "cardType": parsed.CardInfo.CardType, "raw": resp})
 	})
 
 	// Capture a fingerprint on the device sensor.
@@ -1112,12 +1235,29 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		client := NewISAPIClientForDevice(d, hub)
 		resp, err := client.CaptureFingerPrint(finger)
 		if err != nil {
-			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "raw": resp})
 		}
-		return c.JSON(fiber.Map{"ok": true, "response": resp})
+		// Parse device response: {"FingerPrintInfo":{"fingerNo":1,"fingerData":"base64..."}}
+		var parsed struct {
+			FingerPrintInfo struct {
+				FingerNo   int    `json:"fingerNo"`
+				FingerData string `json:"fingerData"`
+			} `json:"FingerPrintInfo"`
+		}
+		_ = json.Unmarshal([]byte(resp), &parsed)
+		return c.JSON(fiber.Map{"ok": true, "fingerData": parsed.FingerPrintInfo.FingerData, "fingerNo": parsed.FingerPrintInfo.FingerNo, "raw": resp})
 	})
 
-	// Create/modify a card bound to a user.
+	// List cards stored in DB for a person.
+	api.Get("/persons/:id/cards", func(c *fiber.Ctx) error {
+		cards, err := store.ListCardsByPerson(c.Context(), c.Params("id"))
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"cards": cards})
+	})
+
+	// Create/modify a card bound to a user (pushes to device + saves to DB).
 	api.Post("/devices/:id/cards", func(c *fiber.Ctx) error {
 		d, err := reachable(c)
 		if err != nil {
@@ -1125,6 +1265,7 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		}
 		var body struct {
 			EmployeeNo string `json:"employeeNo"`
+			PersonID   string `json:"personId"`
 			CardNo     string `json:"cardNo"`
 			CardType   string `json:"cardType"`
 			Mode       string `json:"mode"` // "" = create, "modify" = update
@@ -1137,19 +1278,35 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if err != nil {
 			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
 		}
-		return c.JSON(fiber.Map{"ok": true, "response": resp})
+		// Persist to DB — look up person by ID or by employeeNo.
+		personID := body.PersonID
+		if personID == "" {
+			if p, _ := store.GetPersonByEmployeeNo(c.Context(), body.EmployeeNo); p != nil {
+				personID = p.ID
+			}
+		}
+		var card *Card
+		if personID != "" {
+			card, _ = store.UpsertCard(c.Context(), personID, body.CardNo, body.CardType, d.DeviceID)
+		}
+		return c.JSON(fiber.Map{"ok": true, "response": resp, "card": card})
 	})
 
-	// Delete a card by number.
+	// Delete a card by number (removes from device + DB).
 	api.Delete("/devices/:id/cards/:cardNo", func(c *fiber.Ctx) error {
 		d, err := reachable(c)
 		if err != nil {
 			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
 		}
+		cardNo := c.Params("cardNo")
 		client := NewISAPIClientForDevice(d, hub)
-		resp, err := client.DeleteCard(c.Params("cardNo"))
+		resp, err := client.DeleteCard(cardNo)
 		if err != nil {
 			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		// Remove from DB — find person by employeeNo query param if provided.
+		if personID := c.Query("personId"); personID != "" {
+			_ = store.DeleteCardByNo(c.Context(), personID, cardNo)
 		}
 		return c.JSON(fiber.Map{"ok": true, "response": resp})
 	})
@@ -2574,9 +2731,16 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		}
 		resp, err := NewISAPIClientForDevice(d, hub).CaptureCardInfo()
 		if err != nil {
-			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "raw": resp})
 		}
-		return c.JSON(fiber.Map{"ok": true, "response": resp})
+		var parsed struct {
+			CardInfo struct {
+				CardNo   string `json:"cardNo"`
+				CardType string `json:"cardType"`
+			} `json:"CardInfo"`
+		}
+		_ = json.Unmarshal([]byte(resp), &parsed)
+		return c.JSON(fiber.Map{"ok": true, "cardNo": parsed.CardInfo.CardNo, "cardType": parsed.CardInfo.CardType, "raw": resp})
 	})
 	v1.Post("/devices/:id/capture/fingerprint", func(c *fiber.Ctx) error {
 		d, err := reachable(c)
@@ -2586,9 +2750,16 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		finger, _ := strconv.Atoi(c.Query("finger", "1"))
 		resp, err := NewISAPIClientForDevice(d, hub).CaptureFingerPrint(finger)
 		if err != nil {
-			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "raw": resp})
 		}
-		return c.JSON(fiber.Map{"ok": true, "response": resp})
+		var parsed struct {
+			FingerPrintInfo struct {
+				FingerNo   int    `json:"fingerNo"`
+				FingerData string `json:"fingerData"`
+			} `json:"FingerPrintInfo"`
+		}
+		_ = json.Unmarshal([]byte(resp), &parsed)
+		return c.JSON(fiber.Map{"ok": true, "fingerData": parsed.FingerPrintInfo.FingerData, "fingerNo": parsed.FingerPrintInfo.FingerNo, "raw": resp})
 	})
 	v1.Post("/devices/:id/cards", func(c *fiber.Ctx) error {
 		d, err := reachable(c)
@@ -2813,6 +2984,193 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 	}
 	api.Get("/devices/:id/stream.mjpg", mjpeg)
 	v1.Get("/devices/:id/stream.mjpg", mjpeg)
+
+	// ── Hikvision device capability & event endpoints ──────────────────────────
+	//
+	// GET  /api/devices/:id/activation     — check activation status (no auth to device)
+	// GET  /api/devices/:id/functions      — full feature availability report
+	// GET  /api/devices/:id/capabilities   — raw AccessControl capabilities JSON
+	// POST /api/devices/:id/events         — search access event log
+	// GET  /api/devices/:id/decode-event   — decode major/minor event code
+	// POST /api/devices/:id/decode-error   — decode subStatusCode error
+
+	// GET /api/devices/:id/activation — checks /SDK/activateStatus on the device
+	api.Get("/devices/:id/activation", func(c *fiber.Ctx) error {
+		d, _ := store.GetDevice(c.Context(), c.Params("id"))
+		if d == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "device not found"})
+		}
+		client := isapiClientDirect(d, hub)
+		activated, raw, err := client.GetActivationStatus()
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"error": err.Error(), "raw": raw})
+		}
+		return c.JSON(fiber.Map{"activated": activated, "raw": raw})
+	})
+
+	// GET /api/devices/:id/functions — full capability report (slow, ~15-30s)
+	api.Get("/devices/:id/functions", func(c *fiber.Ctx) error {
+		d, _ := store.GetDevice(c.Context(), c.Params("id"))
+		if d == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "device not found"})
+		}
+		client := isapiClientDirect(d, hub)
+		report, err := client.CheckDeviceFunctionSupport()
+		if err != nil && report == nil {
+			return c.Status(502).JSON(fiber.Map{"error": err.Error()})
+		}
+		if err != nil {
+			return c.JSON(fiber.Map{"report": report, "warning": err.Error()})
+		}
+		return c.JSON(report)
+	})
+
+	// GET /api/devices/:id/capabilities — raw AccessControl capabilities
+	api.Get("/devices/:id/capabilities", func(c *fiber.Ctx) error {
+		d, _ := store.GetDevice(c.Context(), c.Params("id"))
+		if d == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "device not found"})
+		}
+		client := isapiClientDirect(d, hub)
+		raw, err := client.GetAccessControlCapabilities()
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.SendString(raw)
+	})
+
+	// POST /api/devices/:id/events — search device access event log
+	// Body (all fields optional):
+	//   { "startTime":"2026-01-01T00:00:00+08:00", "endTime":"...",
+	//     "employeeNo":"EMP001", "major":5, "minor":75,
+	//     "maxResults":50, "searchResultPosition":0,
+	//     "picEnable":false, "timeReverseOrder":true }
+	api.Post("/devices/:id/events", func(c *fiber.Ctx) error {
+		d, _ := store.GetDevice(c.Context(), c.Params("id"))
+		if d == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "device not found"})
+		}
+		var filter AcsEventFilter
+		if len(c.Body()) > 0 {
+			if err := json.Unmarshal(c.Body(), &filter); err != nil {
+				return c.Status(400).JSON(fiber.Map{"error": "invalid filter: " + err.Error()})
+			}
+		}
+		if filter.MaxResults <= 0 {
+			filter.MaxResults = 50
+		}
+		client := isapiClientDirect(d, hub)
+		events, total, err := client.SearchAcsEvents(filter)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{
+			"totalMatches": total,
+			"numOfMatches": len(events),
+			"events":       events,
+		})
+	})
+
+	// GET /api/devices/:id/decode-event?major=5&minor=75
+	api.Get("/devices/:id/decode-event", func(c *fiber.Ctx) error {
+		major, _ := strconv.Atoi(c.Query("major"))
+		minor, _ := strconv.Atoi(c.Query("minor"))
+		return c.JSON(DecodeEvent(major, minor))
+	})
+
+	// POST /api/decode-error — decode an ISAPI error subStatusCode (device-independent)
+	// Body: { "subStatusCode": "employeeNoAlreadyExist", "errorCode": 0 }
+	api.Post("/decode-error", func(c *fiber.Ctx) error {
+		var body struct {
+			SubStatusCode string `json:"subStatusCode"`
+			ErrorCode     int    `json:"errorCode"`
+		}
+		if err := json.Unmarshal(c.Body(), &body); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "invalid body"})
+		}
+		return c.JSON(DecodeISAPIError(body.SubStatusCode, body.ErrorCode))
+	})
+
+	// v1 equivalents (API-key authenticated)
+	v1.Get("/devices/:id/activation", func(c *fiber.Ctx) error {
+		d, _ := store.GetDevice(c.Context(), c.Params("id"))
+		if d == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "device not found"})
+		}
+		client := isapiClientDirect(d, hub)
+		activated, raw, err := client.GetActivationStatus()
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"error": err.Error(), "raw": raw})
+		}
+		return c.JSON(fiber.Map{"activated": activated, "raw": raw})
+	})
+	v1.Get("/devices/:id/functions", func(c *fiber.Ctx) error {
+		d, _ := store.GetDevice(c.Context(), c.Params("id"))
+		if d == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "device not found"})
+		}
+		client := isapiClientDirect(d, hub)
+		report, err := client.CheckDeviceFunctionSupport()
+		if err != nil && report == nil {
+			return c.Status(502).JSON(fiber.Map{"error": err.Error()})
+		}
+		if err != nil {
+			return c.JSON(fiber.Map{"report": report, "warning": err.Error()})
+		}
+		return c.JSON(report)
+	})
+	v1.Get("/devices/:id/capabilities", func(c *fiber.Ctx) error {
+		d, _ := store.GetDevice(c.Context(), c.Params("id"))
+		if d == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "device not found"})
+		}
+		client := isapiClientDirect(d, hub)
+		raw, err := client.GetAccessControlCapabilities()
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.SendString(raw)
+	})
+	v1.Post("/devices/:id/events", func(c *fiber.Ctx) error {
+		d, _ := store.GetDevice(c.Context(), c.Params("id"))
+		if d == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "device not found"})
+		}
+		var filter AcsEventFilter
+		if len(c.Body()) > 0 {
+			if err := json.Unmarshal(c.Body(), &filter); err != nil {
+				return c.Status(400).JSON(fiber.Map{"error": "invalid filter: " + err.Error()})
+			}
+		}
+		if filter.MaxResults <= 0 {
+			filter.MaxResults = 50
+		}
+		client := isapiClientDirect(d, hub)
+		events, total, err := client.SearchAcsEvents(filter)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{
+			"totalMatches": total,
+			"numOfMatches": len(events),
+			"events":       events,
+		})
+	})
+	v1.Get("/devices/:id/decode-event", func(c *fiber.Ctx) error {
+		major, _ := strconv.Atoi(c.Query("major"))
+		minor, _ := strconv.Atoi(c.Query("minor"))
+		return c.JSON(DecodeEvent(major, minor))
+	})
+	v1.Post("/decode-error", func(c *fiber.Ctx) error {
+		var body struct {
+			SubStatusCode string `json:"subStatusCode"`
+			ErrorCode     int    `json:"errorCode"`
+		}
+		if err := json.Unmarshal(c.Body(), &body); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "invalid body"})
+		}
+		return c.JSON(DecodeISAPIError(body.SubStatusCode, body.ErrorCode))
+	})
 
 	api.Get("/status", func(c *fiber.Ctx) error {
 		devices, _ := store.ListDevices(c.Context())

@@ -23,12 +23,43 @@ import (
 
 const seedPassword = "changeme"
 
+// seedVersion marks how far the seeder has run. Bump it whenever a new seed
+// step is added — the marker check below then lets the new step run exactly
+// once on already-seeded databases.
+const seedVersion = 2
+
 // Bootstrap is called from cmd/server/main.go right after the store opens.
 // It is idempotent: each step creates rows only if they're missing, and a
-// failure in one step does not abort the rest.
+// failure in one step does not abort the rest. A version marker in the
+// settings table short-circuits the whole pass on every boot after the first
+// successful run, so `docker compose up` never re-seeds.
 func Bootstrap(ctx context.Context, store *Store) error {
 	log.Printf("========================================")
 	log.Printf("[seed] Bootstrap starting")
+
+	// Devices that self-register over the push protocol arrive with no
+	// tenant; tag them to the default merchant on EVERY boot (cheap UPDATE,
+	// deliberately outside the seed marker below).
+	for _, q := range []string{
+		`UPDATE devices  SET tenant_id=$1 WHERE tenant_id IS NULL OR tenant_id=''`,
+		`UPDATE persons  SET tenant_id=$1 WHERE tenant_id IS NULL OR tenant_id=''`,
+		`UPDATE agents   SET tenant_id=$1 WHERE tenant_id IS NULL OR tenant_id=''`,
+		`UPDATE api_keys SET tenant_id=$1 WHERE tenant_id IS NULL OR tenant_id=''`,
+	} {
+		if _, err := store.PG.Exec(ctx, q, "ten_default"); err != nil {
+			log.Printf("[seed] WARN re-tag: %v", err)
+		}
+	}
+
+	// Seed marker: if a previous boot completed seeding at this version,
+	// skip everything else.
+	var doneVersion int
+	_ = store.PG.QueryRow(ctx, `SELECT COALESCE((value->>'version')::int, 0) FROM settings WHERE key='seed_marker'`).Scan(&doneVersion)
+	if doneVersion >= seedVersion {
+		log.Printf("[seed] already seeded (v%d) — skipping", doneVersion)
+		log.Printf("========================================")
+		return nil
+	}
 	// 0) Migrate any rows seeded by an earlier build that used the buggy
 	//    underscore email or the hard-coded user IDs. Both are no-ops on a
 	//    fresh database.
@@ -121,15 +152,14 @@ func Bootstrap(ctx context.Context, store *Store) error {
 		}
 	}
 
-	// 4) Re-tag legacy rows that have no tenant_id
-	for _, q := range []string{
-		`UPDATE devices  SET tenant_id=$1 WHERE tenant_id IS NULL OR tenant_id=''`,
-		`UPDATE persons  SET tenant_id=$1 WHERE tenant_id IS NULL OR tenant_id=''`,
-		`UPDATE agents   SET tenant_id=$1 WHERE tenant_id IS NULL OR tenant_id=''`,
-		`UPDATE api_keys SET tenant_id=$1 WHERE tenant_id IS NULL OR tenant_id=''`,
-	} {
-		if _, err := store.PG.Exec(ctx, q, defaultTenantID); err != nil {
-			log.Printf("[seed] WARN re-tag: %v", err)
+	// 4) Starter outlet for the default merchant — the device/agent forms
+	//     expect at least one outlet to attach things to. Skipped as soon as
+	//     the merchant has any outlet (including agent-backfilled ones).
+	if bs, _ := store.ListBranchesByTenant(ctx, defaultTenantID); len(bs) == 0 {
+		if err := store.CreateBranch(ctx, Branch{ID: "br_default_main", TenantID: defaultTenantID, Name: "Main Outlet"}); err != nil {
+			log.Printf("[seed] create default outlet: %v", err)
+		} else {
+			log.Printf("[seed] created default outlet br_default_main")
 		}
 	}
 
@@ -144,15 +174,24 @@ func Bootstrap(ctx context.Context, store *Store) error {
 
 	// Final summary so the operator can confirm everything is in place at a
 	// glance in `docker compose logs backend`.
-	var tenantCount, userCount, planCount, personCount, deviceCount int
+	var tenantCount, userCount, planCount, personCount, deviceCount, outletCount int
 	_ = store.PG.QueryRow(ctx, `SELECT COUNT(*) FROM tenants`).Scan(&tenantCount)
 	_ = store.PG.QueryRow(ctx, `SELECT COUNT(*) FROM users`).Scan(&userCount)
 	_ = store.PG.QueryRow(ctx, `SELECT COUNT(*) FROM plans`).Scan(&planCount)
 	_ = store.PG.QueryRow(ctx, `SELECT COUNT(*) FROM persons`).Scan(&personCount)
 	_ = store.PG.QueryRow(ctx, `SELECT COUNT(*) FROM devices`).Scan(&deviceCount)
-	log.Printf("[seed] summary: tenants=%d users=%d plans=%d persons=%d devices=%d",
-		tenantCount, userCount, planCount, personCount, deviceCount)
-	log.Printf("[seed] Bootstrap complete")
+	_ = store.PG.QueryRow(ctx, `SELECT COUNT(*) FROM branches`).Scan(&outletCount)
+	log.Printf("[seed] summary: merchants=%d users=%d plans=%d persons=%d devices=%d outlets=%d",
+		tenantCount, userCount, planCount, personCount, deviceCount, outletCount)
+
+	// Record the marker so the next boot skips straight past seeding.
+	if _, err := store.PG.Exec(ctx, `
+		INSERT INTO settings (key, value, updated_at) VALUES ('seed_marker', jsonb_build_object('version', $1::int), NOW())
+		ON CONFLICT (key) DO UPDATE SET value=jsonb_build_object('version', $1::int), updated_at=NOW()
+	`, seedVersion); err != nil {
+		log.Printf("[seed] WARN write seed marker: %v", err)
+	}
+	log.Printf("[seed] Bootstrap complete (marker set to v%d)", seedVersion)
 	log.Printf("========================================")
 	return nil
 }
@@ -166,6 +205,23 @@ func seedDemo(ctx context.Context, store *Store) error {
 	}
 
 	for _, d := range demos {
+		// Outlets are seeded before the tenant-exists early-exit so merchants
+		// created by an older build (pre-outlets) get them too. Existence is
+		// checked per outlet, so a rename in the UI survives restarts.
+		outlets := []struct{ id, name, addr string }{
+			{"br_" + d.Slug + "_main", d.Name + " — Main Outlet", "1 Main Street"},
+			{"br_" + d.Slug + "_annex", d.Name + " — Annex", "2 Side Avenue"},
+		}
+		for _, o := range outlets {
+			if b, _ := store.GetBranch(ctx, o.id); b == nil {
+				if err := store.CreateBranch(ctx, Branch{ID: o.id, TenantID: d.ID, Name: o.name, Address: o.addr}); err != nil {
+					log.Printf("[seed] create outlet %s: %v", o.id, err)
+				} else {
+					log.Printf("[seed] created outlet %s (%s)", o.name, o.id)
+				}
+			}
+		}
+
 		if t, _ := store.GetTenant(ctx, d.ID); t != nil {
 			continue // already seeded
 		}

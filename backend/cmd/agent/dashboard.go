@@ -50,7 +50,7 @@ func runDashboardServer(reconnect chan<- struct{}) {
 	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
 		cfg, _ := loadConfig()
 		out := map[string]any{
-			"status":  GetStatus(),
+			"status":    GetStatus(),
 			"hasConfig": cfg != nil && cfg.Valid(),
 		}
 		if cfg != nil {
@@ -140,6 +140,41 @@ func runDashboardServer(reconnect chan<- struct{}) {
 		default:
 			http.Error(w, "GET or POST", 405)
 		}
+	})
+
+	// The first-run wizard posts to /api/save. The always-on dashboard can
+	// render that same wizard when no config exists, so keep this alias here.
+	mux.HandleFunc("/api/save", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			httpJSON(w, 405, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		var c AgentConfig
+		if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
+			httpJSON(w, 400, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		if !c.Valid() {
+			httpJSON(w, 400, map[string]any{"ok": false, "error": "cloud_url, agent_id, agent_token are required"})
+			return
+		}
+		if err := saveConfig(&c); err != nil {
+			httpJSON(w, 500, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		httpJSON(w, 200, map[string]any{"ok": true, "configPath": configPath()})
+		select {
+		case reconnect <- struct{}{}:
+		default:
+		}
+	})
+
+	mux.HandleFunc("/api/skip-install", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			httpJSON(w, 405, map[string]any{"ok": false, "error": "method not allowed"})
+			return
+		}
+		httpJSON(w, 200, map[string]any{"ok": true})
 	})
 
 	mux.HandleFunc("/api/test", func(w http.ResponseWriter, r *http.Request) {

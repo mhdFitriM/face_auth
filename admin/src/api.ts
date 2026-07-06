@@ -80,6 +80,7 @@ export interface DeviceForm {
   fdid?: string
   faceLibType?: string
   agentId?: string
+  branchId?: string
   reach?: string
 }
 
@@ -128,12 +129,14 @@ export const api = {
     req(`/api/devices/${encodeURIComponent(deviceId)}/capture/card`, { method: 'POST' }),
   captureFingerprint: (deviceId: string, finger = 1) =>
     req(`/api/devices/${encodeURIComponent(deviceId)}/capture/fingerprint?finger=${finger}`, { method: 'POST' }),
-  setCard: (deviceId: string, body: { employeeNo: string; cardNo: string; cardType?: string; mode?: string }) =>
+  listCards: (personId: string) =>
+    req(`/api/persons/${encodeURIComponent(personId)}/cards`),
+  setCard: (deviceId: string, body: { employeeNo: string; personId?: string; cardNo: string; cardType?: string; mode?: string }) =>
     req(`/api/devices/${encodeURIComponent(deviceId)}/cards`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     }),
-  deleteCard: (deviceId: string, cardNo: string) =>
-    req(`/api/devices/${encodeURIComponent(deviceId)}/cards/${encodeURIComponent(cardNo)}`, { method: 'DELETE' }),
+  deleteCard: (deviceId: string, cardNo: string, personId?: string) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/cards/${encodeURIComponent(cardNo)}${personId ? `?personId=${encodeURIComponent(personId)}` : ''}`, { method: 'DELETE' }),
   setFingerprint: (deviceId: string, body: { employeeNo: string; fingerPrintID?: number; fingerData: string }) =>
     req(`/api/devices/${encodeURIComponent(deviceId)}/fingerprints`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -232,11 +235,40 @@ export const api = {
   bridgeLog: () => req('/api/bridge/log'),
   bridgeClearLog: () => req('/api/bridge/log/clear', { method: 'POST' }),
   listAgents: () => req('/api/agents'),
-  createAgent: (id: string, name: string) =>
+  createAgent: (id: string, name: string, branchId?: string) =>
     req('/api/agents', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, name }),
+      body: JSON.stringify({ id, name, branchId }),
+    }),
+  // ----- Branches (one site = one agent + its devices) -----
+  listBranches: () => req('/api/branches'),
+  createBranch: (name: string, address?: string) =>
+    req('/api/branches', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, address }),
+    }),
+  updateBranch: (id: string, name: string, address?: string) =>
+    req(`/api/branches/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, address }),
+    }),
+  deleteBranch: (id: string) => req(`/api/branches/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  assignBranchAgent: (branchId: string, agentId: string) =>
+    req(`/api/branches/${encodeURIComponent(branchId)}/agent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agentId }),
+    }),
+  unassignBranchAgent: (branchId: string) =>
+    req(`/api/branches/${encodeURIComponent(branchId)}/agent`, { method: 'DELETE' }),
+  setDeviceBranch: (deviceId: string, branchId: string) =>
+    req(`/api/devices/${encodeURIComponent(deviceId)}/branch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ branchId }),
     }),
   deleteAgent: (id: string) => req(`/api/agents/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   regenAgentToken: (id: string) => req(`/api/agents/${encodeURIComponent(id)}/regen-token`, { method: 'POST' }),

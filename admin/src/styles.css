@@ -524,6 +524,9 @@ input[type='number'] { -moz-appearance: textfield; }
 .data-table .ta-right { text-align: right; }
 .cell-stack { display: flex; flex-direction: column; gap: 2px; }
 .cell-preview { width: 100px; }
+/* Outlet group header rows in the Devices table */
+.data-table tr.group-row td { background: var(--muted); font-size: 13px; }
+.data-table tr.group-row:hover td { background: var(--muted); }
 
 /* ============================================================
    Snapshots / live frames
