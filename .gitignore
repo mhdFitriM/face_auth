@@ -2,3 +2,4 @@
 agent-local/
 *.bak
 db-dump-*.sql
+minio-bucket-*.tar.gz
