@@ -516,6 +516,7 @@ tr:hover td { background: var(--surface2); }
       <div class="nav-label">Setup</div>
       <a class="nav-item" href="#vps-deploy"><span class="nav-num">1</span>Deploy to VPS</a>
       <a class="nav-item" href="#install-agent"><span class="nav-num">2</span>Install LAN Agent</a>
+      <a class="nav-item" href="#windows-service" style="padding-left:2.4rem;font-size:.8rem">↳ Windows 24/7 Service</a>
       <a class="nav-item" href="#connect"><span class="nav-num">3</span>Connect them</a>
       <a class="nav-item" href="#add-device"><span class="nav-num">4</span>Add a device</a>
       <a class="nav-item" href="#verify"><span class="nav-num">5</span>Verify & test</a>
@@ -847,16 +848,138 @@ $env:AGENT_TOKEN = "your-token-here"
       <div class="step">
         <div class="step-num">3</div>
         <div class="step-body">
-          <h3>Run as a background service (recommended)</h3>
-          <p>Pass <code>--service</code> to skip the browser dashboard and run silently. Use your OS service manager to keep it running on startup.</p>
-          <div class="code-wrap">
-            <div class="code-header"><div class="dot-row"><span class="dot d1"></span><span class="dot d2"></span><span class="dot d3"></span></div><span class="code-filename">macOS — run in background</span></div>
-            <pre>CLOUD_URL=wss://face.yourcompany.com \
-AGENT_ID=office-lan \
-AGENT_TOKEN=your-token-here \
-./face_auth-agent --service &gt; agent.log 2&gt;&amp;1 &amp;</pre>
+          <h3>Install as a Windows Service (auto-start on boot)</h3>
+          <p>The agent has a built-in installer. Run the exe once and click <strong>Install as Service</strong> in the browser wizard — it registers itself as a Windows service that starts automatically every time the PC boots.</p>
+          <div class="callout callout-ok" style="margin-top:12px">
+            <span class="callout-icon">✓</span>
+            <div class="callout-body">After install, the agent runs silently in the background. You never need to start it manually again — it starts on boot and restarts itself if it crashes.</div>
           </div>
-          <p>Or use the provided <code>start.sh</code> script in the project root — it handles building and starting the agent automatically alongside the Docker stack.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Step 2b — 24/7 Windows Service -->
+    <section id="windows-service">
+      <h2>Windows — 24/7 Service Setup</h2>
+      <p>For Hikvision deployments the agent PC runs around the clock. Follow these steps to make it fully automatic — no manual starts, no terminal windows, survives reboots and crashes.</p>
+
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <h3>Download &amp; run the agent exe</h3>
+          <p>In the admin UI go to <strong>Agents → Agent binaries → Windows (x64)</strong> and download <code>face_auth-agent-windows-amd64.exe</code>. Double-click it — a browser opens at <code>http://127.0.0.1:7780</code>.</p>
+          <div class="screen">
+            <div class="screen-bar">
+              <div class="screen-dots"><span></span><span></span><span></span></div>
+              <div class="screen-url">http://127.0.0.1:7780 — face_auth Agent Setup</div>
+            </div>
+            <div class="screen-body" style="font-size:.82rem">
+              <div style="display:grid;gap:10px;max-width:420px">
+                <div>
+                  <div style="font-size:.72rem;color:var(--text-3);margin-bottom:3px">Cloud URL</div>
+                  <div style="background:var(--bg);border:1px solid var(--accent);border-radius:5px;padding:7px 10px;color:var(--text-2)">ws://13.140.148.77:8083</div>
+                </div>
+                <div>
+                  <div style="font-size:.72rem;color:var(--text-3);margin-bottom:3px">Agent ID</div>
+                  <div style="background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:7px 10px;color:var(--text-2)">KLP-agent</div>
+                </div>
+                <div>
+                  <div style="font-size:.72rem;color:var(--text-3);margin-bottom:3px">Agent Token</div>
+                  <div style="background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:7px 10px;color:var(--text-3)">••••••••••••</div>
+                </div>
+                <div style="background:var(--accent);color:#fff;border-radius:5px;padding:8px 14px;text-align:center;font-weight:600">Test Connection → Install as Service</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-body">
+          <h3>Set credentials at system level</h3>
+          <p>Windows services run as the <strong>SYSTEM</strong> account which cannot read your user environment variables. Run this in <strong>PowerShell as Administrator</strong> so the service always finds its config even after a reboot:</p>
+          <div class="code-wrap">
+            <div class="code-header"><div class="dot-row"><span class="dot d1"></span><span class="dot d2"></span><span class="dot d3"></span></div><span class="code-filename">PowerShell — Run as Administrator</span></div>
+            <pre>[System.Environment]::SetEnvironmentVariable("CLOUD_URL",   "ws://13.140.148.77:8083", "Machine")
+[System.Environment]::SetEnvironmentVariable("AGENT_ID",    "KLP-agent", "Machine")
+[System.Environment]::SetEnvironmentVariable("AGENT_TOKEN", "your-token-here", "Machine")
+
+# Restart service to pick up new values
+Restart-Service face_auth-agent</pre>
+          </div>
+          <div class="callout callout-warn">
+            <span class="callout-icon">⚠️</span>
+            <div class="callout-body">Replace <code>your-token-here</code> with the token from <strong>Admin UI → Agents → your agent</strong>. If you lost it, click <strong>Regenerate token</strong>.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-body">
+          <h3>Disable Windows sleep (critical for 24/7)</h3>
+          <p>If the PC sleeps, the network drops and the agent disconnects. Run this once to prevent sleep permanently:</p>
+          <div class="code-wrap">
+            <div class="code-header"><div class="dot-row"><span class="dot d1"></span><span class="dot d2"></span><span class="dot d3"></span></div><span class="code-filename">PowerShell — Run as Administrator</span></div>
+            <pre># Never sleep (plugged in)
+powercfg /change standby-timeout-ac 0
+powercfg /change hibernate-timeout-ac 0
+powercfg /change monitor-timeout-ac 0
+
+# Confirm
+powercfg /query SCHEME_CURRENT SUB_SLEEP</pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">4</div>
+        <div class="step-body">
+          <h3>Verify the service is running</h3>
+          <div class="code-wrap">
+            <div class="code-header"><div class="dot-row"><span class="dot d1"></span><span class="dot d2"></span><span class="dot d3"></span></div><span class="code-filename">PowerShell</span></div>
+            <pre>Get-Service face_auth-agent
+# Status   : Running
+# StartType: Automatic   ← auto-starts on every reboot</pre>
+          </div>
+          <p style="margin-top:10px">Also check the agent dashboard: <strong><a href="http://127.0.0.1:7780" style="color:var(--accent)">http://127.0.0.1:7780</a></strong> — it shows connection status and live logs.</p>
+          <div class="callout callout-ok" style="margin-top:12px">
+            <span class="callout-icon">✓</span>
+            <div class="callout-body">
+              <strong>What happens now:</strong>
+              <ul style="margin:.4rem 0 0 1.2rem;padding:0;line-height:1.7">
+                <li>PC boots → service starts in under 5 seconds</li>
+                <li>Agent connects to cloud → stays connected with 20-second pings</li>
+                <li>If connection drops → auto-reconnects in 1–30 seconds</li>
+                <li>If service crashes → Windows restarts it in 5 seconds</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">5</div>
+        <div class="step-body">
+          <h3>Service management commands</h3>
+          <div class="code-wrap">
+            <div class="code-header"><div class="dot-row"><span class="dot d1"></span><span class="dot d2"></span><span class="dot d3"></span></div><span class="code-filename">PowerShell — Run as Administrator</span></div>
+            <pre># Check status
+Get-Service face_auth-agent
+
+# Start / Stop / Restart
+Start-Service face_auth-agent
+Stop-Service face_auth-agent
+Restart-Service face_auth-agent
+
+# Stop ALL agent processes (if multiple running)
+Get-Process | Where-Object { $_.Name -like "*face_auth*" } | Stop-Process -Force
+
+# Uninstall service (removes it completely)
+Stop-Service face_auth-agent -ErrorAction SilentlyContinue
+.\face_auth-agent-windows-amd64.exe --uninstall</pre>
+          </div>
         </div>
       </div>
     </section>

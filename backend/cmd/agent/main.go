@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -349,17 +350,23 @@ func atoi(s string) int {
 // scanFunc is what HTTP handlers AND the native HID reader both call.
 type scanFunc = func(qr string) (status int, body string)
 
+// qrScan holds the live scan function. The HTTP server always calls through
+// this pointer so that reconnects with new config don't need to rebind the port.
+var qrScan atomic.Pointer[scanFunc]
+
+// qrHTTPStarted tracks whether the QR HTTP server is already bound to its port.
+var qrHTTPStarted atomic.Bool
+
+// startQRListener builds a scan function for the given cloud target and ensures
+// the QR HTTP server is running. On reconnects the port stays bound (only one
+// server ever runs); the new scan function is stored in qrScan so the server
+// always forwards to the current cloud URL without rebinding.
 func startQRListener(port, cloudBase, agentID string) scanFunc {
-	mux := http.NewServeMux()
 	httpClient := &http.Client{
 		Timeout: 8 * time.Second,
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
 	}
 
-	// Configurable scanner prefix / suffix stripping. Many USB QR scanners can
-	// be programmed to emit a fixed string before or after the payload (e.g.
-	// "in#" before, "\n" after). Set QR_STRIP_PREFIX / QR_STRIP_SUFFIX in the
-	// agent's env to clean these before forwarding to the cloud.
 	stripPrefix := getenv("QR_STRIP_PREFIX", "")
 	stripSuffix := getenv("QR_STRIP_SUFFIX", "")
 	if stripPrefix != "" || stripSuffix != "" {
@@ -367,7 +374,6 @@ func startQRListener(port, cloudBase, agentID string) scanFunc {
 	}
 
 	clean := func(qr string) string {
-		// Trim whitespace & control chars first
 		qr = strings.TrimFunc(qr, func(r rune) bool {
 			return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\x00' || r < 0x20 || r == 0x7f
 		})
@@ -400,36 +406,51 @@ func startQRListener(port, cloudBase, agentID string) scanFunc {
 		return resp.StatusCode, string(b)
 	}
 
-	// POST /scan {"qr": "TOKEN"}
-	mux.HandleFunc("/scan", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", 405)
-			return
+	// Update the global pointer so the already-running HTTP server picks up the
+	// new cloud target without needing to rebind the port.
+	qrScan.Store(&scan)
+
+	// Start the HTTP server only once for the lifetime of the process.
+	if qrHTTPStarted.CompareAndSwap(false, true) {
+		mux := http.NewServeMux()
+
+		// Dispatch through qrScan so reconnects with new config work without restart.
+		dispatch := func(qr string) (int, string) {
+			if fn := qrScan.Load(); fn != nil {
+				return (*fn)(qr)
+			}
+			return 503, `{"error":"scanner not ready"}`
 		}
-		var body struct{ QR string `json:"qr"` }
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		s, b := scan(body.QR)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(s)
-		_, _ = w.Write([]byte(b))
-	})
 
-	// GET /scan?q=TOKEN (handy for shell pipes: `read line; curl ...?q=$line`)
-	mux.HandleFunc("/scan/q", func(w http.ResponseWriter, r *http.Request) {
-		s, b := scan(r.URL.Query().Get("q"))
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(s)
-		_, _ = w.Write([]byte(b))
-	})
+		mux.HandleFunc("/scan", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "POST only", 405)
+				return
+			}
+			var body struct{ QR string `json:"qr"` }
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			s, b := dispatch(body.QR)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(s)
+			_, _ = w.Write([]byte(b))
+		})
 
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
+		mux.HandleFunc("/scan/q", func(w http.ResponseWriter, r *http.Request) {
+			s, b := dispatch(r.URL.Query().Get("q"))
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(s)
+			_, _ = w.Write([]byte(b))
+		})
 
-	go func() {
-		srv := &http.Server{Addr: "127.0.0.1:" + port, Handler: mux}
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("QR listener: %v", err)
-		}
-	}()
+		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
+
+		go func() {
+			srv := &http.Server{Addr: "127.0.0.1:" + port, Handler: mux}
+			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("QR listener: %v", err)
+			}
+		}()
+	}
 
 	return scan
 }
