@@ -150,11 +150,17 @@ func (h *AgentHub) Handle(c *websocket.Conn) {
 		log.Printf("[agent-hub] %s disconnected", agentID)
 	}()
 
+	const (
+		writeTimeout = 10 * time.Second
+		readTimeout  = 60 * time.Second // must be > ping interval
+		pingInterval = 20 * time.Second
+	)
+
 	// Writer goroutine
 	writeDone := make(chan struct{})
 	go func() {
 		defer close(writeDone)
-		ping := time.NewTicker(20 * time.Second)
+		ping := time.NewTicker(pingInterval)
 		defer ping.Stop()
 		for {
 			select {
@@ -162,10 +168,12 @@ func (h *AgentHub) Handle(c *websocket.Conn) {
 				if !ok {
 					return
 				}
+				c.SetWriteDeadline(time.Now().Add(writeTimeout))
 				if err := c.WriteJSON(f); err != nil {
 					return
 				}
 			case <-ping.C:
+				c.SetWriteDeadline(time.Now().Add(writeTimeout))
 				if err := c.WriteJSON(Frame{Type: "ping"}); err != nil {
 					return
 				}
@@ -173,12 +181,15 @@ func (h *AgentHub) Handle(c *websocket.Conn) {
 		}
 	}()
 
-	// Reader loop
+	// Reader loop — refresh read deadline on every message so a silent drop
+	// is detected within readTimeout.
+	c.SetReadDeadline(time.Now().Add(readTimeout))
 	for {
 		_, data, err := c.ReadMessage()
 		if err != nil {
 			break
 		}
+		c.SetReadDeadline(time.Now().Add(readTimeout))
 		var f Frame
 		if err := json.Unmarshal(data, &f); err != nil {
 			continue

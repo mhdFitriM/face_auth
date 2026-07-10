@@ -494,7 +494,7 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		dev := Device{
 			DeviceID:      body.DeviceID,
 			Name:          body.Name,
-			IP:            body.IP,
+			IP:            stripScheme(body.IP),
 			Port:          body.Port,
 			UseHTTPS:      body.UseHTTPS,
 			ISAPIUsername: body.ISAPIUsername,
@@ -991,6 +991,41 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		return c.Send(png)
 	})
 
+	// QR-as-card: generates a QR image whose payload IS the person's card number.
+	// The device camera reads it exactly like a physical card swipe — no QRCodeInfo
+	// registration required. Works on any device with camera-QR in card-reader mode.
+	// ?cardNo=xxx overrides; otherwise uses the first card stored for this person.
+	api.Get("/persons/:id/qr-card.png", func(c *fiber.Ctx) error {
+		p, _ := store.GetPerson(c.Context(), c.Params("id"))
+		if p == nil {
+			return c.Status(404).SendString("person not found")
+		}
+		cardNo := c.Query("cardNo")
+		if cardNo == "" {
+			cards, _ := store.ListCardsByPerson(c.Context(), p.ID)
+			if len(cards) > 0 {
+				cardNo = cards[0].CardNo
+			}
+		}
+		if cardNo == "" {
+			return c.Status(400).SendString("no card enrolled — enrol a card first or pass ?cardNo=")
+		}
+		size, _ := strconv.Atoi(c.Query("size", "256"))
+		if size < 96 {
+			size = 96
+		}
+		if size > 1024 {
+			size = 1024
+		}
+		png, err := qrcode.Encode(cardNo, qrcode.Medium, size)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		c.Set("Content-Type", "image/png")
+		c.Set("Cache-Control", "no-store")
+		return c.Send(png)
+	})
+
 	api.Post("/qr-auth/scan", func(c *fiber.Ctx) error {
 		var body struct {
 			QRToken string `json:"qrToken"`
@@ -1051,6 +1086,49 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		}
 		faces, _ := store.ListFaces(c.Context(), "", p.ID)
 		return c.JSON(fiber.Map{"person": p, "faces": faces})
+	})
+
+	// Push a person's UserInfo to a device without face enrolment.
+	// Useful for card-only or QR-card access where no face photo is needed.
+	// Body: {"personId": "..."}
+	api.Post("/devices/:id/push-user", func(c *fiber.Ctx) error {
+		d, err := store.GetDevice(c.Context(), c.Params("id"))
+		if err != nil || d == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "device not found"})
+		}
+		var body struct {
+			PersonID string `json:"personId"`
+		}
+		_ = json.Unmarshal(c.Body(), &body)
+		if body.PersonID == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "personId required"})
+		}
+		p, _ := store.GetPerson(c.Context(), body.PersonID)
+		if p == nil || p.EmployeeNo == "" {
+			return c.Status(404).JSON(fiber.Map{"error": "person not found or missing employeeNo"})
+		}
+		hikUser := HikUserInfo{
+			EmployeeNo:   p.EmployeeNo,
+			Name:         p.Name,
+			UserType:     p.PersonType,
+			Gender:       p.Gender,
+			LongTerm:     p.LongTerm,
+			DoorRight:    p.DoorRight,
+			PlanTemplate: p.PlanTemplate,
+			LocalUIRight: p.PersonRole == "administrator",
+			CheckUser:    p.AttendanceOnly,
+		}
+		if p.ValidBegin != nil {
+			hikUser.ValidBegin = p.ValidBegin.Format("2006-01-02T15:04:05")
+		}
+		if p.ValidEnd != nil {
+			hikUser.ValidEnd = p.ValidEnd.Format("2006-01-02T15:04:05")
+		}
+		resp, err := NewISAPIClientForDevice(d, hub).UpsertUserOnDevice(hikUser)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
+		}
+		return c.JSON(fiber.Map{"ok": true, "employeeNo": p.EmployeeNo, "response": resp})
 	})
 
 	// Sync users from a device → local DB (creates / updates persons).
@@ -2173,7 +2251,7 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 			return c.Status(400).JSON(fiber.Map{"error": "deviceId required"})
 		}
 		dev := Device{
-			DeviceID: body.DeviceID, Name: body.Name, IP: body.IP, Port: body.Port,
+			DeviceID: body.DeviceID, Name: body.Name, IP: stripScheme(body.IP), Port: body.Port,
 			UseHTTPS: body.UseHTTPS, ISAPIUsername: body.ISAPIUsername, ISAPIPassword: body.ISAPIPassword,
 			FDID: body.FDID, FaceLibType: body.FaceLibType, AgentID: body.AgentID, Reach: body.Reach,
 		}
@@ -3192,6 +3270,16 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 	})
 
 	return app
+}
+
+func stripScheme(ip string) string {
+	if i := strings.Index(ip, "://"); i >= 0 {
+		ip = ip[i+3:]
+	}
+	if i := strings.IndexAny(ip, "/?# "); i >= 0 {
+		ip = ip[:i]
+	}
+	return strings.TrimSpace(ip)
 }
 
 func describeBinary(name string) (platform, label string) {

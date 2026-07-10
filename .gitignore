@@ -6,3 +6,8 @@ minio-bucket-*.tar.gz
 backend/bin/
 backend/debug/
 .env.*
+.agent.pid
+agent.log
+/face_auth-agent
+/backend/agent
+/backend/server

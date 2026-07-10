@@ -434,10 +434,17 @@ function DevicesTab() {
                     </div>
                   </td>
                   <td data-label="Status">
-                    <span className={`badge ${d.online ? 'ok' : ''}`}>
-                      <span className="status-dot" />
-                      {d.online ? 'online' : 'offline'}
-                    </span>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                      <span className={`badge ${d.online ? 'ok' : ''}`}>
+                        <span className="status-dot" />
+                        {d.online ? 'online' : 'offline'}
+                      </span>
+                      {d.lastSeen && (
+                        <span className="muted small" style={{ fontSize: 11 }}>
+                          {relTime(d.lastSeen)}
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td data-label="Actions" className="ta-right">
                     <div className="cell-actions">
@@ -1487,6 +1494,13 @@ function PersonDetailModal({ personId, onClose, onDeleted, onEnrol }: { personId
   const [addCardDeviceId, setAddCardDeviceId] = useState('')
   const [addCardNo, setAddCardNo] = useState('')
   const [addCardErr, setAddCardErr] = useState('')
+  const [qrPushDeviceId, setQrPushDeviceId] = useState('')
+  const [qrPushBusy, setQrPushBusy] = useState(false)
+  const [qrPushResult, setQrPushResult] = useState<{ ok?: boolean; error?: string } | null>(null)
+  const [cardQrNo, setCardQrNo] = useState('')
+  const [cardSyncDevice, setCardSyncDevice] = useState('')
+  const [cardSyncBusy, setCardSyncBusy] = useState(false)
+  const [cardSyncResult, setCardSyncResult] = useState<{ ok?: boolean; error?: string } | null>(null)
 
   const loadCards = () => api.listCards(personId).then((r) => setCards(r?.cards || [])).catch(() => {})
 
@@ -1497,8 +1511,12 @@ function PersonDetailModal({ personId, onClose, onDeleted, onEnrol }: { personId
       const list = d || []
       setDevices(list)
       const online = list.find((x: any) => x.online)
-      if (online) setAddCardDeviceId(online.deviceID)
-      else if (list.length === 1) setAddCardDeviceId(list[0].deviceID)
+      const defaultDevice = online || (list.length === 1 ? list[0] : null)
+      if (defaultDevice) {
+        setAddCardDeviceId(defaultDevice.deviceID)
+        setQrPushDeviceId(defaultDevice.deviceID)
+        setCardSyncDevice(defaultDevice.deviceID)
+      }
     }).catch(() => {})
   }, [personId])
 
@@ -1615,25 +1633,159 @@ function PersonDetailModal({ personId, onClose, onDeleted, onEnrol }: { personId
       </div>
 
       <div className="qr-block">
-        <h3 className="section-title">QR token (for 2-step auth)</h3>
+        <h3 className="section-title">QR Access</h3>
         {p.qrToken ? (
-          <div className="qr-row">
-            <img className="qr-img" src={`${api.qrImageUrl(personId, 240)}&_b=${qrBust}`} alt="QR" />
-            <div className="qr-meta">
-              <div className="mono small" style={{ wordBreak: 'break-all' }}>{p.qrToken}</div>
-              <p className="muted small">Print or save this. Scanning it at an agent's USB scanner unlocks the face camera briefly for this user.</p>
-              <button className="btn-ghost" onClick={rotateQR}>Rotate token</button>
+          <>
+            <div className="qr-row">
+              <img className="qr-img" src={`${api.qrImageUrl(personId, 240)}&_b=${qrBust}`} alt="QR" />
+              <div className="qr-meta">
+                <div className="mono small" style={{ wordBreak: 'break-all', marginBottom: 6 }}>{p.qrToken}</div>
+                <p className="muted small" style={{ marginBottom: 8 }}>
+                  Send or show this QR to the visitor. They present it to the device camera to gain access.
+                  Also works with a USB scanner for 2-step face auth.
+                </p>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <a
+                    href={`${api.qrImageUrl(personId, 480)}&_b=${qrBust}`}
+                    download={`qr-${p.name || personId}.png`}
+                    className="btn-ghost"
+                    style={{ fontSize: 12 }}
+                  >Download PNG</a>
+                  <button className="btn-ghost" style={{ fontSize: 12 }} onClick={async () => {
+                    try {
+                      const url = `${api.qrImageUrl(personId, 480)}&_b=${qrBust}`
+                      const res = await fetch(url)
+                      const blob = await res.blob()
+                      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
+                      alert('QR image copied to clipboard')
+                    } catch { navigator.clipboard?.writeText(p.qrToken) }
+                  }}>Copy image</button>
+                  <button className="btn-ghost" style={{ fontSize: 12 }} onClick={rotateQR}>Rotate token</button>
+                </div>
+              </div>
             </div>
-          </div>
+            {p.employeeNo && (
+              <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--border)' }}>
+                <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>Push QR to device camera</div>
+                <p className="muted small" style={{ marginBottom: 10 }}>
+                  Register this QR on the device so the on-screen camera reader can scan it and grant access.
+                </p>
+                <div className="form-row" style={{ alignItems: 'flex-end', gap: 8, flexWrap: 'wrap' }}>
+                  <Field label="Device">
+                    <select value={qrPushDeviceId} onChange={(e) => { setQrPushDeviceId(e.target.value); setQrPushResult(null) }} style={{ minWidth: 160 }}>
+                      <option value="">— Select device —</option>
+                      {devices.map((d: any) => (
+                        <option key={d.deviceID} value={d.deviceID}>
+                          {(d.name || d.deviceID) + (d.online ? ' (online)' : '')}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <button
+                    className="btn-primary"
+                    disabled={qrPushBusy || !qrPushDeviceId}
+                    style={{ marginBottom: 1 }}
+                    onClick={async () => {
+                      setQrPushBusy(true); setQrPushResult(null)
+                      try {
+                        await api.qrPush(qrPushDeviceId, { personId })
+                        setQrPushResult({ ok: true })
+                      } catch (e: any) { setQrPushResult({ error: String(e) }) }
+                      setQrPushBusy(false)
+                    }}
+                  >{qrPushBusy ? 'Pushing…' : 'Push to device'}</button>
+                </div>
+                {qrPushResult?.ok && <div style={{ marginTop: 6, fontSize: 12, color: 'var(--accent, #10b981)' }}>QR registered on device.</div>}
+                {qrPushResult?.error && <div className="err small" style={{ marginTop: 6 }}>{qrPushResult.error}</div>}
+              </div>
+            )}
+          </>
         ) : (
           <div className="qr-row">
             <div className="empty" style={{ flex: 1 }}>No QR token yet.</div>
-            <button className="btn-primary" onClick={rotateQR}>Generate</button>
+            <button className="btn-primary" onClick={rotateQR}>Generate QR</button>
           </div>
         )}
       </div>
+
+      {cards.length > 0 && (() => {
+        const activeCard = cardQrNo || cards[0]?.cardNo
+        return (
+          <div className="qr-block">
+            <h3 className="section-title">Card QR <span className="chip" style={{ fontSize: 11, verticalAlign: 'middle' }}>camera mode</span></h3>
+            <p className="muted small" style={{ marginBottom: 10 }}>
+              Show this QR to the device camera — it reads the card number directly, no registration needed.
+            </p>
+            {cards.length > 1 && (
+              <div style={{ marginBottom: 10 }}>
+                <select value={activeCard} onChange={(e) => setCardQrNo(e.target.value)} style={{ fontSize: 13 }}>
+                  {cards.map((card: any) => (
+                    <option key={card.cardId} value={card.cardNo}>{card.cardNo} ({card.cardType})</option>
+                  ))}
+                </select>
+              </div>
+            )}
+            <div className="qr-row">
+              <img className="qr-img" src={api.qrCardImageUrl(personId, activeCard, 200)} alt="Card QR" />
+              <div className="qr-meta">
+                <div className="mono small" style={{ marginBottom: 8 }}>{activeCard}</div>
+                <a
+                  href={api.qrCardImageUrl(personId, activeCard, 480)}
+                  download={`card-qr-${p.name || personId}.png`}
+                  className="btn-ghost"
+                  style={{ fontSize: 12 }}
+                >Download PNG</a>
+              </div>
+            </div>
+            {p.employeeNo && (
+              <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+                <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>Sync card to device</div>
+                <p className="muted small" style={{ marginBottom: 8 }}>
+                  Make sure this card number is enrolled on the device you're scanning at.
+                </p>
+                <div className="form-row" style={{ alignItems: 'flex-end', gap: 8, flexWrap: 'wrap' }}>
+                  <Field label="Device">
+                    <select value={cardSyncDevice} onChange={(e) => { setCardSyncDevice(e.target.value); setCardSyncResult(null) }} style={{ minWidth: 160 }}>
+                      <option value="">— Select device —</option>
+                      {devices.map((d: any) => (
+                        <option key={d.deviceID} value={d.deviceID}>
+                          {(d.name || d.deviceID) + (d.online ? ' (online)' : '')}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <button
+                    className="btn-primary"
+                    disabled={cardSyncBusy || !cardSyncDevice || !activeCard}
+                    style={{ marginBottom: 1 }}
+                    onClick={async () => {
+                      setCardSyncBusy(true); setCardSyncResult(null)
+                      try {
+                        await api.setCard(cardSyncDevice, { employeeNo: p.employeeNo, personId, cardNo: activeCard })
+                        setCardSyncResult({ ok: true })
+                      } catch (e: any) { setCardSyncResult({ error: String(e) }) }
+                      setCardSyncBusy(false)
+                    }}
+                  >{cardSyncBusy ? 'Syncing…' : 'Sync to device'}</button>
+                </div>
+                {cardSyncResult?.ok && <div style={{ marginTop: 6, fontSize: 12, color: 'var(--accent, #10b981)' }}>Card synced — try the QR again.</div>}
+                {cardSyncResult?.error && <div className="err small" style={{ marginTop: 6 }}>{cardSyncResult.error}</div>}
+              </div>
+            )}
+          </div>
+        )
+      })()}
     </Modal>
   )
+}
+
+function relTime(iso: string): string {
+  const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
+  if (diff < 5) return 'just now'
+  if (diff < 60) return `${diff}s ago`
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
+  return `${Math.floor(diff / 86400)}d ago`
 }
 
 function DetailRow({ label, value }: { label: string; value: React.ReactNode }) {

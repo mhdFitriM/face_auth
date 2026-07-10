@@ -183,20 +183,36 @@ func runConnectionLoop(parent context.Context, reconnect <-chan struct{}) error 
 	})
 
 	backoff := time.Second
+	attempt := 0
 	for parent.Err() == nil {
+		attempt++
 		SetStatus("connecting")
+		log.Printf("[ws] connecting (attempt %d) → %s", attempt, redactToken(dialURL))
+		start := time.Now()
 		err := connect(parent, dialURL, agentID, agentName)
 		if parent.Err() != nil {
 			SetStatus("disconnected")
 			return nil
 		}
+		uptime := time.Since(start).Round(time.Second)
 		SetStatus("disconnected", err.Error())
-		log.Printf("disconnected: %v — retrying in %s", err, backoff)
+		// Classify the error so the log is actionable.
+		reason := err.Error()
+		switch {
+		case strings.Contains(reason, "i/o timeout"):
+			log.Printf("[ws] lost — no ping from server for 60s (uptime %s) — retrying in %s", uptime, backoff)
+		case strings.Contains(reason, "use of closed"):
+			log.Printf("[ws] lost — connection closed unexpectedly (uptime %s) — retrying in %s", uptime, backoff)
+		case strings.Contains(reason, "EOF"):
+			log.Printf("[ws] lost — server closed connection (uptime %s) — retrying in %s", uptime, backoff)
+		default:
+			log.Printf("[ws] lost — %v (uptime %s) — retrying in %s", err, uptime, backoff)
+		}
 		select {
 		case <-parent.Done():
 			return nil
 		case <-reconnect:
-			log.Printf("config changed — reconnecting")
+			log.Printf("[ws] config changed — reconnecting")
 			return nil // outer loop reloads config
 		case <-time.After(backoff):
 		}
@@ -207,6 +223,11 @@ func runConnectionLoop(parent context.Context, reconnect <-chan struct{}) error 
 	}
 	return nil
 }
+
+const (
+	agentWriteTimeout = 10 * time.Second
+	agentReadTimeout  = 60 * time.Second
+)
 
 func connect(ctx context.Context, dialURL, agentID, agentName string) error {
 	dialer := websocket.Dialer{
@@ -222,6 +243,7 @@ func connect(ctx context.Context, dialURL, agentID, agentName string) error {
 	SetStatus("connected")
 
 	// Send hello
+	c.SetWriteDeadline(time.Now().Add(agentWriteTimeout))
 	hello := internal.Frame{Type: "hello", AgentID: agentID, AgentName: agentName, Version: "1.0"}
 	if err := c.WriteJSON(hello); err != nil {
 		return err
@@ -232,11 +254,14 @@ func connect(ctx context.Context, dialURL, agentID, agentName string) error {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		c.SetReadDeadline(time.Now().Add(agentReadTimeout))
 		for {
 			_, data, err := c.ReadMessage()
 			if err != nil {
 				return
 			}
+			// Refresh deadline on every received message (including pong).
+			c.SetReadDeadline(time.Now().Add(agentReadTimeout))
 			var f internal.Frame
 			if err := json.Unmarshal(data, &f); err != nil {
 				continue
@@ -253,6 +278,7 @@ func connect(ctx context.Context, dialURL, agentID, agentName string) error {
 	for {
 		select {
 		case f := <-out:
+			c.SetWriteDeadline(time.Now().Add(agentWriteTimeout))
 			if err := c.WriteJSON(f); err != nil {
 				return err
 			}

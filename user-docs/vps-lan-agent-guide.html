@@ -1,0 +1,1130 @@
+
+<title>face_auth — VPS + LAN Agent Deployment Guide</title>
+<style>
+/* ── Tokens ──────────────────────────────────────────────────────────── */
+:root {
+  --bg:        #EDF2F7;
+  --bg-subtle: #DDE6EF;
+  --surface:   #FFFFFF;
+  --surface2:  #F4F8FB;
+  --border:    #C9D8E8;
+  --text:      #0B1220;
+  --text-2:    #3A4F68;
+  --text-3:    #6B849E;
+  --accent:    #00A8BB;
+  --accent-hi: #00C6D4;
+  --green:     #2DA86B;
+  --amber:     #E8603A;
+  --code-bg:   #0B1220;
+  --code-text: #A8DEFF;
+  --num-bg:    #0B1220;
+  --num-text:  #00C6D4;
+  --shadow:    0 1px 3px rgba(11,18,32,.08), 0 4px 12px rgba(11,18,32,.06);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:        #080E1A;
+    --bg-subtle: #0F1928;
+    --surface:   #111D2E;
+    --surface2:  #162232;
+    --border:    #1E3049;
+    --text:      #E8F1FA;
+    --text-2:    #8AABCC;
+    --text-3:    #4E7096;
+    --accent:    #00C6D4;
+    --accent-hi: #33D6E2;
+    --green:     #3CC97A;
+    --amber:     #F4845F;
+    --code-bg:   #060C18;
+    --code-text: #7FD4FF;
+    --num-bg:    #00C6D4;
+    --num-text:  #080E1A;
+    --shadow:    0 1px 3px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.25);
+  }
+}
+:root[data-theme="light"] {
+  --bg:        #EDF2F7;
+  --bg-subtle: #DDE6EF;
+  --surface:   #FFFFFF;
+  --surface2:  #F4F8FB;
+  --border:    #C9D8E8;
+  --text:      #0B1220;
+  --text-2:    #3A4F68;
+  --text-3:    #6B849E;
+  --accent:    #00A8BB;
+  --accent-hi: #00C6D4;
+  --green:     #2DA86B;
+  --amber:     #E8603A;
+  --code-bg:   #0B1220;
+  --code-text: #A8DEFF;
+  --num-bg:    #0B1220;
+  --num-text:  #00C6D4;
+  --shadow:    0 1px 3px rgba(11,18,32,.08), 0 4px 12px rgba(11,18,32,.06);
+}
+:root[data-theme="dark"] {
+  --bg:        #080E1A;
+  --bg-subtle: #0F1928;
+  --surface:   #111D2E;
+  --surface2:  #162232;
+  --border:    #1E3049;
+  --text:      #E8F1FA;
+  --text-2:    #8AABCC;
+  --text-3:    #4E7096;
+  --accent:    #00C6D4;
+  --accent-hi: #33D6E2;
+  --green:     #3CC97A;
+  --amber:     #F4845F;
+  --code-bg:   #060C18;
+  --code-text: #7FD4FF;
+  --num-bg:    #00C6D4;
+  --num-text:  #080E1A;
+  --shadow:    0 1px 3px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.25);
+}
+
+/* ── Reset + base ─────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { font-size: 16px; scroll-behavior: smooth; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-size: 1rem;
+  line-height: 1.65;
+  min-height: 100vh;
+}
+
+/* ── Layout ──────────────────────────────────────────────────────────── */
+.layout {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  grid-template-rows: auto 1fr;
+  min-height: 100vh;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.topbar {
+  grid-column: 1 / -1;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 0 32px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  box-shadow: var(--shadow);
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: .8rem;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--text);
+  text-decoration: none;
+}
+.logo-icon {
+  width: 28px; height: 28px;
+  background: var(--accent);
+  border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+}
+.logo-icon svg { width: 16px; height: 16px; fill: #fff; }
+.topbar-tag {
+  font-size: .7rem;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.topbar-spacer { flex: 1; }
+.theme-toggle {
+  background: none; border: 1px solid var(--border);
+  border-radius: 6px; padding: 5px 10px;
+  color: var(--text-2); cursor: pointer; font-size: .8rem;
+  transition: border-color .15s, color .15s;
+}
+.theme-toggle:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ── Sidebar ──────────────────────────────────────────────────────────── */
+.sidebar {
+  padding: 28px 0;
+  position: sticky;
+  top: 56px;
+  height: calc(100vh - 56px);
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+}
+.nav-section {
+  padding: 0 20px;
+  margin-bottom: 20px;
+}
+.nav-label {
+  font-size: .68rem;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  margin-bottom: 8px;
+  padding: 0 4px;
+}
+.nav-item {
+  display: block;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: .85rem;
+  color: var(--text-2);
+  text-decoration: none;
+  transition: background .12s, color .12s;
+  line-height: 1.3;
+}
+.nav-item:hover { background: var(--bg-subtle); color: var(--text); }
+.nav-item.active { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); font-weight: 600; }
+.nav-num {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 18px; height: 18px;
+  background: var(--num-bg); color: var(--num-text);
+  border-radius: 4px; font-size: .65rem; font-weight: 700;
+  margin-right: 6px; flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Main content ────────────────────────────────────────────────────── */
+main {
+  padding: 48px 56px 80px;
+  min-width: 0;
+}
+
+/* ── Typography ──────────────────────────────────────────────────────── */
+h1 {
+  font-size: 2rem;
+  font-weight: 800;
+  line-height: 1.15;
+  letter-spacing: -.03em;
+  color: var(--text);
+  text-wrap: balance;
+  margin-bottom: 8px;
+}
+h2 {
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: -.02em;
+  color: var(--text);
+  text-wrap: balance;
+  margin: 52px 0 20px;
+  padding-top: 52px;
+  border-top: 1px solid var(--border);
+  scroll-margin-top: 72px;
+}
+h2:first-of-type { margin-top: 0; padding-top: 0; border-top: none; }
+h3 {
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -.01em;
+  color: var(--text);
+  margin: 28px 0 10px;
+}
+p { margin-bottom: 14px; color: var(--text-2); max-width: 66ch; }
+strong { color: var(--text); font-weight: 600; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ── Intro block ──────────────────────────────────────────────────────── */
+.intro {
+  margin-bottom: 44px;
+  padding-bottom: 44px;
+  border-bottom: 1px solid var(--border);
+}
+.intro h1 { margin-bottom: 12px; }
+.intro p { font-size: 1.05rem; max-width: 58ch; }
+.intro-meta {
+  display: flex; gap: 24px; margin-top: 20px; flex-wrap: wrap;
+}
+.meta-chip {
+  display: flex; align-items: center; gap: 6px;
+  font-size: .8rem; color: var(--text-3);
+}
+.meta-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 20%, transparent);
+}
+
+/* ── Architecture diagram ────────────────────────────────────────────── */
+.arch-diagram {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 28px 20px 20px;
+  margin: 8px 0 32px;
+  box-shadow: var(--shadow);
+  overflow-x: auto;
+}
+.arch-diagram svg { display: block; width: 100%; height: auto; }
+@keyframes dash-flow { to { stroke-dashoffset: -18; } }
+
+/* ── Step sections ───────────────────────────────────────────────────── */
+.step {
+  display: grid;
+  grid-template-columns: 36px 1fr;
+  gap: 0 20px;
+  margin-bottom: 32px;
+}
+.step-num {
+  width: 36px; height: 36px;
+  background: var(--num-bg);
+  color: var(--num-text);
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: .85rem; font-weight: 800;
+  flex-shrink: 0;
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.step-body { min-width: 0; }
+.step-body h3 { margin-top: 4px; margin-bottom: 8px; }
+.step-body p { margin-bottom: 10px; }
+
+/* ── Code blocks ──────────────────────────────────────────────────────── */
+.code-wrap { overflow-x: auto; margin: 12px 0 18px; border-radius: 8px; }
+pre {
+  background: var(--code-bg);
+  color: var(--code-text);
+  font-family: 'JetBrains Mono', 'Cascadia Code', 'SF Mono', 'Fira Code', monospace;
+  font-size: .82rem;
+  line-height: 1.7;
+  padding: 20px 24px;
+  border-radius: 8px;
+  overflow-x: auto;
+  white-space: pre;
+}
+.code-header {
+  background: color-mix(in srgb, var(--code-bg) 90%, var(--accent) 10%);
+  color: var(--text-3);
+  font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+  font-size: .7rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  padding: 8px 24px 6px;
+  border-radius: 8px 8px 0 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+  display: flex; align-items: center; gap: 8px;
+}
+.code-header + pre { border-radius: 0 0 8px 8px; }
+.dot-row { display: flex; gap: 5px; }
+.dot { width: 10px; height: 10px; border-radius: 50%; }
+.d1 { background: #FF5F57; }
+.d2 { background: #FEBC2E; }
+.d3 { background: #28C840; }
+.code-filename { flex: 1; }
+code {
+  font-family: 'JetBrains Mono', 'Cascadia Code', 'SF Mono', monospace;
+  font-size: .85em;
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-subtle));
+  color: var(--accent);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+pre code { background: none; color: inherit; padding: 0; font-size: inherit; }
+
+/* ── Callouts ─────────────────────────────────────────────────────────── */
+.callout {
+  display: flex;
+  gap: 14px;
+  padding: 16px 20px;
+  border-radius: 8px;
+  margin: 16px 0;
+  border: 1px solid;
+}
+.callout-note {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.callout-warn {
+  background: color-mix(in srgb, var(--amber) 8%, transparent);
+  border-color: color-mix(in srgb, var(--amber) 30%, transparent);
+}
+.callout-ok {
+  background: color-mix(in srgb, var(--green) 8%, transparent);
+  border-color: color-mix(in srgb, var(--green) 30%, transparent);
+}
+.callout-icon { font-size: 1rem; flex-shrink: 0; margin-top: 1px; }
+.callout-body { font-size: .88rem; color: var(--text-2); line-height: 1.55; }
+.callout-body strong { color: var(--text); }
+
+/* ── Table ────────────────────────────────────────────────────────────── */
+.table-wrap { overflow-x: auto; margin: 16px 0; }
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: .88rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+th {
+  background: var(--surface2);
+  color: var(--text);
+  font-weight: 600;
+  font-size: .78rem;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  padding: 10px 16px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+td {
+  padding: 10px 16px;
+  color: var(--text-2);
+  border-bottom: 1px solid var(--bg-subtle);
+  vertical-align: top;
+}
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: var(--surface2); }
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: .72rem;
+  font-weight: 600;
+  letter-spacing: .04em;
+}
+.badge-green { background: color-mix(in srgb, var(--green) 15%, transparent); color: var(--green); }
+.badge-accent { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+.badge-amber  { background: color-mix(in srgb, var(--amber) 15%, transparent); color: var(--amber); }
+
+/* ── Screen mockups ───────────────────────────────────────────────────── */
+.screen {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: var(--shadow);
+  margin: 16px 0 24px;
+}
+.screen-bar {
+  background: var(--surface2);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 16px;
+  display: flex; align-items: center; gap: 10px;
+}
+.screen-dots { display: flex; gap: 5px; }
+.screen-dots span {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--border);
+}
+.screen-url {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 10px;
+  font-family: monospace;
+  font-size: .75rem;
+  color: var(--text-3);
+  text-align: center;
+}
+.screen-body {
+  padding: 20px 24px;
+}
+.mock-row {
+  display: flex; gap: 12px; align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--bg-subtle);
+}
+.mock-row:last-child { border-bottom: none; }
+.mock-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+}
+.mock-dot.green { background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 20%, transparent); }
+.mock-dot.grey { background: var(--text-3); }
+.mock-label { font-size: .88rem; color: var(--text); flex: 1; font-weight: 500; }
+.mock-sub { font-size: .75rem; color: var(--text-3); }
+.mock-badge { font-size: .72rem; padding: 2px 8px; border-radius: 4px; font-weight: 600; }
+.mock-badge.conn { background: color-mix(in srgb, var(--green) 15%, transparent); color: var(--green); }
+.mock-badge.off  { background: color-mix(in srgb, var(--text-3) 15%, transparent); color: var(--text-3); }
+
+/* ── Checklist ────────────────────────────────────────────────────────── */
+.checklist { list-style: none; margin: 10px 0 18px; }
+.checklist li {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 5px 0;
+  font-size: .9rem;
+  color: var(--text-2);
+}
+.check-icon {
+  width: 18px; height: 18px;
+  border-radius: 4px;
+  border: 1.5px solid var(--border);
+  flex-shrink: 0; margin-top: 2px;
+  display: flex; align-items: center; justify-content: center;
+}
+.check-icon.done {
+  background: var(--green);
+  border-color: var(--green);
+  color: #fff; font-size: .75rem;
+}
+
+/* ── Responsive ───────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .layout { grid-template-columns: 1fr; }
+  .sidebar { display: none; }
+  main { padding: 32px 20px 60px; }
+  h1 { font-size: 1.5rem; }
+.topbar { padding: 0 20px; }
+}
+</style>
+
+<div class="layout">
+  <!-- Topbar -->
+  <header class="topbar">
+    <a class="logo" href="#">
+      <div class="logo-icon">
+        <svg viewBox="0 0 16 16"><circle cx="8" cy="5" r="2.5"/><path d="M3 14c0-3.3 2.2-5.5 5-5.5s5 2.2 5 5.5"/></svg>
+      </div>
+      face_auth
+    </a>
+    <span class="topbar-tag">Deployment Guide</span>
+    <span class="topbar-spacer"></span>
+    <button class="theme-toggle" onclick="
+      const r=document.documentElement;
+      const cur=r.getAttribute('data-theme')||
+        (window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');
+      r.setAttribute('data-theme',cur==='dark'?'light':'dark');
+    ">Toggle theme</button>
+  </header>
+
+  <!-- Sidebar -->
+  <nav class="sidebar" aria-label="Sections">
+    <div class="nav-section">
+      <div class="nav-label">Overview</div>
+      <a class="nav-item active" href="#how-it-works">How it works</a>
+      <a class="nav-item" href="#prerequisites">Prerequisites</a>
+    </div>
+    <div class="nav-section">
+      <div class="nav-label">Setup</div>
+      <a class="nav-item" href="#vps-deploy"><span class="nav-num">1</span>Deploy to VPS</a>
+      <a class="nav-item" href="#install-agent"><span class="nav-num">2</span>Install LAN Agent</a>
+      <a class="nav-item" href="#connect"><span class="nav-num">3</span>Connect them</a>
+      <a class="nav-item" href="#add-device"><span class="nav-num">4</span>Add a device</a>
+      <a class="nav-item" href="#verify"><span class="nav-num">5</span>Verify & test</a>
+    </div>
+    <div class="nav-section">
+      <div class="nav-label">Reference</div>
+      <a class="nav-item" href="#env-vars">Environment variables</a>
+      <a class="nav-item" href="#ports">Ports & firewall</a>
+      <a class="nav-item" href="#commands">Useful commands</a>
+    </div>
+  </nav>
+
+  <!-- Main -->
+  <main>
+
+    <!-- Intro -->
+    <div class="intro">
+      <h1>VPS + LAN Agent<br>Deployment</h1>
+      <p>Run the face_auth backend on any cloud server while controlling Hikvision cameras on a private LAN — no port forwarding, no VPN. The LAN agent creates one outbound connection that carries all traffic in both directions.</p>
+      <div class="intro-meta">
+        <span class="meta-chip"><span class="meta-dot"></span> 30-minute setup</span>
+        <span class="meta-chip" style="--meta-c:var(--accent)">Works behind NAT</span>
+        <span class="meta-chip">Docker + Go binary</span>
+      </div>
+    </div>
+
+    <!-- How it works -->
+    <section id="how-it-works">
+      <h2>How it works</h2>
+      <p>The key insight: the agent connects <strong>out</strong> to the VPS, not the other way around. Your LAN doesn't need to accept any inbound connections.</p>
+
+      <div class="arch-diagram">
+        <svg viewBox="0 0 720 406" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Network topology: VPS in cloud connects via WebSocket to Mini PC on local LAN, Mini PC and Hikvision cameras share the same router">
+          <style>
+            .nt-inet  { fill: var(--bg-subtle); }
+            .nt-lan   { fill: var(--bg-subtle); }
+            .nt-zl    { font: 700 9px system-ui,sans-serif; fill: var(--text-3); letter-spacing:.09em; text-transform:uppercase; }
+            .nt-box   { fill: var(--surface2); stroke: var(--border); stroke-width: 1.5; }
+            .nt-box-hi{ fill: var(--surface2); stroke: var(--accent); stroke-width: 2; }
+            .nt-tint  { fill: var(--accent); opacity:.1; pointer-events:none; }
+            .nt-title { font: 700 13px system-ui,sans-serif; fill: var(--text); }
+            .nt-sub   { font: 11.5px system-ui,sans-serif; fill: var(--text-3); }
+            .nt-svc   { font: 11.5px system-ui,sans-serif; fill: var(--text-2); }
+            .nt-div   { stroke: var(--border); stroke-width: 1; }
+            .nt-div-hi{ stroke: var(--accent); stroke-width: 1; opacity:.4; }
+            .nt-wire  { stroke: var(--border); stroke-width: 2.5; fill: none; }
+            .nt-ws    { stroke: var(--accent); stroke-width: 2.5; fill: none;
+                        stroke-dasharray: 7 4; animation: dash-flow 1.1s linear infinite; }
+            .nt-isapi { stroke: var(--text-3); stroke-width: 1.5; fill: none; stroke-dasharray: 4 3; }
+            .nt-arr   { fill: var(--border); }
+            .nt-arr-ws{ fill: var(--accent); }
+            .nt-arr-g { fill: var(--text-3); }
+            .nt-cl    { font: 600 10px system-ui,sans-serif; fill: var(--text-3); letter-spacing:.04em; text-transform:uppercase; }
+            .nt-cl-ws { font: 700 10px system-ui,sans-serif; fill: var(--accent); letter-spacing:.04em; text-transform:uppercase; }
+            @media (prefers-reduced-motion:reduce){ .nt-ws { animation:none; } }
+          </style>
+
+          <!-- ── Zone: Internet / Cloud (top band) ── -->
+          <rect class="nt-inet" x="4" y="4" width="712" height="155" rx="11"/>
+          <text class="nt-zl" x="20" y="22">Internet / Cloud</text>
+
+          <!-- Browser  left=28 right=200  center=(114,82) -->
+          <rect class="nt-box" x="28" y="24" width="172" height="118" rx="9"/>
+          <text class="nt-title" x="114" y="50" text-anchor="middle">Browser / App</text>
+          <line class="nt-div" x1="46" y1="57" x2="182" y2="57"/>
+          <text class="nt-sub" x="114" y="77"  text-anchor="middle">Admin UI</text>
+          <text class="nt-sub" x="114" y="95"  text-anchor="middle">access from anywhere</text>
+          <text class="nt-sub" x="114" y="113" text-anchor="middle">phone / laptop / PC</text>
+
+          <!-- HTTPS arrow  200→268  y=82 -->
+          <line x1="200" y1="82" x2="264" y2="82" stroke="var(--border)" stroke-width="1.5"/>
+          <polygon class="nt-arr" points="264,78 272,82 264,86"/>
+          <text class="nt-cl" x="232" y="72" text-anchor="middle">HTTPS</text>
+          <text class="nt-cl" x="232" y="98" text-anchor="middle">:443</text>
+
+          <!-- VPS  left=272 right=470  center=(371,82)  bottom=(371,142) -->
+          <rect class="nt-box-hi" x="272" y="24" width="198" height="118" rx="9"/>
+          <rect class="nt-tint"   x="272" y="24" width="198" height="118" rx="9"/>
+          <text class="nt-title" x="371" y="47" text-anchor="middle">VPS  (Cloud Server)</text>
+          <line class="nt-div-hi" x1="290" y1="54" x2="452" y2="54"/>
+          <text class="nt-svc" x="290" y="71">· Backend API   :8080</text>
+          <text class="nt-svc" x="290" y="87">· Admin UI   :5173</text>
+          <text class="nt-svc" x="290" y="103">· PostgreSQL / Redis</text>
+          <text class="nt-svc" x="290" y="119">· MinIO  (photos)</text>
+
+          <!-- WebSocket vertical: VPS bottom (371,142) → Router top (371,188) -->
+          <line class="nt-ws" x1="371" y1="142" x2="371" y2="186"/>
+          <polygon class="nt-arr-ws" points="367,186 371,194 375,186"/>
+          <polygon class="nt-arr-ws" points="367,142 371,134 375,142"/>
+          <text class="nt-cl-ws" x="390" y="156" dominant-baseline="middle">WebSocket  wss://</text>
+          <text class="nt-cl-ws" x="390" y="174" dominant-baseline="middle">outbound from Mini PC</text>
+
+          <!-- ── Zone: Private LAN (bottom band) ── -->
+          <rect class="nt-lan" x="4" y="168" width="712" height="234" rx="11"/>
+          <text class="nt-zl" x="20" y="186">Private LAN  —  Router / Network Switch</text>
+
+          <!-- Router box  center=(371,216)  top=(371,196)  bottom=(371,238) -->
+          <rect class="nt-box" x="265" y="196" width="212" height="46" rx="8"/>
+          <text class="nt-title" x="371" y="216" text-anchor="middle">Router / Switch</text>
+          <text class="nt-sub"  x="371" y="233" text-anchor="middle">all LAN devices connect here</text>
+
+          <!-- LAN wires: Router bottom-left (321,242) → Mini PC top (154,306) -->
+          <line class="nt-wire" x1="321" y1="242" x2="154" y2="306"/>
+          <!-- LAN wires: Router bottom-right (421,242) → Cameras top (572,306) -->
+          <line class="nt-wire" x1="421" y1="242" x2="572" y2="306"/>
+
+          <!-- Wire dot labels -->
+          <text class="nt-cl" x="210" y="268" text-anchor="middle" transform="rotate(-30,210,268)">LAN cable</text>
+          <text class="nt-cl" x="520" y="268" text-anchor="middle" transform="rotate(20,520,268)">LAN cable</text>
+
+          <!-- Mini PC  left=46 right=262  center=(154,352)  top=(154,306) -->
+          <rect class="nt-box-hi" x="46"  y="306" width="216" height="90" rx="9"/>
+          <rect class="nt-tint"   x="46"  y="306" width="216" height="90" rx="9"/>
+          <text class="nt-title" x="154" y="328" text-anchor="middle">Mini PC</text>
+          <line class="nt-div-hi" x1="66" y1="335" x2="242" y2="335"/>
+          <text class="nt-svc" x="66" y="352">· face_auth-agent running</text>
+          <text class="nt-svc" x="66" y="368">· bridges LAN ↔ cloud</text>
+          <text class="nt-svc" x="66" y="384">· no inbound ports needed</text>
+
+          <!-- ISAPI arrow: Mini PC right (262,351) → Cameras left (460,351) -->
+          <line class="nt-isapi" x1="262" y1="351" x2="454" y2="351"/>
+          <polygon class="nt-arr-g" points="454,347 462,351 454,355"/>
+          <text class="nt-cl" x="358" y="342" text-anchor="middle">ISAPI  HTTP</text>
+          <text class="nt-cl" x="358" y="363" text-anchor="middle">local network call</text>
+
+          <!-- Cameras  left=462 right=676  center=(569,351)  top=(569,306) -->
+          <rect class="nt-box" x="462" y="306" width="214" height="90" rx="9"/>
+          <text class="nt-title" x="569" y="328" text-anchor="middle">Hikvision Cameras</text>
+          <line class="nt-div"   x1="482" y1="335" x2="658" y2="335"/>
+          <text class="nt-sub" x="569" y="354" text-anchor="middle">192.168.x.x</text>
+          <text class="nt-sub" x="569" y="372" text-anchor="middle">face / card reader</text>
+          <text class="nt-sub" x="569" y="388" text-anchor="middle">never touch internet</text>
+        </svg>
+      </div>
+
+      <div class="callout callout-note">
+        <span class="callout-icon">💡</span>
+        <div class="callout-body">
+          <strong>Why this works through NAT:</strong> The agent dials out to the VPS over a standard WebSocket (port 443). Your router allows this like any website visit. When the backend needs to talk to a camera, it sends the command through that existing connection — no inbound holes needed.
+        </div>
+      </div>
+    </section>
+
+    <!-- Prerequisites -->
+    <section id="prerequisites">
+      <h2>Prerequisites</h2>
+      <ul class="checklist">
+        <li>
+          <div class="check-icon done">✓</div>
+          A VPS running Ubuntu 22.04 / Debian 12 (any cloud: DigitalOcean, AWS, Hetzner…)
+        </li>
+        <li>
+          <div class="check-icon done">✓</div>
+          Docker + Docker Compose installed on the VPS
+        </li>
+        <li>
+          <div class="check-icon done">✓</div>
+          A domain name pointed at the VPS (e.g. <code>face.yourcompany.com</code>) — or just use the VPS IP
+        </li>
+        <li>
+          <div class="check-icon done">✓</div>
+          A Windows / Mac / Linux PC on the same LAN as your Hikvision cameras
+        </li>
+        <li>
+          <div class="check-icon done">✓</div>
+          Camera's local IP address, ISAPI username and password (default user is usually <code>admin</code>)
+        </li>
+      </ul>
+    </section>
+
+    <!-- Step 1 — Deploy VPS -->
+    <section id="vps-deploy">
+      <h2>Step 1 — Deploy to VPS</h2>
+
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <h3>SSH into your VPS and clone the repo</h3>
+          <div class="code-wrap">
+            <div class="code-header"><div class="dot-row"><span class="dot d1"></span><span class="dot d2"></span><span class="dot d3"></span></div><span class="code-filename">VPS terminal</span></div>
+            <pre>git clone https://github.com/yourorg/face_auth.git
+cd face_auth</pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-body">
+          <h3>Create your environment file</h3>
+          <p>Copy the example and fill in your domain and secure passwords. Never commit this file.</p>
+          <div class="code-wrap">
+            <div class="code-header"><div class="dot-row"><span class="dot d1"></span><span class="dot d2"></span><span class="dot d3"></span></div><span class="code-filename">VPS terminal</span></div>
+            <pre>cp .env.vps.example .env
+nano .env</pre>
+          </div>
+          <div class="code-wrap">
+            <div class="code-header"><div class="dot-row"><span class="dot d1"></span><span class="dot d2"></span><span class="dot d3"></span></div><span class="code-filename">.env  — minimum required values</span></div>
+            <pre>PG_PASSWORD=<strong>change-me-strong-password</strong>
+MINIO_ROOT_PASSWORD=<strong>change-me-strong-password</strong>
+
+# Your domain or VPS IP
+VITE_API_URL=https://face.yourcompany.com</pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-body">
+          <h3>Start the stack</h3>
+          <div class="code-wrap">
+            <div class="code-header"><div class="dot-row"><span class="dot d1"></span><span class="dot d2"></span><span class="dot d3"></span></div><span class="code-filename">VPS terminal</span></div>
+            <pre>docker compose -f docker-compose.yml -f docker-compose.vps.yml up -d --build
+docker compose ps   # all services should show "healthy"</pre>
+          </div>
+          <div class="callout callout-note">
+            <span class="callout-icon">🔐</span>
+            <div class="callout-body">
+              If you have a reverse proxy (Nginx / Caddy), point it at <code>localhost:8084</code> (API) and <code>localhost:8085</code> (admin UI). The <code>docker-compose.vps.yml</code> binds only to <code>127.0.0.1</code> so ports are not exposed publicly.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">4</div>
+        <div class="step-body">
+          <h3>Open the admin UI and log in</h3>
+          <p>Visit <code>https://face.yourcompany.com</code> (or your VPS IP on port 5173 during testing).</p>
+          <div class="screen">
+            <div class="screen-bar">
+              <div class="screen-dots"><span></span><span></span><span></span></div>
+              <div class="screen-url">https://face.yourcompany.com</div>
+            </div>
+            <div class="screen-body">
+              <p style="font-size:.8rem;color:var(--text-3);margin-bottom:12px">Login screen</p>
+              <div style="max-width:320px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:20px;">
+                <div style="font-size:.85rem;font-weight:700;color:var(--text);margin-bottom:14px">Sign in to face_auth</div>
+                <div style="font-size:.78rem;color:var(--text-3);margin-bottom:4px">Email</div>
+                <div style="background:var(--bg);border:1px solid var(--accent);border-radius:5px;padding:7px 10px;font-size:.82rem;color:var(--text-2);margin-bottom:10px">hq@faceauth.local</div>
+                <div style="font-size:.78rem;color:var(--text-3);margin-bottom:4px">Password</div>
+                <div style="background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:7px 10px;font-size:.82rem;color:var(--text-3);margin-bottom:14px">••••••••</div>
+                <div style="background:var(--accent);color:#fff;border-radius:5px;padding:8px;text-align:center;font-size:.82rem;font-weight:600">Sign in</div>
+              </div>
+              <p style="font-size:.78rem;color:var(--text-3);margin-top:10px">Default: <code>hq@faceauth.local</code> / <code>changeme</code> — change after first login.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Step 2 — Install Agent -->
+    <section id="install-agent">
+      <h2>Step 2 — Install LAN Agent</h2>
+      <p>This runs on any PC that can reach your cameras. It does not need to be a server — a spare office PC works fine.</p>
+
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <h3>Download the agent binary</h3>
+          <p>In the admin UI: go to <strong>Agents</strong> → <strong>Add agent</strong> → give it a name (e.g. <em>Office LAN</em>) → <strong>Save</strong>. The page shows the Agent ID and Token — <strong>copy the token now</strong>, it won't be shown again.</p>
+          <div class="screen">
+            <div class="screen-bar">
+              <div class="screen-dots"><span></span><span></span><span></span></div>
+              <div class="screen-url">face.yourcompany.com → Agents</div>
+            </div>
+            <div class="screen-body">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+                <span style="font-size:.85rem;font-weight:700;color:var(--text)">Agents</span>
+                <span style="background:var(--accent);color:#fff;font-size:.75rem;font-weight:600;padding:5px 12px;border-radius:5px">+ Add agent</span>
+              </div>
+              <div class="mock-row">
+                <span class="mock-dot green"></span>
+                <div style="flex:1">
+                  <div class="mock-label">Office LAN</div>
+                  <div class="mock-sub">ID: office-lan · connected just now</div>
+                </div>
+                <span class="mock-badge conn">Connected</span>
+              </div>
+              <div class="mock-row">
+                <span class="mock-dot grey"></span>
+                <div style="flex:1">
+                  <div class="mock-label">Branch KL</div>
+                  <div class="mock-sub">ID: branch-kl · never connected</div>
+                </div>
+                <span class="mock-badge off">Offline</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-body">
+          <h3>Run the agent on the LAN PC</h3>
+          <p>Download the correct binary for your OS, then run it with three environment variables: the VPS URL, your agent ID, and the token.</p>
+
+          <h3>macOS / Linux</h3>
+          <div class="code-wrap">
+            <div class="code-header"><div class="dot-row"><span class="dot d1"></span><span class="dot d2"></span><span class="dot d3"></span></div><span class="code-filename">LAN PC — Terminal</span></div>
+            <pre>chmod +x face_auth-agent
+
+CLOUD_URL=wss://face.yourcompany.com \
+AGENT_ID=office-lan \
+AGENT_TOKEN=your-token-here \
+./face_auth-agent</pre>
+          </div>
+
+          <h3>Windows (PowerShell)</h3>
+          <div class="code-wrap">
+            <div class="code-header"><div class="dot-row"><span class="dot d1"></span><span class="dot d2"></span><span class="dot d3"></span></div><span class="code-filename">LAN PC — PowerShell</span></div>
+            <pre>$env:CLOUD_URL   = "wss://face.yourcompany.com"
+$env:AGENT_ID    = "office-lan"
+$env:AGENT_TOKEN = "your-token-here"
+.\face_auth-agent.exe</pre>
+          </div>
+
+          <div class="callout callout-ok">
+            <span class="callout-icon">✓</span>
+            <div class="callout-body">
+              When the agent connects successfully, a dashboard opens at <strong>http://127.0.0.1:7780</strong> showing its status. The admin UI Agents tab also shows it as <strong>Connected</strong>.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-body">
+          <h3>Run as a background service (recommended)</h3>
+          <p>Pass <code>--service</code> to skip the browser dashboard and run silently. Use your OS service manager to keep it running on startup.</p>
+          <div class="code-wrap">
+            <div class="code-header"><div class="dot-row"><span class="dot d1"></span><span class="dot d2"></span><span class="dot d3"></span></div><span class="code-filename">macOS — run in background</span></div>
+            <pre>CLOUD_URL=wss://face.yourcompany.com \
+AGENT_ID=office-lan \
+AGENT_TOKEN=your-token-here \
+./face_auth-agent --service &gt; agent.log 2&gt;&amp;1 &amp;</pre>
+          </div>
+          <p>Or use the provided <code>start.sh</code> script in the project root — it handles building and starting the agent automatically alongside the Docker stack.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Step 3 — Connect -->
+    <section id="connect">
+      <h2>Step 3 — Connect them</h2>
+      <p>With the agent running, the VPS and LAN are now linked. You can verify this before touching any camera.</p>
+
+      <div class="screen">
+        <div class="screen-bar">
+          <div class="screen-dots"><span></span><span></span><span></span></div>
+          <div class="screen-url">face.yourcompany.com → Agents</div>
+        </div>
+        <div class="screen-body">
+          <div class="mock-row">
+            <span class="mock-dot green"></span>
+            <div style="flex:1">
+              <div class="mock-label">Office LAN</div>
+              <div class="mock-sub">Connected · 0 devices · ping 12 ms</div>
+            </div>
+            <span class="mock-badge conn">Connected</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout callout-warn">
+        <span class="callout-icon">⚠️</span>
+        <div class="callout-body">
+          <strong>If it shows Offline:</strong> check that the LAN PC can reach <code>wss://face.yourcompany.com</code> (port 443 open), that the Agent ID and Token match exactly what the admin UI shows, and that the agent binary is running.
+        </div>
+      </div>
+    </section>
+
+    <!-- Step 4 — Add device -->
+    <section id="add-device">
+      <h2>Step 4 — Add a camera via agent</h2>
+
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <h3>Go to Devices → Add device</h3>
+          <p>Fill in the device's local IP (e.g. <code>192.168.1.64</code>), port (usually <code>80</code>), ISAPI username, and password.</p>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-body">
+          <h3>Set "Reach via" → Via agent</h3>
+          <p>Pick the agent you just connected from the dropdown. The device IP is the camera's address on the LAN — not visible from the VPS, but reachable from the LAN PC running the agent.</p>
+          <div class="screen">
+            <div class="screen-bar">
+              <div class="screen-dots"><span></span><span></span><span></span></div>
+              <div class="screen-url">face.yourcompany.com → Add Device</div>
+            </div>
+            <div class="screen-body">
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:500px">
+                <div>
+                  <div style="font-size:.75rem;color:var(--text-3);margin-bottom:4px">Device IP</div>
+                  <div style="background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:7px 10px;font-size:.82rem;color:var(--text-2)">192.168.1.64</div>
+                </div>
+                <div>
+                  <div style="font-size:.75rem;color:var(--text-3);margin-bottom:4px">Port</div>
+                  <div style="background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:7px 10px;font-size:.82rem;color:var(--text-2)">80</div>
+                </div>
+                <div style="grid-column:1/-1">
+                  <div style="font-size:.75rem;color:var(--text-3);margin-bottom:4px">Reach via</div>
+                  <div style="background:var(--bg);border:1.5px solid var(--accent);border-radius:5px;padding:7px 10px;font-size:.82rem;color:var(--accent);font-weight:600">Via agent: Office LAN ▾</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-body">
+          <h3>Save &amp; probe</h3>
+          <p>Click <strong>Save &amp; probe</strong>. The backend sends a probe request through the WebSocket tunnel to the agent, which calls the camera's ISAPI. You'll see the device model and firmware appear — that means the full path is working.</p>
+          <div class="screen">
+            <div class="screen-bar">
+              <div class="screen-dots"><span></span><span></span><span></span></div>
+              <div class="screen-url">face.yourcompany.com → Devices</div>
+            </div>
+            <div class="screen-body">
+              <div class="mock-row">
+                <span class="mock-dot green"></span>
+                <div style="flex:1">
+                  <div class="mock-label">Front Exit</div>
+                  <div class="mock-sub">DS-K1T671TM-3XF · via Office LAN</div>
+                </div>
+                <span class="mock-badge conn">Online</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Step 5 — Verify -->
+    <section id="verify">
+      <h2>Step 5 — Verify it works end-to-end</h2>
+      <p>Enrol a test person and confirm the camera receives their data.</p>
+
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <h3>Create a person and add a card</h3>
+          <p>Go to <strong>Persons → Add person</strong>. Fill in a name and employee ID. Add a card number under the Cards section.</p>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-body">
+          <h3>Push to device</h3>
+          <p>Open the person, scroll to the device section, pick your device, and click <strong>Push to device</strong>. Within a few seconds you'll see a success response.</p>
+          <div class="callout callout-ok">
+            <span class="callout-icon">✓</span>
+            <div class="callout-body">
+              Success means: VPS → WebSocket → Agent → Camera ISAPI → back. The full chain is alive.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-body">
+          <h3>Test at the door</h3>
+          <p>Present the card (or face) to the camera. The door should unlock and the event appears in the <strong>Events</strong> tab of the admin UI.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Env vars reference -->
+    <section id="env-vars">
+      <h2>Environment variables</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Variable</th><th>Where</th><th>Description</th><th>Default</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>CLOUD_URL</code></td><td>Agent</td><td>WebSocket URL of your VPS backend. Use <code>wss://</code> in production.</td><td><em>required</em></td></tr>
+            <tr><td><code>AGENT_ID</code></td><td>Agent</td><td>ID shown in the admin UI Agents tab when you created the agent.</td><td><em>required</em></td></tr>
+            <tr><td><code>AGENT_TOKEN</code></td><td>Agent</td><td>Secret token. Shown once at creation — regenerate from the UI if lost.</td><td><em>required</em></td></tr>
+            <tr><td><code>AGENT_NAME</code></td><td>Agent</td><td>Display name shown in the UI. Defaults to hostname.</td><td>hostname</td></tr>
+            <tr><td><code>PG_PASSWORD</code></td><td>VPS .env</td><td>PostgreSQL password. Use a strong random string.</td><td><code>hikpush</code></td></tr>
+            <tr><td><code>MINIO_ROOT_PASSWORD</code></td><td>VPS .env</td><td>MinIO object storage password.</td><td><code>minioadmin123</code></td></tr>
+            <tr><td><code>VITE_API_URL</code></td><td>VPS .env</td><td>Public URL of the backend, used by the admin UI at build time.</td><td><em>empty (same-origin)</em></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Ports -->
+    <section id="ports">
+      <h2>Ports &amp; firewall</h2>
+      <p>Only the VPS needs open ports. The LAN PC only makes outbound connections.</p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Port</th><th>Host</th><th>Open to</th><th>Purpose</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>443</code></td>
+              <td>VPS</td>
+              <td><span class="badge badge-amber">Internet</span></td>
+              <td>HTTPS + WebSocket (wss://) — reverse proxy terminates TLS here</td>
+            </tr>
+            <tr>
+              <td><code>80</code></td>
+              <td>VPS</td>
+              <td><span class="badge badge-amber">Internet</span></td>
+              <td>HTTP → redirect to HTTPS only</td>
+            </tr>
+            <tr>
+              <td><code>8084</code></td>
+              <td>VPS</td>
+              <td><span class="badge badge-green">localhost</span></td>
+              <td>Backend API (behind reverse proxy)</td>
+            </tr>
+            <tr>
+              <td><code>8085</code></td>
+              <td>VPS</td>
+              <td><span class="badge badge-green">localhost</span></td>
+              <td>Admin UI (behind reverse proxy)</td>
+            </tr>
+            <tr>
+              <td><code>7780</code></td>
+              <td>LAN PC</td>
+              <td><span class="badge badge-green">localhost</span></td>
+              <td>Agent dashboard (local only)</td>
+            </tr>
+            <tr>
+              <td><code>80</code></td>
+              <td>Camera</td>
+              <td><span class="badge badge-accent">LAN only</span></td>
+              <td>ISAPI — only the agent needs to reach this</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout callout-note">
+        <span class="callout-icon">🔒</span>
+        <div class="callout-body">
+          The LAN PC does <strong>not</strong> need any inbound ports open. It only makes outbound connections to the VPS (port 443) and to cameras (port 80) on the same LAN.
+        </div>
+      </div>
+    </section>
+
+    <!-- Commands -->
+    <section id="commands">
+      <h2>Useful commands</h2>
+
+      <h3>VPS — check stack health</h3>
+      <div class="code-wrap">
+        <pre>docker compose ps
+docker compose logs -f backend --tail=50</pre>
+      </div>
+
+      <h3>VPS — update to latest code</h3>
+      <div class="code-wrap">
+        <pre>git pull
+docker compose -f docker-compose.yml -f docker-compose.vps.yml up -d --build</pre>
+      </div>
+
+      <h3>LAN PC — check agent status</h3>
+      <div class="code-wrap">
+        <pre># Open dashboard in browser
+open http://127.0.0.1:7780
+
+# Or tail the log
+tail -f agent.log</pre>
+      </div>
+
+      <h3>LAN PC — regenerate agent token (if lost)</h3>
+      <div class="code-wrap">
+        <pre># In admin UI: Agents → your agent → Regenerate token
+# Then restart the agent with the new token</pre>
+      </div>
+
+      <h3>Start everything with one command (local dev)</h3>
+      <div class="code-wrap">
+        <pre>./start.sh      # starts Docker stack + builds + starts agent
+./stop.sh       # stops everything cleanly</pre>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script>
+// Highlight active nav item on scroll
+const sections = document.querySelectorAll('section[id]')
+const navItems = document.querySelectorAll('.nav-item[href^="#"]')
+const observer = new IntersectionObserver(entries => {
+  entries.forEach(e => {
+    if (e.isIntersecting) {
+      navItems.forEach(n => n.classList.remove('active'))
+      const active = document.querySelector(`.nav-item[href="#${e.target.id}"]`)
+      if (active) active.classList.add('active')
+    }
+  })
+}, { rootMargin: '-30% 0px -60% 0px', threshold: 0 })
+sections.forEach(s => observer.observe(s))
+</script>

@@ -48,6 +48,14 @@ type ISAPIClient struct {
 }
 
 func NewISAPIClient(ip string, port int, useHTTPS bool, user, pass string) *ISAPIClient {
+	// Strip any accidentally-included scheme so "http://192.168.1.1" → "192.168.1.1"
+	if i := strings.Index(ip, "://"); i >= 0 {
+		ip = ip[i+3:]
+	}
+	// Strip any trailing path/slash left after scheme stripping
+	if i := strings.IndexAny(ip, "/?#"); i >= 0 {
+		ip = ip[:i]
+	}
 	scheme := "http"
 	if useHTTPS {
 		scheme = "https"
@@ -1376,32 +1384,66 @@ func (c *ISAPIClient) PushQRCodeInfo(employeeNo, qrString string, validSec, time
 	if validSec > 43200 {
 		validSec = 43200
 	}
-	// The device rejects a bare {QRCodeInfo:{…}} body with
-	// "MessageParametersLack: QRCodeInfoCond" — the required top-level key is
-	// QRCodeInfoCond. /Record and /Modify sub-paths return "notSupport" on
-	// v3.7.60, so the single endpoint handles create/update via QRCodeInfoCond.
-	// `times` is REQUIRED (omitting it → MessageParametersLack: times) but the
-	// device rejects both 0 and 1000 with "Device Error: times" — cap schema
-	// advertises [0,1000] but runtime is stricter. Default to 1 unless caller
-	// provided something in-between.
-	if times < 1 || times > 1000 {
-		times = 1
-	}
-	inner := map[string]any{
+	// Firmware behaviour varies widely:
+	//   v3.7.60: "times" is REQUIRED; omitting it → MessageParametersLack.
+	//             Valid range is stricter than [0,1000]; 0 and 1000 are rejected.
+	//   Other firmwares: "times" must be omitted or the device returns
+	//             Device Error: times for any value including 1.
+	//
+	// Strategy: try without "times" first (works on most firmwares).
+	// If the device complains that "times" is missing, retry with a set of
+	// candidate values until one is accepted or all are exhausted.
+
+	base := map[string]any{
 		"employeeNo":   sanitizeFPID(employeeNo),
 		"QRCodeString": qrString,
 		"valid":        validSec,
-		"times":        times,
 	}
-	body, _ := json.Marshal(map[string]any{"QRCodeInfoCond": inner})
-	resp, respBody, err := c.Do("POST", "/ISAPI/AccessControl/QRCodeInfo?format=json", "application/json", body)
+	if times >= 1 && times <= 1000 {
+		base["times"] = times
+	}
+
+	doPost := func(inner map[string]any) (string, int, error) {
+		b, _ := json.Marshal(map[string]any{"QRCodeInfoCond": inner})
+		resp, respBody, err := c.Do("POST", "/ISAPI/AccessControl/QRCodeInfo?format=json", "application/json", b)
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		return string(respBody), status, err
+	}
+
+	rawResp, status, err := doPost(base)
 	if err != nil {
 		return "", err
 	}
-	if resp.StatusCode != 200 {
-		return string(respBody), fmt.Errorf("push QR: status %d: %s", resp.StatusCode, string(respBody))
+	if status == 200 {
+		return rawResp, nil
 	}
-	return string(respBody), nil
+
+	// If "times" is missing → retry with candidate values
+	if strings.Contains(rawResp, "times") && strings.Contains(strings.ToLower(rawResp), "parameterslack") {
+		for _, t := range []int{1, 5, 10, 100} {
+			inner := map[string]any{
+				"employeeNo":   base["employeeNo"],
+				"QRCodeString": base["QRCodeString"],
+				"valid":        base["valid"],
+				"times":        t,
+			}
+			rawResp, status, err = doPost(inner)
+			if err != nil {
+				return "", err
+			}
+			if status == 200 {
+				return rawResp, nil
+			}
+			if !strings.Contains(rawResp, "times") {
+				break // different error now — stop trying times variants
+			}
+		}
+	}
+
+	return rawResp, fmt.Errorf("push QR: status %d: %s", status, rawResp)
 }
 
 // SetQRCodeEncryption enables device-side AES128-CBC verification of QR strings

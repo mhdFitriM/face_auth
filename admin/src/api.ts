@@ -295,6 +295,12 @@ export const api = {
     if (auth.token) params.set('token', auth.token)
     return apiUrl(`/api/persons/${encodeURIComponent(personId)}/qr.png?${params.toString()}`)
   },
+  qrCardImageUrl: (personId: string, cardNo?: string, size = 256) => {
+    const params = new URLSearchParams({ size: String(size) })
+    if (auth.token) params.set('token', auth.token)
+    if (cardNo) params.set('cardNo', cardNo)
+    return apiUrl(`/api/persons/${encodeURIComponent(personId)}/qr-card.png?${params.toString()}`)
+  },
   qrAuthSessions: () => req('/api/qr-auth/sessions'),
   qrAuthScan: (qrToken: string, agentId?: string) =>
     req('/api/qr-auth/scan', {

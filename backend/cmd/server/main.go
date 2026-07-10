@@ -39,6 +39,9 @@ func main() {
 	stopPolicy := internal.StartPolicyRunner(store, hub)
 	defer stopPolicy()
 
+	stopDeviceHealth := internal.StartDeviceHealthScheduler(store, hub)
+	defer stopDeviceHealth()
+
 	// Pre-flight enforcement: ticks every minute and pushes the correct
 	// userVerifyMode (face vs cardAndPw) to the camera based on each person's
 	// plan rules. Without this the rule check only fires AFTER the door has
