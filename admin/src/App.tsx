@@ -5293,12 +5293,13 @@ function AccessLogTab() {
           : (
             <div className="table-wrap">
               <table className="data-table">
-                <thead><tr><th>When</th><th>Decision</th><th>Person</th><th>Device</th><th>Direction</th><th>Reason</th></tr></thead>
+                <thead><tr><th>When</th><th>Decision</th><th>Via</th><th>Person</th><th>Device</th><th>Direction</th><th>Reason</th></tr></thead>
                 <tbody>
                   {rows.map((r: any) => (
                     <tr key={r.id}>
                       <td className="muted small">{new Date(r.createdAt).toLocaleString()}</td>
                       <td><span className={`badge ${r.decision === 'allow' ? 'ok' : r.decision === 'deny' ? 'err' : ''}`}>{r.decision}</span></td>
+                      <td>{r.openMethod ? <span className={`badge ${r.openMethod === 'qr' ? 'info' : r.openMethod === 'face' ? 'ok' : ''}`}>{r.openMethod}</span> : <span className="muted small">—</span>}</td>
                       <td><strong>{r.employeeNo || '—'}</strong></td>
                       <td className="mono small">{r.deviceId || '—'}</td>
                       <td className="muted small">{r.direction || ''}</td>

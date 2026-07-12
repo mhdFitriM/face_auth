@@ -32,16 +32,16 @@ func runPolicy(ctx context.Context, store *Store, hub *AgentHub) {
 			if !ok {
 				return
 			}
-			emp, isFace := extractFaceMatchFromEvent(e)
-			if !isFace || emp == "" {
+			emp, method, ok := extractAccessEvent(e)
+			if !ok || emp == "" {
 				continue
 			}
-			processFaceMatch(store, hub, e, emp)
+			processFaceMatch(store, hub, e, emp, method)
 		}
 	}
 }
 
-func processFaceMatch(store *Store, hub *AgentHub, e Event, employeeNo string) {
+func processFaceMatch(store *Store, hub *AgentHub, e Event, employeeNo, openMethod string) {
 	bg := context.Background()
 
 	tenantID, _ := store.GetDeviceTenant(bg, e.DeviceID)
@@ -53,6 +53,7 @@ func processFaceMatch(store *Store, hub *AgentHub, e Event, employeeNo string) {
 			DeviceID:   e.DeviceID,
 			Decision:   "observed",
 			Reason:     "device has no tenant",
+			OpenMethod: openMethod,
 		})
 		return
 	}
@@ -65,6 +66,7 @@ func processFaceMatch(store *Store, hub *AgentHub, e Event, employeeNo string) {
 			DeviceID:   e.DeviceID,
 			Decision:   "observed",
 			Reason:     "unknown person",
+			OpenMethod: openMethod,
 		})
 		return
 	}
@@ -74,7 +76,7 @@ func processFaceMatch(store *Store, hub *AgentHub, e Event, employeeNo string) {
 		now = time.Now()
 	}
 	decision := store.EvaluateAccess(bg, person.ID, now)
-	_ = store.CommitAccess(bg, decision, person.ID, employeeNo, e.DeviceID, tenantID)
+	_ = store.CommitAccess(bg, decision, person.ID, employeeNo, e.DeviceID, tenantID, openMethod)
 
 	// If the decision was deny, push verify_mode = cardAndPw to the user on the
 	// device so the very next swipe is refused. This is best-effort.

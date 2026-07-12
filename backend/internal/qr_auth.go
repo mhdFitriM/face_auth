@@ -165,14 +165,14 @@ func (q *QRAuth) DirectOpen(ctx context.Context, credential, agentID, deviceID s
 	}
 	decision := q.store.EvaluateAccess(ctx, p.ID, now)
 	if !decision.Allow {
-		_ = q.store.CommitAccess(ctx, decision, p.ID, p.EmployeeNo, deviceID, tenantID)
+		_ = q.store.CommitAccess(ctx, decision, p.ID, p.EmployeeNo, deviceID, tenantID, "qr")
 		return p, decision.Reason, errors.New("access denied: " + decision.Reason)
 	}
 	resp, err := NewISAPIClientForDevice(d, q.hub).OpenDoor(1)
 	if err != nil {
 		return p, resp, err
 	}
-	_ = q.store.CommitAccess(ctx, decision, p.ID, p.EmployeeNo, deviceID, tenantID)
+	_ = q.store.CommitAccess(ctx, decision, p.ID, p.EmployeeNo, deviceID, tenantID, "qr")
 	return p, resp, nil
 }
 
@@ -440,43 +440,74 @@ done:
 	log.Printf("[face-auth] session %s -> %s (matched=%q)", sess.ID, status, matchedEmpNo)
 }
 
-// extractFaceMatchFromEvent inspects a device event payload and returns
-// (employeeNo, isFaceMatch). It tolerates both Hikvision AccessControllerEvent
-// schemas and a few flatter variants emitted by older firmware.
-func extractFaceMatchFromEvent(e Event) (string, bool) {
+// extractAccessEvent inspects a device event payload and returns
+// (employeeNo, openMethod, ok). openMethod is one of: face | card | fingerprint | pin.
+// It tolerates both Hikvision AccessControllerEvent schemas and flat variants.
+func extractAccessEvent(e Event) (employeeNo, openMethod string, ok bool) {
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(e.Raw, &probe); err != nil {
-		return "", false
+		return "", "", false
 	}
-	if v, ok := probe["AccessControllerEvent"]; ok {
+	if v, okk := probe["AccessControllerEvent"]; okk {
 		var ace struct {
 			EmployeeNoString  string `json:"employeeNoString"`
 			MajorEventType    int    `json:"majorEventType"`
 			SubEventType      int    `json:"subEventType"`
-			Name              string `json:"name"`
 			CurrentVerifyMode string `json:"currentVerifyMode"`
 		}
-		if err := json.Unmarshal(v, &ace); err == nil {
-			// Hik major=5 / sub=75-78 covers face-related access events. We also
-			// accept any event whose currentVerifyMode contains "face" — that's
-			// the firmware confirming a face was used to authenticate.
-			isFace := strings.Contains(strings.ToLower(ace.CurrentVerifyMode), "face") ||
-				(ace.MajorEventType == 5 && ace.SubEventType >= 75 && ace.SubEventType <= 78)
-			if ace.EmployeeNoString != "" && isFace {
-				return ace.EmployeeNoString, true
+		if err := json.Unmarshal(v, &ace); err == nil && ace.EmployeeNoString != "" {
+			m := hikVerifyMethod(ace.CurrentVerifyMode, ace.MajorEventType, ace.SubEventType)
+			if m != "" {
+				return ace.EmployeeNoString, m, true
 			}
 		}
 	}
+	// Flat schema fallback — older firmware; assume face
 	for _, k := range []string{"employeeNoString", "EmployeeNoString"} {
-		if v, ok := probe[k]; ok {
+		if v, okk := probe[k]; okk {
 			var s string
 			_ = json.Unmarshal(v, &s)
 			if s != "" {
-				return s, true
+				return s, "face", true
 			}
 		}
 	}
-	return "", false
+	return "", "", false
+}
+
+// hikVerifyMethod maps a Hikvision currentVerifyMode string + event type codes
+// to a canonical open method name.
+func hikVerifyMethod(verifyMode string, major, sub int) string {
+	vm := strings.ToLower(verifyMode)
+	switch {
+	case strings.Contains(vm, "face"):
+		return "face"
+	case strings.Contains(vm, "card") || strings.Contains(vm, "swipe"):
+		return "card"
+	case strings.Contains(vm, "finger") || strings.Contains(vm, "fp"):
+		return "fingerprint"
+	case strings.Contains(vm, "pin") || strings.Contains(vm, "password") || strings.Contains(vm, "pw"):
+		return "pin"
+	}
+	// Fall back to event subtype codes (major=5 is access control)
+	if major == 5 {
+		switch {
+		case sub >= 75 && sub <= 78:
+			return "face"
+		case sub == 1 || sub == 16 || sub == 17:
+			return "card"
+		case sub == 2 || sub == 3:
+			return "fingerprint"
+		}
+	}
+	return ""
+}
+
+// extractFaceMatchFromEvent is kept for backward compatibility — callers that
+// only care about face events can still use it.
+func extractFaceMatchFromEvent(e Event) (string, bool) {
+	emp, method, ok := extractAccessEvent(e)
+	return emp, ok && method == "face"
 }
 
 func (q *QRAuth) setUserVerifyMode(ctx context.Context, d *Device, p *Person, mode string) error {

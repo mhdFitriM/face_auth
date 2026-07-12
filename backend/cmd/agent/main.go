@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -365,6 +366,41 @@ var qrScan atomic.Pointer[scanFunc]
 // qrHTTPStarted tracks whether the QR HTTP server is already bound to its port.
 var qrHTTPStarted atomic.Bool
 
+// ScanEntry is one record in the debug ring buffer.
+type ScanEntry struct {
+	Time    string `json:"time"`
+	QR      string `json:"qr"`   // first 32 chars only
+	Status  int    `json:"status"`
+	Body    string `json:"body"`
+	Opened  bool   `json:"opened"`
+}
+
+var (
+	scanLogMu      sync.Mutex
+	scanLog        []ScanEntry
+	scanLogMaxSize = 50
+)
+
+func recordScan(qr string, status int, body string, opened bool) {
+	preview := qr
+	if len(preview) > 32 {
+		preview = preview[:32] + "…"
+	}
+	e := ScanEntry{
+		Time:   time.Now().Format("15:04:05"),
+		QR:     preview,
+		Status: status,
+		Body:   body,
+		Opened: opened,
+	}
+	scanLogMu.Lock()
+	scanLog = append([]ScanEntry{e}, scanLog...)
+	if len(scanLog) > scanLogMaxSize {
+		scanLog = scanLog[:scanLogMaxSize]
+	}
+	scanLogMu.Unlock()
+}
+
 // startQRListener builds a scan function for the given cloud target and ensures
 // the QR HTTP server is running. On reconnects the port stays bound (only one
 // server ever runs); the new scan function is stored in qrScan so the server
@@ -411,10 +447,13 @@ func startQRListener(port, cloudBase, agentID, agentToken string) scanFunc {
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := httpClient.Do(req)
 		if err != nil {
+			recordScan(qr, 502, fmt.Sprintf(`{"error":%q}`, err.Error()), false)
 			return 502, fmt.Sprintf(`{"error":%q}`, err.Error())
 		}
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(resp.Body)
+		opened := resp.StatusCode == 200 && strings.Contains(string(b), `"ok":true`)
+		recordScan(qr, resp.StatusCode, string(b), opened)
 		return resp.StatusCode, string(b)
 	}
 
@@ -457,6 +496,21 @@ func startQRListener(port, cloudBase, agentID, agentToken string) scanFunc {
 		})
 
 		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
+
+		mux.HandleFunc("/qrdebug", func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Accept") == "application/json" || r.URL.Query().Get("json") == "1" {
+				scanLogMu.Lock()
+				snap := make([]ScanEntry, len(scanLog))
+				copy(snap, scanLog)
+				scanLogMu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				b, _ := json.Marshal(snap)
+				_, _ = w.Write(b)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write([]byte(qrDebugPage()))
+		})
 
 		go func() {
 			srv := &http.Server{Addr: "127.0.0.1:" + port, Handler: mux}

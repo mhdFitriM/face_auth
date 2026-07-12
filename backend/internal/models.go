@@ -80,9 +80,10 @@ type AccessLog struct {
 	PersonID   string    `json:"personId,omitempty"`
 	EmployeeNo string    `json:"employeeNo,omitempty"`
 	DeviceID   string    `json:"deviceId,omitempty"`
-	Decision   string    `json:"decision"` // allow | deny | observed
+	Decision   string    `json:"decision"`              // allow | deny | observed
 	Reason     string    `json:"reason,omitempty"`
 	Direction  string    `json:"direction,omitempty"`
+	OpenMethod string    `json:"openMethod,omitempty"` // qr | face | card | fingerprint | pin
 	CreatedAt  time.Time `json:"createdAt"`
 }
 

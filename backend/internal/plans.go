@@ -247,9 +247,9 @@ func (s *Store) ListDevicePlans(ctx context.Context, deviceID string) ([]string,
 
 func (s *Store) WriteAccessLog(ctx context.Context, e AccessLog) error {
 	_, err := s.PG.Exec(ctx, `
-		INSERT INTO access_log (tenant_id, person_id, employee_no, device_id, decision, reason, direction)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)
-	`, e.TenantID, nullIfEmpty(e.PersonID), e.EmployeeNo, e.DeviceID, e.Decision, e.Reason, e.Direction)
+		INSERT INTO access_log (tenant_id, person_id, employee_no, device_id, decision, reason, direction, open_method)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+	`, e.TenantID, nullIfEmpty(e.PersonID), e.EmployeeNo, e.DeviceID, e.Decision, e.Reason, e.Direction, e.OpenMethod)
 	return err
 }
 
@@ -257,7 +257,7 @@ func (s *Store) ListAccessLog(ctx context.Context, tenantID string, limit int) (
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
-	q := `SELECT id, COALESCE(tenant_id,''), COALESCE(person_id,''), COALESCE(employee_no,''), COALESCE(device_id,''), decision, COALESCE(reason,''), COALESCE(direction,''), created_at
+	q := `SELECT id, COALESCE(tenant_id,''), COALESCE(person_id,''), COALESCE(employee_no,''), COALESCE(device_id,''), decision, COALESCE(reason,''), COALESCE(direction,''), COALESCE(open_method,''), created_at
 	      FROM access_log`
 	args := []any{}
 	if tenantID != "" {
@@ -273,7 +273,7 @@ func (s *Store) ListAccessLog(ctx context.Context, tenantID string, limit int) (
 	out := []AccessLog{}
 	for rows.Next() {
 		var a AccessLog
-		if err := rows.Scan(&a.ID, &a.TenantID, &a.PersonID, &a.EmployeeNo, &a.DeviceID, &a.Decision, &a.Reason, &a.Direction, &a.CreatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.TenantID, &a.PersonID, &a.EmployeeNo, &a.DeviceID, &a.Decision, &a.Reason, &a.Direction, &a.OpenMethod, &a.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -369,7 +369,7 @@ func (s *Store) EvaluateAccess(ctx context.Context, personID string, when time.T
 // CommitAccess updates state after a decision: credit decrement, inside flag,
 // and the access_log row. Idempotent — safe to call on duplicate events from
 // the camera (though we don't dedupe internally).
-func (s *Store) CommitAccess(ctx context.Context, decision AccessDecision, personID, employeeNo, deviceID, tenantID string) error {
+func (s *Store) CommitAccess(ctx context.Context, decision AccessDecision, personID, employeeNo, deviceID, tenantID, openMethod string) error {
 	if decision.Allow {
 		if decision.PlanType == PlanCredit && decision.Direction == "in" {
 			_, _ = s.DecrementCredit(ctx, personID)
@@ -390,6 +390,7 @@ func (s *Store) CommitAccess(ctx context.Context, decision AccessDecision, perso
 		Decision:   ifElse(decision.Allow, "allow", "deny"),
 		Reason:     decision.Reason,
 		Direction:  decision.Direction,
+		OpenMethod: openMethod,
 	})
 }
 
