@@ -2657,7 +2657,7 @@ AGENT_TOKEN=${credentials.token} \\
                   <td data-label="Agent">
                     <div className="cell-stack">
                       <strong>{a.name || a.id}</strong>
-                      <span className="muted mono small">{a.id}</span>
+                      <span className="muted mono small">{a.id}{a.version ? ` · v${a.version}` : ''}</span>
                     </div>
                   </td>
                   <td data-label="Outlet">

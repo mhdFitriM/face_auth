@@ -15,10 +15,11 @@ import (
 // AgentHub keeps track of connected agents and brokers RPC requests over their
 // WebSocket connections.
 type AgentHub struct {
-	mu      sync.RWMutex
-	agents  map[string]*AgentConn
-	onEvent func(Frame)
-	store   *Store // used by OTAP command transport (see ISAPIClient.doViaOTAP)
+	mu        sync.RWMutex
+	agents    map[string]*AgentConn
+	onEvent   func(Frame)
+	onConnect func(string) // called (in a goroutine) when an agent joins
+	store     *Store       // used by OTAP command transport (see ISAPIClient.doViaOTAP)
 }
 
 type AgentConn struct {
@@ -137,8 +138,12 @@ func (h *AgentHub) Handle(c *websocket.Conn) {
 		existing.markClosed()
 	}
 	h.agents[agentID] = ac
+	connectHook := h.onConnect
 	h.mu.Unlock()
 	log.Printf("[agent-hub] %s connected", agentID)
+	if connectHook != nil {
+		go connectHook(agentID)
+	}
 
 	defer func() {
 		h.mu.Lock()
@@ -240,4 +245,11 @@ func (a *AgentConn) markClosed() {
 // SetEventSink wires a callback invoked when an agent forwards a device event.
 func (h *AgentHub) SetEventSink(fn func(Frame)) {
 	h.onEvent = fn
+}
+
+// SetConnectHook wires a callback invoked (in a new goroutine) each time an
+// agent establishes a new WebSocket connection. Use it to trigger immediate
+// health checks for the agent's devices.
+func (h *AgentHub) SetConnectHook(fn func(agentID string)) {
+	h.onConnect = fn
 }

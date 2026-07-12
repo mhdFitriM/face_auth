@@ -124,7 +124,7 @@ func runDashboardServer(reconnect chan<- struct{}) {
 				return
 			}
 			if !c.Valid() {
-				httpJSON(w, 400, map[string]any{"ok": false, "error": "cloud_url, agent_id, agent_token are required"})
+				httpJSON(w, 400, map[string]any{"ok": false, "error": "cloud_url, agent_id, agent_token, and target device when direct opening is enabled are required"})
 				return
 			}
 			if err := saveConfig(&c); err != nil {
@@ -155,7 +155,7 @@ func runDashboardServer(reconnect chan<- struct{}) {
 			return
 		}
 		if !c.Valid() {
-			httpJSON(w, 400, map[string]any{"ok": false, "error": "cloud_url, agent_id, agent_token are required"})
+			httpJSON(w, 400, map[string]any{"ok": false, "error": "cloud_url, agent_id, agent_token, and target device when direct opening is enabled are required"})
 			return
 		}
 		if err := saveConfig(&c); err != nil {

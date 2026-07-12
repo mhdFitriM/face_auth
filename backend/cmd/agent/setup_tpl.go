@@ -77,6 +77,14 @@ var setupTpl = template.Must(template.New("setup").Parse(`<!doctype html>
       <input id="qr_listen_port" value="{{.Current.QRListenPort}}" placeholder="7771">
       <div class="hint">The companion AHK / HID helper POSTs scans to <code>http://127.0.0.1:&lt;port&gt;/scan</code>. Default 7771.</div>
 
+      <label style="margin-top:14px;display:flex;align-items:center;gap:8px;text-transform:none;font-size:13px;color:var(--text)">
+        <input id="qr_direct_open" type="checkbox" style="width:auto" {{if .Current.QRDirectOpen}}checked{{end}}>
+        FaceAuth QR-only: open the target door after FaceAuth approves the QR
+      </label>
+      <label style="margin-top:10px">Target device ID</label>
+      <input id="qr_target_device" value="{{.Current.QRTargetDevice}}" placeholder="device ID from the admin Devices tab">
+      <div class="hint">Required for direct opening. FaceAuth verifies its issued QR and access policy; Hikvision performs no face or card verification and only receives the open-door command.</div>
+
       {{if eq .OS "linux"}}
       <label style="margin-top:10px">HID device path (Linux only)</label>
       <input id="qr_device" value="{{.Current.QRDevice}}" placeholder="/dev/input/by-id/usb-Scanner-event-kbd">
@@ -151,6 +159,8 @@ const getCfg = () => ({
   qr_strip_prefix:$('qr_strip_prefix').value,
   qr_listen_port: $('qr_listen_port').value.trim(),
   qr_device:      $('qr_device') ? $('qr_device').value.trim() : '',
+  qr_target_device: $('qr_target_device').value.trim(),
+  qr_direct_open: $('qr_direct_open').checked,
 });
 
 $('btn-test').onclick = async () => {

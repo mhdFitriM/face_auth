@@ -33,6 +33,12 @@ func main() {
 
 	hub := internal.NewAgentHub(store)
 
+	// When an agent (re)connects, immediately probe its devices so they flip
+	// online without waiting up to 6 minutes for the next health-check cycle.
+	hub.SetConnectHook(func(agentID string) {
+		internal.CheckDevicesForAgent(ctx, store, hub, agentID)
+	})
+
 	pushApp := internal.NewPushServer(store, cfg, hub)
 	apiApp := internal.NewAPIServer(store, cfg, hub)
 

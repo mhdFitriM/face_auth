@@ -9,10 +9,10 @@ import (
 )
 
 const (
-	deviceHealthInterval      = 2 * time.Minute  // probe cycle — don't hammer cameras
-	deviceHealthOfflineSkip   = 3                // skip N cycles before re-probing known-offline devices
-	pushStaleThreshold        = 5 * time.Minute  // push-SDK: offline after N minutes silence
-	probeTimeout              = 8 * time.Second  // per-device ISAPI probe hard limit
+	deviceHealthInterval    = 2 * time.Minute // probe cycle — don't hammer cameras
+	deviceHealthOfflineSkip = 3               // skip N cycles before re-probing known-offline devices
+	pushStaleThreshold      = 5 * time.Minute // push-SDK: offline after N minutes silence
+	probeTimeout            = 8 * time.Second // per-device ISAPI probe hard limit
 )
 
 // StartDeviceHealthScheduler runs a background loop that:
@@ -120,6 +120,24 @@ func newProbeClient(d *Device, hub *AgentHub) *ISAPIClient {
 		},
 	}
 	return c
+}
+
+// CheckDevicesForAgent immediately probes every device whose effective agent
+// is agentID. Call this when an agent (re)connects so its devices flip online
+// without waiting for the next scheduled health-check cycle.
+func CheckDevicesForAgent(ctx context.Context, store *Store, hub *AgentHub, agentID string) {
+	devices, err := store.ListDevices(ctx)
+	if err != nil {
+		log.Printf("[device-health] agent-connect sweep for %s: %v", agentID, err)
+		return
+	}
+	for _, d := range devices {
+		if d.AgentID != agentID {
+			continue
+		}
+		d := d
+		go checkOneDevice(ctx, store, hub, d)
+	}
 }
 
 func onlineWord(b bool) string {

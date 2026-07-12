@@ -802,6 +802,23 @@ func (s *Store) DeleteCardByNo(ctx context.Context, personID, cardNo string) err
 	return err
 }
 
+func (s *Store) GetPersonByDeviceCard(ctx context.Context, deviceID, cardNo string) (*Person, error) {
+	row := s.PG.QueryRow(ctx, `
+		SELECT p.id, p.name, p.employee_no, p.gender, p.person_type, p.person_role,
+		       p.long_term, p.attendance_only, p.door_right, p.plan_template,
+		       p.valid_begin, p.valid_end, p.metadata, COALESCE(p.qr_token,''), p.created_at
+		FROM cards c JOIN persons p ON p.id=c.person_id
+		WHERE c.device_id=$1 AND c.card_no=$2 LIMIT 1`, deviceID, cardNo)
+	p := &Person{}
+	err := row.Scan(&p.ID, &p.Name, &p.EmployeeNo, &p.Gender, &p.PersonType, &p.PersonRole,
+		&p.LongTerm, &p.AttendanceOnly, &p.DoorRight, &p.PlanTemplate,
+		&p.ValidBegin, &p.ValidEnd, &p.Metadata, &p.QRToken, &p.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	return p, err
+}
+
 // ---------- Face ops ----------
 
 func (s *Store) CreateFace(ctx context.Context, f Face) error {

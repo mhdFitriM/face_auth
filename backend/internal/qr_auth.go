@@ -123,6 +123,59 @@ func (q *QRAuth) Scan(ctx context.Context, qrToken, agentID string) (*QRSession,
 	return q.openSession(ctx, p, devices, "qr", "agent")
 }
 
+func (q *QRAuth) DirectOpen(ctx context.Context, credential, agentID, deviceID string) (*Person, string, error) {
+	if deviceID == "" {
+		return nil, "", errors.New("deviceId required for direct open")
+	}
+	d, err := q.store.GetDevice(ctx, deviceID)
+	if err != nil || d == nil {
+		return nil, "", errors.New("device not found")
+	}
+	if d.AgentID != agentID {
+		return nil, "", errors.New("device is not assigned to this agent")
+	}
+	// Direct-open mode deliberately trusts only QR credentials issued by
+	// face_auth. Hikvision card and face databases are not consulted: after
+	// face_auth verifies identity and access policy, the device is used only as
+	// a relay for the OpenDoor command.
+	var p *Person
+	for _, candidate := range tokenCandidates(credential) {
+		p, err = q.store.GetPersonByQRToken(ctx, candidate)
+		if err != nil {
+			return nil, "", err
+		}
+		if p != nil {
+			break
+		}
+	}
+	if p == nil {
+		return nil, "", errors.New("unknown face_auth QR")
+	}
+	tenantID, _ := q.store.GetPersonTenant(ctx, p.ID)
+	deviceTenantID, _ := q.store.GetDeviceTenant(ctx, deviceID)
+	if tenantID == "" || deviceTenantID == "" || tenantID != deviceTenantID {
+		return nil, "", errors.New("QR person and target device are not in the same tenant")
+	}
+	now := time.Now()
+	if p.ValidBegin != nil && now.Before(*p.ValidBegin) {
+		return nil, "", errors.New("access not started")
+	}
+	if p.ValidEnd != nil && now.After(*p.ValidEnd) {
+		return nil, "", errors.New("access expired")
+	}
+	decision := q.store.EvaluateAccess(ctx, p.ID, now)
+	if !decision.Allow {
+		_ = q.store.CommitAccess(ctx, decision, p.ID, p.EmployeeNo, deviceID, tenantID)
+		return p, decision.Reason, errors.New("access denied: " + decision.Reason)
+	}
+	resp, err := NewISAPIClientForDevice(d, q.hub).OpenDoor(1)
+	if err != nil {
+		return p, resp, err
+	}
+	_ = q.store.CommitAccess(ctx, decision, p.ID, p.EmployeeNo, deviceID, tenantID)
+	return p, resp, nil
+}
+
 // StartFaceAuth opens a face-auth window on a specific device. Behavior depends
 // on the QR-required toggle:
 //
@@ -397,10 +450,10 @@ func extractFaceMatchFromEvent(e Event) (string, bool) {
 	}
 	if v, ok := probe["AccessControllerEvent"]; ok {
 		var ace struct {
-			EmployeeNoString string `json:"employeeNoString"`
-			MajorEventType   int    `json:"majorEventType"`
-			SubEventType     int    `json:"subEventType"`
-			Name             string `json:"name"`
+			EmployeeNoString  string `json:"employeeNoString"`
+			MajorEventType    int    `json:"majorEventType"`
+			SubEventType      int    `json:"subEventType"`
+			Name              string `json:"name"`
 			CurrentVerifyMode string `json:"currentVerifyMode"`
 		}
 		if err := json.Unmarshal(v, &ace); err == nil {

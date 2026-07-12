@@ -11,19 +11,22 @@ import (
 // AgentConfig is persisted at a per-OS standard location so the agent picks
 // it up automatically on subsequent launches.
 type AgentConfig struct {
-	CloudURL      string `json:"cloud_url"`
-	AgentID       string `json:"agent_id"`
-	AgentToken    string `json:"agent_token"`
-	AgentName     string `json:"agent_name"`
-	QRStripPrefix string `json:"qr_strip_prefix,omitempty"`
-	QRStripSuffix string `json:"qr_strip_suffix,omitempty"`
-	QRListenPort  string `json:"qr_listen_port,omitempty"`
-	QRDevice      string `json:"qr_device,omitempty"`
-	QRDeviceAuto  bool   `json:"qr_device_auto,omitempty"`
+	CloudURL       string `json:"cloud_url"`
+	AgentID        string `json:"agent_id"`
+	AgentToken     string `json:"agent_token"`
+	AgentName      string `json:"agent_name"`
+	QRStripPrefix  string `json:"qr_strip_prefix,omitempty"`
+	QRStripSuffix  string `json:"qr_strip_suffix,omitempty"`
+	QRListenPort   string `json:"qr_listen_port,omitempty"`
+	QRDevice       string `json:"qr_device,omitempty"`
+	QRDeviceAuto   bool   `json:"qr_device_auto,omitempty"`
+	QRTargetDevice string `json:"qr_target_device,omitempty"`
+	QRDirectOpen   bool   `json:"qr_direct_open,omitempty"`
 }
 
 func (c *AgentConfig) Valid() bool {
-	return c != nil && c.CloudURL != "" && c.AgentID != "" && c.AgentToken != ""
+	return c != nil && c.CloudURL != "" && c.AgentID != "" && c.AgentToken != "" &&
+		(!c.QRDirectOpen || c.QRTargetDevice != "")
 }
 
 // configPath returns where the config JSON lives for the current user/OS.

@@ -105,6 +105,12 @@ func runConnectionLoop(parent context.Context, reconnect <-chan struct{}) error 
 	if v := getenv("QR_DEVICE", ""); v != "" {
 		cfg.QRDevice = v
 	}
+	if v := getenv("QR_TARGET_DEVICE", ""); v != "" {
+		cfg.QRTargetDevice = v
+	}
+	if v := getenv("QR_DIRECT_OPEN", ""); v != "" {
+		cfg.QRDirectOpen = strings.EqualFold(v, "true") || v == "1"
+	}
 
 	// If still no usable config, wait for the user to fill in the dashboard's
 	// wizard. The dashboard fires `reconnect` once /api/config is saved.
@@ -140,6 +146,8 @@ func runConnectionLoop(parent context.Context, reconnect <-chan struct{}) error 
 	if cfg.QRDeviceAuto {
 		_ = os.Setenv("QR_DEVICE_AUTO", "true")
 	}
+	_ = os.Setenv("QR_TARGET_DEVICE", cfg.QRTargetDevice)
+	_ = os.Setenv("QR_DIRECT_OPEN", fmt.Sprintf("%t", cfg.QRDirectOpen))
 
 	u, err := url.Parse(cloudURL)
 	if err != nil {
@@ -172,7 +180,7 @@ func runConnectionLoop(parent context.Context, reconnect <-chan struct{}) error 
 	} else if strings.HasPrefix(cloudHTTPBase, "wss://") {
 		cloudHTTPBase = "https://" + cloudHTTPBase[len("wss://"):]
 	}
-	scanFn := startQRListener(qrPort, cloudHTTPBase, agentID)
+	scanFn := startQRListener(qrPort, cloudHTTPBase, agentID, agentToken)
 	log.Printf("QR scan listener on http://127.0.0.1:%s/scan", qrPort)
 
 	// On Linux, also read directly from /dev/input/eventN when QR_DEVICE
@@ -245,7 +253,7 @@ func connect(ctx context.Context, dialURL, agentID, agentName string) error {
 
 	// Send hello
 	c.SetWriteDeadline(time.Now().Add(agentWriteTimeout))
-	hello := internal.Frame{Type: "hello", AgentID: agentID, AgentName: agentName, Version: "1.0"}
+	hello := internal.Frame{Type: "hello", AgentID: agentID, AgentName: agentName, Version: "2.1"}
 	if err := c.WriteJSON(hello); err != nil {
 		return err
 	}
@@ -361,9 +369,9 @@ var qrHTTPStarted atomic.Bool
 // the QR HTTP server is running. On reconnects the port stays bound (only one
 // server ever runs); the new scan function is stored in qrScan so the server
 // always forwards to the current cloud URL without rebinding.
-func startQRListener(port, cloudBase, agentID string) scanFunc {
+func startQRListener(port, cloudBase, agentID, agentToken string) scanFunc {
 	httpClient := &http.Client{
-		Timeout: 8 * time.Second,
+		Timeout:   8 * time.Second,
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
 	}
 
@@ -391,7 +399,11 @@ func startQRListener(port, cloudBase, agentID string) scanFunc {
 		if qr == "" {
 			return 400, `{"error":"empty qr"}`
 		}
-		payload, _ := json.Marshal(map[string]string{"qrToken": qr, "agentId": agentID})
+		payload, _ := json.Marshal(map[string]any{
+			"qrToken": qr, "agentId": agentID, "agentToken": agentToken,
+			"deviceId":   getenv("QR_TARGET_DEVICE", ""),
+			"directOpen": strings.EqualFold(getenv("QR_DIRECT_OPEN", "false"), "true"),
+		})
 		req, err := http.NewRequest("POST", cloudBase+"/api/qr-auth/scan", bytes.NewReader(payload))
 		if err != nil {
 			return 500, fmt.Sprintf(`{"error":%q}`, err.Error())
@@ -427,7 +439,9 @@ func startQRListener(port, cloudBase, agentID string) scanFunc {
 				http.Error(w, "POST only", 405)
 				return
 			}
-			var body struct{ QR string `json:"qr"` }
+			var body struct {
+				QR string `json:"qr"`
+			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			s, b := dispatch(body.QR)
 			w.Header().Set("Content-Type", "application/json")
@@ -474,4 +488,3 @@ func redactToken(u string) string {
 	}
 	return parsed.String()
 }
-

@@ -1028,11 +1028,24 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 
 	api.Post("/qr-auth/scan", func(c *fiber.Ctx) error {
 		var body struct {
-			QRToken string `json:"qrToken"`
-			AgentID string `json:"agentId"`
+			QRToken    string `json:"qrToken"`
+			AgentID    string `json:"agentId"`
+			AgentToken string `json:"agentToken"`
+			DeviceID   string `json:"deviceId"`
+			DirectOpen bool   `json:"directOpen"`
 		}
 		if err := json.Unmarshal(c.Body(), &body); err != nil || body.QRToken == "" {
 			return c.Status(400).JSON(fiber.Map{"error": "qrToken required"})
+		}
+		if body.DirectOpen {
+			if !store.VerifyAgentToken(c.Context(), body.AgentID, body.AgentToken) {
+				return c.Status(401).JSON(fiber.Map{"ok": false, "error": "invalid agent credentials"})
+			}
+			p, response, err := qrAuth.DirectOpen(c.Context(), body.QRToken, body.AgentID, body.DeviceID)
+			if err != nil {
+				return c.Status(400).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": response})
+			}
+			return c.JSON(fiber.Map{"ok": true, "opened": true, "deviceId": body.DeviceID, "person": p.Name, "employeeNo": p.EmployeeNo})
 		}
 		s, err := qrAuth.Scan(c.Context(), body.QRToken, body.AgentID)
 		if err != nil {

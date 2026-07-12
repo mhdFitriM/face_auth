@@ -187,7 +187,7 @@ var dashboardTpl = template.Must(template.New("dash").Parse(`<!doctype html>
     <div class="brand">
       <span class="brand-dot"></span>
       <h1>face_auth agent</h1>
-      <span class="platform">{{.OS}}</span>
+      <span class="platform">v2.1 · {{.OS}}</span>
     </div>
     <div class="header-actions">
       <span id="pill" class="status-pill"><span class="dot"></span><span id="pill-text">connecting…</span></span>
@@ -328,6 +328,13 @@ var dashboardTpl = template.Must(template.New("dash").Parse(`<!doctype html>
       <input id="e-prefix" placeholder="e.g. in#">
       <label>Listen port (the watcher posts scans here)</label>
       <input id="e-port" placeholder="7771">
+      <label style="margin-top:14px;display:flex;align-items:center;gap:8px;text-transform:none;font-size:13px;color:var(--text)">
+        <input id="e-direct-open" type="checkbox" style="width:auto">
+        FaceAuth QR-only: open the target door after FaceAuth approves the QR
+      </label>
+      <label>Target device ID</label>
+      <input id="e-target-device" placeholder="device ID from the admin Devices tab">
+      <p class="hint">FaceAuth verifies its issued QR, validity, and access schedule. Hikvision does not verify a face or card; it only receives the open-door command.</p>
       <div class="btn-row">
         <button class="btn primary" onclick="saveConfig()">Save</button>
       </div>
@@ -447,6 +454,8 @@ async function populateSettings() {
   $('e-name').value = cfg.agent_name || '';
   $('e-prefix').value = cfg.qr_strip_prefix || '';
   $('e-port').value = cfg.qr_listen_port || '7771';
+  $('e-target-device').value = cfg.qr_target_device || '';
+  $('e-direct-open').checked = Boolean(cfg.qr_direct_open);
 }
 
 async function saveConfig() {
@@ -457,7 +466,13 @@ async function saveConfig() {
     agent_name: $('e-name').value.trim(),
     qr_strip_prefix: $('e-prefix').value,
     qr_listen_port: $('e-port').value.trim(),
+    qr_target_device: $('e-target-device').value.trim(),
+    qr_direct_open: $('e-direct-open').checked,
   };
+  if (body.qr_direct_open && !body.qr_target_device) {
+    toast('Target device ID is required for direct opening', 'err');
+    return;
+  }
   const r = await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)}).then(r => r.json());
   if (r.ok) {
     toast('Saved. Reconnecting…');
