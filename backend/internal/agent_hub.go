@@ -133,13 +133,21 @@ func (h *AgentHub) Handle(c *websocket.Conn) {
 	}
 
 	h.mu.Lock()
-	if existing, ok := h.agents[agentID]; ok {
-		// Replace stale connection
-		existing.markClosed()
-	}
+	existing := h.agents[agentID]
 	h.agents[agentID] = ac
 	connectHook := h.onConnect
 	h.mu.Unlock()
+
+	if existing != nil {
+		// Send a close frame so the old agent's connect() exits via its reader
+		// error path rather than staying alive on the old TCP socket indefinitely.
+		existing.ws.SetWriteDeadline(time.Now().Add(time.Second))
+		_ = existing.ws.WriteMessage(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseGoingAway, "replaced"),
+		)
+		existing.markClosed()
+	}
 	log.Printf("[agent-hub] %s connected", agentID)
 	if connectHook != nil {
 		go connectHook(agentID)
@@ -192,6 +200,7 @@ func (h *AgentHub) Handle(c *websocket.Conn) {
 	for {
 		_, data, err := c.ReadMessage()
 		if err != nil {
+			log.Printf("[agent-hub] %s reader closed: %v", agentID, err)
 			break
 		}
 		c.SetReadDeadline(time.Now().Add(readTimeout))
