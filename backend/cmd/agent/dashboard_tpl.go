@@ -188,7 +188,7 @@ var dashboardTpl = template.Must(template.New("dash").Parse(`<!doctype html>
     <div class="brand">
       <span class="brand-dot"></span>
       <h1>face_auth agent</h1>
-      <span class="platform">v2.3 · {{.OS}}</span>
+      <span class="platform">v{{.Version}} · {{.OS}}</span>
     </div>
     <div class="header-actions">
       <span id="myt-clock" class="myt-clock" title="Malaysia Time (MYT = UTC+8)"></span>
@@ -228,10 +228,22 @@ var dashboardTpl = template.Must(template.New("dash").Parse(`<!doctype html>
         <div class="kv"><span>Watcher</span><span id="kv-qr-running">—</span></div>
         <div class="kv"><span>Auto-start</span><span id="kv-qr-startup">—</span></div>
         <div class="kv"><span>AutoHotkey</span><span id="kv-qr-ahk">—</span></div>
-        <div class="kv"><span>Listen port</span><span id="kv-port">…</span></div>
+        <div class="kv"><span id="kv-port-label">Listen port</span><span id="kv-port">…</span></div>
         <div class="kv"><span>Strip prefix</span><span id="kv-prefix">…</span></div>
         <div class="btn-row">
           <button class="btn primary" onclick="showTab('qr')">Manage QR watcher</button>
+        </div>
+      </section>
+
+      <section class="card wide">
+        <div class="card-head">
+          <h2>Third-party QR scanner stations</h2>
+          <button class="btn ghost" onclick="loadStations()">Refresh</button>
+        </div>
+        <p class="hint">All configured USB/HID scanner routes on this agent. Each local port is isolated and opens only its assigned Hikvision door.</p>
+        <div id="overview-station-list"><p class="hint">Loading scanner stations…</p></div>
+        <div class="btn-row">
+          <button class="btn primary" onclick="showTab('qr')">Manage scanner stations</button>
         </div>
       </section>
     </div>
@@ -249,19 +261,22 @@ var dashboardTpl = template.Must(template.New("dash").Parse(`<!doctype html>
       <p class="hint"><strong>External USB/HID QR scanners only.</strong> Each station maps one third-party scanner to a door. Do not add the Hikvision device's built-in QR/card scanner here; configure that separately in Admin → Access points using Hikvision mode.</p>
       <div id="station-list"></div>
       <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:14px">
-        <h2 style="margin-bottom:8px">Add station <span class="hint">(maximum 4 per agent)</span></h2>
+        <h2 id="station-form-title" style="margin-bottom:8px">Add station <span class="hint">(maximum 4 per agent)</span></h2>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
           <div>
             <label style="margin-top:0">Station name</label>
             <input id="st-name" placeholder="e.g. Main entrance">
           </div>
           <div>
-            <label style="margin-top:0">Hikvision device ID</label>
-            <input id="st-device" placeholder="from Devices tab in admin">
+            <label style="margin-top:0">Hikvision device — SN (Name)</label>
+            <select id="st-device">
+              <option value="">Loading outlet devices…</option>
+            </select>
           </div>
           <div>
-            <label style="margin-top:0">Door number</label>
+            <label style="margin-top:0">Relay / door ID</label>
             <input id="st-door" type="number" value="1" min="1">
+            <span class="hint">Use 1 for a normal single-relay Hikvision terminal. IN/OUT is selected separately.</span>
           </div>
           <div>
             <label style="margin-top:0">Local HTTP port</label>
@@ -279,6 +294,7 @@ var dashboardTpl = template.Must(template.New("dash").Parse(`<!doctype html>
         </div>
         <div class="btn-row" style="margin-top:10px">
           <button id="btn-add-station" class="btn primary" onclick="addStation()">Add station</button>
+          <button id="btn-cancel-station" class="btn" style="display:none" onclick="cancelEditStation()">Cancel edit</button>
         </div>
       </div>
     </section>
@@ -378,17 +394,20 @@ var dashboardTpl = template.Must(template.New("dash").Parse(`<!doctype html>
 
     <section class="card" style="margin-top:14px">
       <h2>QR scanner</h2>
+      <p id="station-routing-note" class="hint"></p>
       <label>Strip prefix (your scanner adds this before each code)</label>
       <input id="e-prefix" placeholder="e.g. in#">
-      <label>Listen port (the watcher posts scans here)</label>
-      <input id="e-port" placeholder="7771">
-      <label style="margin-top:14px;display:flex;align-items:center;gap:8px;text-transform:none;font-size:13px;color:var(--text)">
-        <input id="e-direct-open" type="checkbox" style="width:auto">
-        FaceAuth QR-only: open the target door after FaceAuth approves the QR
-      </label>
-      <label>Target device ID</label>
-      <input id="e-target-device" placeholder="device ID from the admin Devices tab">
-      <p class="hint">FaceAuth verifies its issued QR, validity, and access schedule. Hikvision does not verify a face or card; it only receives the open-door command.</p>
+      <div id="legacy-route-settings">
+        <label>Legacy single-scanner listen port</label>
+        <input id="e-port" placeholder="7771">
+        <label style="margin-top:14px;display:flex;align-items:center;gap:8px;text-transform:none;font-size:13px;color:var(--text)">
+          <input id="e-direct-open" type="checkbox" style="width:auto">
+          Legacy single-scanner QR-only direct opening
+        </label>
+        <label>Legacy target device ID</label>
+        <input id="e-target-device" placeholder="used only when no scanner stations exist">
+      </div>
+      <p class="hint">In station mode, each bound scanner uses its own local port, Hikvision device, door, and direction.</p>
       <div class="btn-row">
         <button class="btn primary" onclick="saveConfig()">Save</button>
       </div>
@@ -471,6 +490,7 @@ async function refresh() {
       $('kv-prefix').textContent = r.config.qr_strip_prefix || '(none)';
       $('kv-port').textContent   = r.config.qr_listen_port || '7771';
       $('qr-endpoint').textContent = 'http://127.0.0.1:' + (r.config.qr_listen_port || '7771') + '/scan';
+      updateOverviewPortSummary();
     }
   } catch (e) {}
 }
@@ -601,12 +621,43 @@ function scannerLabel(d) {
 
 // ─── Scanner stations ────────────────────────────────────────────
 let _stations = [];
+let _stationDevices = [];
+let _editingStationID = '';
+
+async function loadStationDevices() {
+  try {
+    const r = await fetch('/api/station-devices').then(x => x.json());
+    if (r.error) throw new Error(r.error);
+    _stationDevices = r.devices || [];
+    renderStationDeviceOptions();
+    renderOverviewStations();
+  } catch (e) {
+    $('st-device').innerHTML = '<option value="">Unable to load outlet devices — check agent log</option>';
+  }
+}
+
+function renderStationDeviceOptions() {
+  const select = $('st-device');
+  const selected = select.value;
+  const assigned = new Set(_stations.map(s => String(s.device_id || '').toLowerCase()));
+  const available = _stationDevices.filter(d => !assigned.has(String(d.deviceId).toLowerCase()) || d.deviceId === selected);
+  select.innerHTML = '<option value="">— Select unpaired Hikvision device —</option>' + available.map(d =>
+    '<option value="'+esc(d.deviceId)+'">'+esc(d.deviceId+' ('+(d.name||'Unnamed device')+')'+(d.online?' · online':' · offline'))+'</option>'
+  ).join('');
+  if (available.some(d => d.deviceId === selected)) select.value = selected;
+  if (!_stationDevices.length) select.innerHTML = '<option value="">No devices assigned to this outlet</option>';
+  else if (!available.length) select.innerHTML = '<option value="">All outlet devices already have a scanner</option>';
+}
 
 async function loadStations() {
   try {
     const r = await fetch('/api/stations').then(x => x.json());
     _stations = r.stations || [];
     renderStations();
+    renderOverviewStations();
+    updateOverviewPortSummary();
+    updateRoutingMode();
+    if (_stationDevices.length) renderStationDeviceOptions();
     const addButton = $('btn-add-station');
     if (addButton) {
       addButton.disabled = _stations.length >= 4;
@@ -619,6 +670,69 @@ async function loadStations() {
       portInput.value = String(next);
     }
   } catch (e) {}
+}
+
+function updateOverviewPortSummary() {
+  const label = $('kv-port-label');
+  const value = $('kv-port');
+  if (!label || !value) return;
+  if (!_stations.length) {
+    label.textContent = 'Listen port';
+    return;
+  }
+  const ports = _stations.map(s => Number(s.port)).filter(Boolean).sort((a, b) => a - b);
+  label.textContent = 'Station ports';
+  value.textContent = ports.map(p => ':' + p).join(', ');
+}
+
+function stationDeviceLabel(deviceId) {
+  const device = _stationDevices.find(d => String(d.deviceId).toLowerCase() === String(deviceId).toLowerCase());
+  if (!device) return deviceId || 'Not assigned';
+  return device.deviceId + ' (' + (device.name || 'Unnamed device') + ')';
+}
+
+function renderOverviewStations() {
+  const el = $('overview-station-list');
+  if (!el) return;
+  if (!_stations.length) {
+    el.innerHTML = '<p class="hint">No third-party QR scanner stations configured on this agent.</p>';
+    return;
+  }
+  el.innerHTML = _stations
+    .slice()
+    .sort((a, b) => Number(a.port) - Number(b.port))
+    .map(s => {
+      const bound = s.hardware_id
+        ? '<span class="ok">USB bound</span>'
+        : '<span class="warn">USB not bound</span>';
+      const direction = s.direction ? String(s.direction).toUpperCase() : 'ANY';
+      const debugURL = 'http://127.0.0.1:' + Number(s.port) + '/qrdebug';
+      return '<div style="padding:11px 0;border-bottom:1px solid var(--border)">' +
+        '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">' +
+          '<div style="min-width:0;flex:1">' +
+            '<strong>' + esc(s.name || s.id) + '</strong> · ' + bound +
+            '<div style="font-size:12px;color:var(--muted);margin-top:3px">' +
+              'Port <strong style="color:var(--text)">:' + Number(s.port) + '</strong>' +
+              ' → ' + esc(stationDeviceLabel(s.device_id)) +
+              ' → Door ' + Number(s.door_no || 1) + ' · ' + esc(direction) +
+            '</div>' +
+            (s.hardware_id ? '<div style="font-size:9px;color:var(--muted);word-break:break-all;margin-top:3px">USB/HID: ' + esc(s.hardware_id) + '</div>' : '') +
+          '</div>' +
+          '<a class="btn ghost" href="' + debugURL + '" target="_blank" rel="noopener">Port ' + Number(s.port) + ' debug</a>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+}
+
+function updateRoutingMode() {
+  const stationMode = _stations.length > 0;
+  const legacy = $('legacy-route-settings');
+  const note = $('station-routing-note');
+  if (!legacy || !note) return;
+  legacy.style.display = stationMode ? 'none' : '';
+  note.innerHTML = stationMode
+    ? '<strong class="ok">Per-station routing active.</strong> The global one-port route is disabled. Each scanner must be USB-bound to its station.'
+    : '<strong class="warn">Legacy single-scanner mode.</strong> Add stations for separate scanner-to-gate routing.';
 }
 
 function renderStations() {
@@ -635,32 +749,68 @@ function renderStations() {
         '<span style="font-size:11px;color:var(--muted)">Device: '+esc(s.device_id)+' · Door '+s.door_no+(s.direction?' · '+s.direction:'')+' · Port :'+s.port+'</span>' +
         (s.hardware_id?'<div style="font-size:9px;color:var(--muted);word-break:break-all">USB/HID: '+esc(s.hardware_id)+'</div>':'') +
       '</div>' +
-      '<button class="btn danger" style="flex-shrink:0" onclick="deleteStation(\''+esc(s.id)+'\')">Delete</button>' +
+      '<div class="btn-row" style="margin:0;flex-shrink:0">' +
+        '<button class="btn" onclick="editStation(\''+esc(s.id)+'\')">Edit</button>' +
+        '<button class="btn danger" onclick="deleteStation(\''+esc(s.id)+'\')">Delete</button>' +
+      '</div>' +
     '</div>';
   }).join('');
 }
 
 async function addStation() {
-  if (_stations.length >= 4) { toast('Maximum 4 scanner stations per agent', 'err'); return; }
+  if (!_editingStationID && _stations.length >= 4) { toast('Maximum 4 scanner stations per agent', 'err'); return; }
   const name = $('st-name').value.trim();
-  const device = $('st-device').value.trim();
+  const device = $('st-device').value;
   const door = parseInt($('st-door').value) || 1;
   const port = parseInt($('st-port').value) || 0;
   const dir = $('st-dir').value;
-  if (!device) { toast('Device ID is required', 'err'); return; }
+  if (!device) { toast('Select a Hikvision device', 'err'); return; }
+  if (door > 1 && !confirm('Door ID ' + door + ' is only valid for a multi-door Hikvision controller. Normal face terminals use Door 1. Save Door ' + door + ' anyway?')) return;
+  const existing = _stations.find(s => s.id === _editingStationID);
   const r = await fetch('/api/stations', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({name: name||device, scanner_source:'third_party_usb', device_id: device, door_no: door, direction: dir, port}),
+    body: JSON.stringify({id: _editingStationID, name: name||device, scanner_source:'third_party_usb', hardware_id: existing ? existing.hardware_id : '', device_id: device, door_no: door, direction: dir, port}),
   }).then(x => x.json());
   if (r.ok) {
-    toast('Station added ✓');
-    $('st-name').value = ''; $('st-device').value = ''; $('st-door').value = '1'; $('st-port').value = String(port + 1);
+    toast(_editingStationID ? 'Station updated ✓' : 'Station added ✓');
+    cancelEditStation();
     await loadStations();
     if (agentOS === 'windows') loadScanners();
   } else {
     toast('Failed: ' + r.error, 'err');
   }
+}
+
+function editStation(id) {
+  const s = _stations.find(x => x.id === id);
+  if (!s) return;
+  _editingStationID = s.id;
+  $('st-name').value = s.name || '';
+  $('st-device').value = s.device_id || '';
+  $('st-door').value = String(s.door_no || 1);
+  $('st-port').value = String(s.port || 7771);
+  $('st-dir').value = s.direction || '';
+  $('station-form-title').innerHTML = 'Edit station <span class="hint">· USB binding will be preserved</span>';
+  $('btn-add-station').textContent = 'Save station';
+  $('btn-add-station').disabled = false;
+  $('btn-cancel-station').style.display = '';
+  renderStationDeviceOptions();
+  $('st-device').value = s.device_id || '';
+  $('station-form-title').scrollIntoView({behavior:'smooth', block:'center'});
+}
+
+function cancelEditStation() {
+  _editingStationID = '';
+  $('st-name').value = '';
+  $('st-device').value = '';
+  $('st-door').value = '1';
+  $('st-dir').value = 'in';
+  $('station-form-title').innerHTML = 'Add station <span class="hint">(maximum 4 per agent)</span>';
+  $('btn-add-station').textContent = _stations.length >= 4 ? 'Maximum 4 stations reached' : 'Add station';
+  $('btn-add-station').disabled = _stations.length >= 4;
+  $('btn-cancel-station').style.display = 'none';
+  renderStationDeviceOptions();
 }
 
 async function deleteStation(id) {
@@ -793,6 +943,7 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').cat
 refresh();
 refreshQR();
 loadStations();
+loadStationDevices();
 setInterval(refresh, 2000);
 setInterval(refreshQR, 5000);
 </script>

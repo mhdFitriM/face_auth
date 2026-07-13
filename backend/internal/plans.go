@@ -389,9 +389,9 @@ func (s *Store) EvaluateAccessForDirection(ctx context.Context, personID string,
 // and the access_log row. Idempotent — safe to call on duplicate events from
 // the camera (though we don't dedupe internally).
 type AccessLogContext struct {
-	OutletID, AccessPointID, AccessPointName, AgentID, ScannerID string
-	DoorNo                                                       int
-	MemberName, CredentialMode, DoorResult, CorrelationID        string
+	OutletID, AccessPointID, AccessPointName, AgentID, ScannerID     string
+	DoorNo                                                           int
+	MemberName, CredentialMode, DoorResult, CorrelationID, Direction string
 }
 
 func (s *Store) CommitAccess(ctx context.Context, decision AccessDecision, personID, employeeNo, deviceID, tenantID, openMethod string, details ...AccessLogContext) error {

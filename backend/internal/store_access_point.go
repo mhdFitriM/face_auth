@@ -32,18 +32,24 @@ func validateAccessPointValues(a *AccessPoint) error {
 }
 
 func (s *Store) SaveAccessPoint(ctx context.Context, a AccessPoint) error {
-	if err := validateAccessPointValues(&a); err != nil {
-		return err
-	}
-	var outletTenant, agentTenant, agentOutlet, deviceTenant, deviceOutlet string
-	if err := s.PG.QueryRow(ctx, `SELECT COALESCE(tenant_id,'') FROM branches WHERE id=$1`, a.OutletID).Scan(&outletTenant); err != nil {
+	var outletTenant, outletQRMode, agentTenant, agentOutlet, deviceTenant, deviceOutlet, deviceAccessMode string
+	if err := s.PG.QueryRow(ctx, `SELECT COALESCE(tenant_id,''), COALESCE(qr_mode,'both') FROM branches WHERE id=$1`, a.OutletID).Scan(&outletTenant, &outletQRMode); err != nil {
 		return errors.New("outlet not found")
 	}
 	if err := s.PG.QueryRow(ctx, `SELECT COALESCE(tenant_id,''), COALESCE(branch_id,'') FROM agents WHERE id=$1`, a.AgentID).Scan(&agentTenant, &agentOutlet); err != nil {
 		return errors.New("agent not found")
 	}
-	if err := s.PG.QueryRow(ctx, `SELECT COALESCE(tenant_id,''), COALESCE(branch_id,'') FROM devices WHERE device_id=$1`, a.DeviceID).Scan(&deviceTenant, &deviceOutlet); err != nil {
+	if err := s.PG.QueryRow(ctx, `SELECT COALESCE(tenant_id,''), COALESCE(branch_id,''), COALESCE(access_mode,'normal_qr') FROM devices WHERE device_id=$1`, a.DeviceID).Scan(&deviceTenant, &deviceOutlet, &deviceAccessMode); err != nil {
 		return errors.New("device not found")
+	}
+	a.AuthMode = accessPointAuthModeForDevice(deviceAccessMode)
+	if a.AuthMode == "faceauth_qr" {
+		a.AcceptedQR = normalizeOutletQRMode(outletQRMode, "both")
+	} else {
+		a.AcceptedQR = "both"
+	}
+	if err := validateAccessPointValues(&a); err != nil {
+		return err
 	}
 	if outletTenant == "" || a.TenantID != outletTenant || agentTenant != outletTenant || deviceTenant != outletTenant {
 		return errors.New("access point, outlet, agent, and device must belong to the same merchant")

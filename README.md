@@ -138,9 +138,9 @@ PUT  /api/devices/:id/plan-template/:tplNo     {name?, weekPlanNo}
 
 ---
 
-## QR-via-camera (device-native) — implemented, pending hardware verification
+## QR-via-camera (device-native card QR) — implemented, pending hardware verification
 
-**Goal:** use the **Hikvision device's own camera** to read the user's QR (replacing the third-party USB scanner). The user presents their QR to the terminal and enters.
+**Goal:** in `hikvision_native` mode, use the **Hikvision device's own camera** to read a QR containing the member's enrolled card number. This is separate from FaceAuth static/dynamic QR and does not use the third-party scanner relay.
 
 **Backend ISAPI methods** — [backend/internal/isapi.go](backend/internal/isapi.go):
 
@@ -156,16 +156,16 @@ GET  /api/devices/:id/qr-capability    -> {supported, raw}
 POST /api/devices/:id/qr-scan          {enable: true|false}
 ```
 
-**Admin UI** — a **"Camera QR"** button on each device row opens a modal ([admin/src/App.tsx](admin/src/App.tsx) `QRCameraModal`) that probes firmware support on open, shows supported / not-supported, and lets you enable/disable scanning. Client methods: `api.qrCapability`, `api.setQrScan`.
+**Admin UI** — a **"Hikvision QR"** button appears for native-mode devices and opens a capability/diagnostic modal ([admin/src/App.tsx](admin/src/App.tsx) `QRCameraModal`). Card-number QR generation remains in the member record.
 
 > ⚠️ **Hardware-gated.** An earlier probe found this device reports `QRCode = notSupport` — the V4.38.0 firmware likely can't read QR via its camera. The modal probes capability and shows the result; **Enable** is disabled when the firmware reports no support. The `SetQRScanEnabled` endpoint shape is firmware-dependent and returns the device's raw response. Verify on the live device:
 > ```bash
 > curl -s "http://localhost:8080/api/devices/GM5989885/qr-capability" \
 >   -H "Authorization: Bearer $TOKEN" -H "X-Tenant-Id: ten_default"
 > ```
-> If `supported:false`, fall back to a web/tablet kiosk camera (jsQR → existing `/api/qr-auth/scan`) or the USB scanner. **After enabling, the user's QR must encode their employee number** so the device matches it to the enrolled user.
+> If `supported:false`, use native face/physical card or switch that device to **Normal QR** with a third-party scanner. The Hikvision-native QR payload must be the enrolled `cardNo` exactly.
 
-**Existing scanner QR flow (still available):** third-party USB HID scanner → agent → `/api/qr-auth/scan` → `qrAuth.Scan()` flips the person's validity window to allow → user then verifies by face (QR + face 2FA). See [backend/internal/qr_auth.go](backend/internal/qr_auth.go).
+**Normal QR scanner flow:** third-party USB/HID scanner → agent access point → FaceAuth token validation and access policy → Hikvision `OpenDoor`. Hikvision does not verify the QR in this mode. See [backend/internal/qr_auth.go](backend/internal/qr_auth.go).
 
 ---
 

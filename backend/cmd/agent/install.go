@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // installAsService registers the agent to start automatically with the OS.
@@ -38,12 +39,13 @@ func installAsService(exePath string) (out string, err error) {
 
 func installWindowsService(exePath string) (string, error) {
 	const svc = "face_auth-agent"
+	target := windowsInstalledAgentPath()
 
 	// Try a no-op probe to detect whether we have admin already.
 	probe, _ := exec.Command("sc.exe", "query", svc).CombinedOutput()
 	if !bytes.Contains(probe, []byte("Access is denied")) {
 		// Probably elevated (or service is queryable). Try the direct flow first.
-		out, err := installWindowsServiceDirect(exePath, svc)
+		out, err := installWindowsServiceDirect(exePath, target, svc)
 		if err == nil {
 			return out, nil
 		}
@@ -66,14 +68,19 @@ setlocal
 set LOG=%s
 > "%%LOG%%" echo === face_auth-agent install ===
 sc stop %s    >> "%%LOG%%" 2>&1
+timeout /t 2 /nobreak >nul
+powershell.exe -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'face_auth-agent*.exe' -and $_.ProcessId -ne %d } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" >> "%%LOG%%" 2>&1
 sc delete %s  >> "%%LOG%%" 2>&1
+if not exist "%s" mkdir "%s" >> "%%LOG%%" 2>&1
+copy /Y "%s" "%s" >> "%%LOG%%" 2>&1
+if errorlevel 1 exit /b 1
 sc create %s binPath= "\"%s\" --service" start= auto DisplayName= "face_auth agent" >> "%%LOG%%" 2>&1
 sc description %s "face_auth LAN-side agent" >> "%%LOG%%" 2>&1
 sc failure %s reset= 60 actions= restart/5000/restart/10000/restart/30000 >> "%%LOG%%" 2>&1
 sc start %s   >> "%%LOG%%" 2>&1
 >> "%%LOG%%" echo === done ===
 exit /b 0
-`, logPath, svc, svc, svc, exePath, svc, svc, svc)
+`, logPath, svc, os.Getpid(), svc, filepath.Dir(target), filepath.Dir(target), exePath, target, svc, target, svc, svc, svc)
 	if err := os.WriteFile(batPath, []byte(bat), 0o644); err != nil {
 		return "", fmt.Errorf("write batch: %w", err)
 	}
@@ -100,7 +107,37 @@ exit /b 0
 	return combined, nil
 }
 
-func installWindowsServiceDirect(exePath, svc string) (string, error) {
+// autoUpgradeExistingWindowsService upgrades an already-installed service when
+// a newer downloaded copy is launched interactively. Without this, the old
+// service continues to own port 7780 and the browser misleadingly shows its
+// dashboard (and its Install button would reinstall the old executable).
+func autoUpgradeExistingWindowsService(exePath string) (attempted bool, out string, err error) {
+	if runtime.GOOS != "windows" {
+		return false, "", nil
+	}
+	abs, err := filepath.Abs(exePath)
+	if err != nil {
+		return false, "", err
+	}
+	if strings.EqualFold(abs, windowsInstalledAgentPath()) {
+		return false, "", nil
+	}
+	if err := exec.Command("sc.exe", "query", "face_auth-agent").Run(); err != nil {
+		return false, "", nil
+	}
+	out, err = installWindowsService(abs)
+	return true, out, err
+}
+
+func windowsInstalledAgentPath() string {
+	base := os.Getenv("PROGRAMDATA")
+	if base == "" {
+		base = `C:\ProgramData`
+	}
+	return filepath.Join(base, "face_auth", "face_auth-agent.exe")
+}
+
+func installWindowsServiceDirect(exePath, target, svc string) (string, error) {
 	var buf []byte
 	run := func(args ...string) ([]byte, error) {
 		b, e := exec.Command("sc.exe", args...).CombinedOutput()
@@ -109,8 +146,25 @@ func installWindowsServiceDirect(exePath, svc string) (string, error) {
 		return b, e
 	}
 	_, _ = run("stop", svc)
+	time.Sleep(1500 * time.Millisecond)
+	ps := fmt.Sprintf(`Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'face_auth-agent*.exe' -and $_.ProcessId -ne %d } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`, os.Getpid())
+	if b, _ := exec.Command("powershell.exe", "-NoProfile", "-Command", ps).CombinedOutput(); len(b) > 0 {
+		buf = append(buf, b...)
+	}
 	_, _ = run("delete", svc)
-	binPath := fmt.Sprintf(`"%s" --service`, exePath)
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return string(buf), err
+	}
+	if !strings.EqualFold(exePath, target) {
+		data, err := os.ReadFile(exePath)
+		if err != nil {
+			return string(buf), err
+		}
+		if err := os.WriteFile(target, data, 0o755); err != nil {
+			return string(buf), err
+		}
+	}
+	binPath := fmt.Sprintf(`"%s" --service`, target)
 	if _, err := run("create", svc, "binPath=", binPath, "start=", "auto", "DisplayName=", "face_auth agent"); err != nil {
 		return string(buf), err
 	}

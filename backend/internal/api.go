@@ -94,7 +94,7 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		// hold no dashboard session. The per-person QR token in the body IS the
 		// credential, so this route authenticates itself — same model as the
 		// /api/v1/qr-auth/scan API-key endpoint.
-		if p == "/api/auth/login" || p == "/api/healthz" || p == "/api/qr-auth/scan" || p == "/api/agent/access-points" {
+		if p == "/api/auth/login" || p == "/api/healthz" || p == "/api/qr-auth/scan" || p == "/api/agent/access-points" || p == "/api/agent/devices" {
 			return c.Next()
 		}
 		// /api/v1/* is the third-party surface — it carries its own apiKeyAuth
@@ -822,6 +822,7 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 			ID      string `json:"id"`
 			Name    string `json:"name"`
 			Address string `json:"address"`
+			QRMode  string `json:"qrMode"`
 		}
 		if err := json.Unmarshal(c.Body(), &body); err != nil || strings.TrimSpace(body.Name) == "" {
 			return c.Status(400).JSON(fiber.Map{"error": "name required"})
@@ -829,7 +830,10 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if body.ID == "" {
 			body.ID = "br-" + RandomString(10, charset+hexCharset)
 		}
-		b := Branch{ID: body.ID, TenantID: tid, Name: body.Name, Address: body.Address}
+		if body.QRMode == "" {
+			body.QRMode = "static"
+		}
+		b := Branch{ID: body.ID, TenantID: tid, Name: body.Name, Address: body.Address, QRMode: body.QRMode}
 		if err := store.CreateBranch(c.Context(), b); err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
@@ -837,14 +841,19 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 	})
 
 	api.Put("/branches/:id", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
 		var body struct {
 			Name    string `json:"name"`
 			Address string `json:"address"`
+			QRMode  string `json:"qrMode"`
 		}
 		if err := json.Unmarshal(c.Body(), &body); err != nil {
 			return c.Status(400).JSON(fiber.Map{"error": "bad body"})
 		}
-		if err := store.UpdateBranch(c.Context(), c.Params("id"), body.Name, body.Address); err != nil {
+		if err := store.UpdateBranch(c.Context(), tid, c.Params("id"), body.Name, body.Address, body.QRMode); err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
 		return c.JSON(fiber.Map{"ok": true})
@@ -855,6 +864,172 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
 		return c.JSON(fiber.Map{"ok": true})
+	})
+
+	// ---------- Outlet device groups ----------
+	// Groups are strict tenant/outlet-scoped targets for multi-device face
+	// enrolment. A group push never silently falls back to a single device.
+	api.Get("/device-groups", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		groups, err := store.ListDeviceGroups(c.Context(), tid, c.Query("outletId"))
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(groups)
+	})
+
+	saveDeviceGroup := func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		var body struct {
+			ID        string   `json:"id"`
+			OutletID  string   `json:"outletId"`
+			Name      string   `json:"name"`
+			DeviceIDs []string `json:"deviceIds"`
+		}
+		if err := json.Unmarshal(c.Body(), &body); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "bad body"})
+		}
+		if c.Method() == fiber.MethodPut {
+			body.ID = c.Params("id")
+		}
+		group, err := store.SaveDeviceGroup(c.Context(), tid, DeviceGroup{ID: body.ID, OutletID: body.OutletID, Name: body.Name}, body.DeviceIDs)
+		if err != nil {
+			status := 400
+			if strings.Contains(strings.ToLower(err.Error()), "unique") {
+				status = 409
+			}
+			return c.Status(status).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(group)
+	}
+	api.Post("/device-groups", saveDeviceGroup)
+	api.Put("/device-groups/:id", saveDeviceGroup)
+
+	api.Delete("/device-groups/:id", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		if err := store.DeleteDeviceGroup(c.Context(), tid, c.Params("id")); err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"ok": true})
+	})
+
+	api.Get("/device-groups/:id/readiness", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		group, err := store.GetDeviceGroup(c.Context(), tid, c.Params("id"))
+		if err != nil || group == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "device group not found"})
+		}
+		checks := make([]DeviceReadiness, 0, len(group.Devices))
+		allReady := len(group.Devices) > 0
+		for _, d := range group.Devices {
+			check := checkFaceDeviceReadiness(c.Context(), d, hub)
+			checks = append(checks, check)
+			allReady = allReady && check.Ready
+			if check.Ready {
+				_ = store.SetDeviceOnline(c.Context(), d.DeviceID, check.Model, d.Firmware, true)
+			}
+		}
+		return c.JSON(fiber.Map{"ok": true, "ready": allReady, "group": group, "devices": checks})
+	})
+
+	api.Post("/device-groups/:id/faces", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		group, err := store.GetDeviceGroup(c.Context(), tid, c.Params("id"))
+		if err != nil || group == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "device group not found"})
+		}
+		personID := c.FormValue("personId")
+		person, _ := store.GetPerson(c.Context(), personID)
+		personTenant, _ := store.GetPersonTenant(c.Context(), personID)
+		if person == nil || personTenant != tid {
+			return c.Status(404).JSON(fiber.Map{"error": "person not found in merchant"})
+		}
+		targets := group.Devices
+		if raw := strings.TrimSpace(c.FormValue("deviceIds")); raw != "" {
+			var requested []string
+			if err := json.Unmarshal([]byte(raw), &requested); err != nil {
+				return c.Status(400).JSON(fiber.Map{"error": "deviceIds must be a JSON array"})
+			}
+			allowed := map[string]Device{}
+			for _, d := range group.Devices {
+				allowed[d.DeviceID] = d
+			}
+			targets = []Device{}
+			seen := map[string]bool{}
+			for _, id := range requested {
+				if d, ok := allowed[id]; ok && !seen[id] {
+					targets = append(targets, d)
+					seen[id] = true
+				}
+			}
+		}
+		if len(targets) == 0 {
+			return c.Status(400).JSON(fiber.Map{"error": "no devices selected from this group"})
+		}
+
+		// Strict preflight: if any selected device is known-unready, do not push
+		// to any device. This avoids preventable partial enrolments.
+		checks := make([]DeviceReadiness, 0, len(targets))
+		allReady := true
+		for _, d := range targets {
+			check := checkFaceDeviceReadiness(c.Context(), d, hub)
+			checks = append(checks, check)
+			allReady = allReady && check.Ready
+		}
+		if !allReady {
+			return c.Status(409).JSON(fiber.Map{"ok": false, "ready": false, "error": "all grouped devices must be ready before face enrolment", "devices": checks})
+		}
+
+		fh, err := c.FormFile("file")
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "file (jpeg) required"})
+		}
+		if fh.Size <= 0 || fh.Size > 10*1024*1024 {
+			return c.Status(400).JSON(fiber.Map{"error": "face image must be between 1 byte and 10 MB"})
+		}
+		f, err := fh.Open()
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		defer f.Close()
+		jpeg, err := io.ReadAll(f)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		imageKey := fmt.Sprintf("faces/%s/group-%s-%s.jpg", person.ID, group.ID, uuid.NewString())
+		if err := store.PutObject(c.Context(), imageKey, "image/jpeg", jpeg); err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": "store image: " + err.Error()})
+		}
+
+		results := make([]GroupFaceResult, 0, len(targets))
+		succeeded, failed := 0, 0
+		// Sequential by design: avoids flooding one LAN agent or terminal. Every
+		// device still gets its own deterministic result and failed-only retry.
+		for _, d := range targets {
+			result := enrollPersonFaceOnDevice(c.Context(), store, hub, qrAuth, d, person, jpeg, imageKey)
+			results = append(results, result)
+			if result.OK {
+				succeeded++
+			} else {
+				failed++
+			}
+		}
+		return c.JSON(fiber.Map{"ok": failed == 0, "ready": true, "groupId": group.ID, "groupName": group.Name, "targeted": len(targets), "succeeded": succeeded, "failed": failed, "results": results})
 	})
 
 	// Assign an agent to the outlet. An outlet may own multiple agents, while
@@ -1090,6 +1265,35 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		return c.JSON(enabled)
 	})
 
+	// Agent-scoped Hikvision device picker. An outlet may have multiple agents,
+	// so every device in the agent's merchant + outlet is available; devices
+	// from other merchants or outlets are never returned.
+	api.Get("/agent/devices", func(c *fiber.Ctx) error {
+		agentID, token := c.Query("agentId"), c.Query("token")
+		if !store.VerifyAgentToken(c.Context(), agentID, token) {
+			return c.Status(401).JSON(fiber.Map{"error": "invalid agent credentials"})
+		}
+		tid, outletID, err := store.GetAgentScope(c.Context(), agentID)
+		if err != nil || tid == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "agent has no merchant assignment"})
+		}
+		devices, err := store.ListDevicesByTenant(c.Context(), tid)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		out := []fiber.Map{}
+		for _, d := range devices {
+			inScope := outletID != "" && d.BranchID == outletID
+			if outletID == "" {
+				inScope = d.BranchID == "" && d.AgentID == agentID
+			}
+			if inScope {
+				out = append(out, fiber.Map{"deviceId": d.DeviceID, "name": d.Name, "online": d.Online})
+			}
+		}
+		return c.JSON(out)
+	})
+
 	// List available agent binaries
 	api.Get("/agents/downloads", func(c *fiber.Ctx) error {
 		entries, err := os.ReadDir("/app/agents")
@@ -1109,6 +1313,7 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 				"platform": platform,
 				"label":    label,
 				"size":     info.Size(),
+				"version":  AgentVersion,
 			})
 		}
 		return c.JSON(out)
@@ -1138,7 +1343,11 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if _, err := os.Stat(path); err != nil {
 			return c.Status(404).SendString("not found")
 		}
-		c.Set("Content-Disposition", "attachment; filename="+name)
+		downloadName := strings.Replace(name, "face_auth-agent-", "face_auth-agent-v"+AgentVersion+"-", 1)
+		c.Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+		c.Set("Pragma", "no-cache")
+		c.Set("Expires", "0")
+		c.Set("Content-Disposition", "attachment; filename="+downloadName)
 		c.Set("Content-Type", "application/octet-stream")
 		return c.SendFile(path)
 	})
@@ -1345,6 +1554,9 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 			DoorNo        int    `json:"doorNo"`
 			DirectOpen    bool   `json:"directOpen"`
 			AccessPointID string `json:"accessPointId"`
+			ScannerID     string `json:"scannerId"`
+			ScannerName   string `json:"scannerName"`
+			Direction     string `json:"direction"`
 			CorrelationID string `json:"correlationId"`
 		}
 		if err := json.Unmarshal(c.Body(), &body); err != nil || body.QRToken == "" {
@@ -1354,16 +1566,39 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 			if !store.VerifyAgentToken(c.Context(), body.AgentID, body.AgentToken) {
 				return c.Status(401).JSON(fiber.Map{"ok": false, "error": "invalid agent credentials"})
 			}
+			claimed, claimErr := qrAuth.ClaimScanCorrelation(c.Context(), body.AgentID, body.CorrelationID)
+			if claimErr != nil {
+				log.Printf("[qr-auth] correlation dedupe unavailable: %v", claimErr)
+			} else if !claimed {
+				return c.Status(208).JSON(fiber.Map{"ok": true, "opened": false, "duplicate": true, "deviceId": body.DeviceID, "doorNo": max(body.DoorNo, 1), "correlationId": body.CorrelationID})
+			}
 			if body.AccessPointID != "" {
 				p, point, response, err := qrAuth.DirectOpenAccessPoint(c.Context(), body.QRToken, body.AgentID, body.AccessPointID, body.CorrelationID)
 				if err != nil {
-					return c.Status(400).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": response})
+					result := fiber.Map{"ok": false, "error": err.Error(), "response": response}
+					if p != nil {
+						result["person"] = p.Name
+						result["employeeNo"] = p.EmployeeNo
+					}
+					if point != nil {
+						result["accessPointId"] = point.ID
+						result["deviceId"] = point.DeviceID
+						result["doorNo"] = point.DoorNo
+						result["direction"] = point.Direction
+					}
+					return c.Status(400).JSON(result)
 				}
 				return c.JSON(fiber.Map{"ok": true, "opened": true, "accessPointId": point.ID, "deviceId": point.DeviceID, "doorNo": point.DoorNo, "direction": point.Direction, "person": p.Name, "employeeNo": p.EmployeeNo})
 			}
-			p, response, err := qrAuth.DirectOpen(c.Context(), body.QRToken, body.AgentID, body.DeviceID, body.DoorNo)
+			details := AccessLogContext{AccessPointName: body.ScannerName, AgentID: body.AgentID, ScannerID: body.ScannerID, DoorNo: max(body.DoorNo, 1), CorrelationID: body.CorrelationID, Direction: body.Direction}
+			p, response, err := qrAuth.DirectOpen(c.Context(), body.QRToken, body.AgentID, body.DeviceID, body.DoorNo, details)
 			if err != nil {
-				return c.Status(400).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": response})
+				result := fiber.Map{"ok": false, "error": err.Error(), "response": response, "deviceId": body.DeviceID, "doorNo": max(body.DoorNo, 1), "direction": body.Direction}
+				if p != nil {
+					result["person"] = p.Name
+					result["employeeNo"] = p.EmployeeNo
+				}
+				return c.Status(400).JSON(result)
 			}
 			return c.JSON(fiber.Map{"ok": true, "opened": true, "deviceId": body.DeviceID, "doorNo": max(body.DoorNo, 1), "person": p.Name, "employeeNo": p.EmployeeNo})
 		}
@@ -1923,8 +2158,8 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		return c.JSON(fiber.Map{"ok": true, "response": resp})
 	})
 
-	// Push one person's QR to the device and (optionally) set their
-	// userVerifyMode. Body: {"personId":"...", "mode":"face|faceAndPw|…",
+	// Register one person's enrolled card number as the device-native QR value
+	// and optionally set userVerifyMode. Body: {"personId":"...", "mode":"cardOrFace|…",
 	// "validSec": 43200, "times": 0}. Because DS-K1T671MF v3.7.60's
 	// userVerifyMode enum has no QR value, the device cannot auto-prompt QR
 	// as an auth factor — QR always requires the on-screen "Camera QR" button.
@@ -1945,17 +2180,31 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 			return c.Status(400).JSON(fiber.Map{"error": "personId required"})
 		}
 		if body.Mode == "" {
-			body.Mode = "faceAndQRCode"
+			body.Mode = nativeVerifyMode
+		}
+		if d.AccessMode != DeviceAccessModeHikvisionNative {
+			return c.Status(409).JSON(fiber.Map{"error": "device is Normal QR relay-only; built-in Hikvision QR is disabled"})
 		}
 		p, err := store.GetPerson(c.Context(), body.PersonID)
 		if err != nil || p == nil {
 			return c.Status(404).JSON(fiber.Map{"error": "person not found"})
 		}
-		if p.QRToken == "" {
-			return c.Status(400).JSON(fiber.Map{"error": "person has no QR token — rotate first"})
-		}
 		if p.EmployeeNo == "" {
 			return c.Status(400).JSON(fiber.Map{"error": "person has no employeeNo"})
+		}
+		cards, _ := store.ListCardsByPerson(c.Context(), p.ID)
+		cardNo := ""
+		for _, card := range cards {
+			if card.DeviceID == d.DeviceID {
+				cardNo = card.CardNo
+				break
+			}
+			if cardNo == "" {
+				cardNo = card.CardNo
+			}
+		}
+		if cardNo == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "person has no enrolled card number for Hikvision QR"})
 		}
 		client := NewISAPIClientForDevice(d, hub)
 		// DS-K1T671MF v3.7.60's userVerifyMode enum does NOT include any QR
@@ -1976,11 +2225,11 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		} else {
 			modeSkipped = true
 		}
-		pushResp, err := client.PushQRCodeInfo(p.EmployeeNo, p.QRToken, body.ValidSec, body.Times)
+		pushResp, err := client.PushQRCodeInfo(p.EmployeeNo, cardNo, body.ValidSec, body.Times)
 		if err != nil {
 			return c.Status(502).JSON(fiber.Map{"ok": false, "step": "push-qr", "error": err.Error(), "response": pushResp, "modeResponse": modeResp})
 		}
-		return c.JSON(fiber.Map{"ok": true, "person": p.Name, "employeeNo": p.EmployeeNo, "mode": body.Mode, "modeSkipped": modeSkipped, "pushResponse": pushResp, "modeResponse": modeResp})
+		return c.JSON(fiber.Map{"ok": true, "person": p.Name, "employeeNo": p.EmployeeNo, "cardNo": cardNo, "qrPayload": cardNo, "mode": body.Mode, "modeSkipped": modeSkipped, "pushResponse": pushResp, "modeResponse": modeResp})
 	})
 
 	// Global QR+face 2FA — push every enrolled person's QR to the device and
@@ -1999,7 +2248,10 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		}
 		_ = json.Unmarshal(c.Body(), &body)
 		if body.Mode == "" {
-			body.Mode = "faceAndQRCode"
+			body.Mode = nativeVerifyMode
+		}
+		if d.AccessMode != DeviceAccessModeHikvisionNative {
+			return c.Status(409).JSON(fiber.Map{"error": "device is Normal QR relay-only; built-in Hikvision QR is disabled"})
 		}
 		persons, err := store.ListPersons(c.Context())
 		if err != nil {
@@ -2024,11 +2276,22 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 				}
 			}
 			if wantQR {
-				if p.QRToken == "" {
+				cards, _ := store.ListCardsByPerson(c.Context(), p.ID)
+				cardNo := ""
+				for _, card := range cards {
+					if card.DeviceID == d.DeviceID {
+						cardNo = card.CardNo
+						break
+					}
+					if cardNo == "" {
+						cardNo = card.CardNo
+					}
+				}
+				if cardNo == "" {
 					skipped++
 					continue
 				}
-				if _, err := client.PushQRCodeInfo(p.EmployeeNo, p.QRToken, body.ValidSec, body.Times); err != nil {
+				if _, err := client.PushQRCodeInfo(p.EmployeeNo, cardNo, body.ValidSec, body.Times); err != nil {
 					failed++
 					errs = append(errs, p.EmployeeNo+": push "+err.Error())
 					continue
@@ -2166,6 +2429,13 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 				"deviceResponse": json.RawMessage(safeJSONFromBytes([]byte(resp))),
 				"error":          err.Error(),
 			})
+		}
+		if d.AccessMode == DeviceAccessModeNormalQR {
+			if err := qrAuth.setUserVerifyMode(ctx, d, person, lockedVerifyMode); err != nil {
+				_ = store.UpdateFaceStatus(ctx, face.ID, "failed")
+				face.Status = "failed"
+				return c.Status(502).JSON(fiber.Map{"ok": false, "face": face, "error": "face enrolled but relay-only lock failed: " + err.Error()})
+			}
 		}
 		_ = store.UpdateFaceStatus(ctx, face.ID, "enrolled")
 		face.Status = "enrolled" // keep the returned object in sync with the DB
@@ -2475,6 +2745,54 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		return c.JSON(out)
 	})
 
+	// Authoritative per-device credential path:
+	//   normal_qr         FaceAuth validates a third-party scanner QR and sends
+	//                     only OpenDoor to Hikvision.
+	//   hikvision_native  Hikvision validates face, enrolled cards, and QR
+	//                     payloads containing an enrolled card number.
+	api.Get("/devices/:id/access-mode", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		d, err := store.GetDevice(c.Context(), c.Params("id"))
+		if err != nil || d == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "device not found"})
+		}
+		deviceTenant, _ := store.GetDeviceTenant(c.Context(), d.DeviceID)
+		if deviceTenant != tid {
+			return c.Status(404).JSON(fiber.Map{"error": "device not found in merchant"})
+		}
+		return c.JSON(fiber.Map{"deviceId": d.DeviceID, "accessMode": d.AccessMode})
+	})
+
+	api.Put("/devices/:id/access-mode", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		var body struct {
+			AccessMode string `json:"accessMode"`
+		}
+		if err := json.Unmarshal(c.Body(), &body); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "bad body"})
+		}
+		mode, err := normalizeDeviceAccessMode(body.AccessMode)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		stations, err := store.SetDeviceAccessMode(c.Context(), tid, c.Params("id"), mode)
+		if err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		users, appliedMode, applyErr := qrAuth.ApplyDeviceMode(c.Context(), c.Params("id"))
+		out := fiber.Map{"ok": applyErr == nil, "deviceId": c.Params("id"), "accessMode": mode, "stationsUpdated": stations, "usersUpdated": users, "hikvisionVerifyMode": appliedMode}
+		if applyErr != nil {
+			out["applyError"] = applyErr.Error()
+		}
+		return c.JSON(out)
+	})
+
 	// Manual "apply now" — re-pushes the effective mode to one device.
 	api.Post("/devices/:id/apply-mode", func(c *fiber.Ctx) error {
 		n, mode, err := qrAuth.ApplyDeviceMode(c.Context(), c.Params("id"))
@@ -2704,6 +3022,7 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 				"model":        d.Model,
 				"online":       d.Online,
 				"requireQR2FA": eff,
+				"accessMode":   d.AccessMode,
 				"agentId":      d.AgentID,
 			})
 		}
@@ -3051,6 +3370,13 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 			_ = store.UpdateFaceStatus(ctx, face.ID, "failed")
 			face.Status = "failed" // keep the returned object in sync with the DB
 			return c.Status(502).JSON(fiber.Map{"ok": false, "face": face, "error": err.Error(), "deviceResponse": json.RawMessage(safeJSONFromBytes([]byte(resp)))})
+		}
+		if d.AccessMode == DeviceAccessModeNormalQR {
+			if err := qrAuth.setUserVerifyMode(ctx, d, person, lockedVerifyMode); err != nil {
+				_ = store.UpdateFaceStatus(ctx, face.ID, "failed")
+				face.Status = "failed"
+				return c.Status(502).JSON(fiber.Map{"ok": false, "face": face, "error": "face enrolled but relay-only lock failed: " + err.Error()})
+			}
 		}
 		_ = store.UpdateFaceStatus(ctx, face.ID, "enrolled")
 		face.Status = "enrolled" // keep the returned object in sync with the DB

@@ -136,12 +136,27 @@ type Branch struct {
 	TenantID    string    `json:"tenantId,omitempty"`
 	Name        string    `json:"name"`
 	Address     string    `json:"address,omitempty"`
+	QRMode      string    `json:"qrMode"`              // static | dynamic; both is legacy compatibility
 	AgentID     string    `json:"agentId,omitempty"`   // joined: the branch's agent
 	AgentName   string    `json:"agentName,omitempty"` // joined
 	AgentOnline bool      `json:"agentOnline"`         // live, filled from hub
 	AgentCount  int       `json:"agentCount"`
 	DeviceCount int       `json:"deviceCount"`
 	CreatedAt   time.Time `json:"createdAt"`
+}
+
+// DeviceGroup is an outlet-scoped collection used as one face-enrolment
+// target. Devices may appear in more than one group, but every member must
+// belong to the same merchant and outlet as the group.
+type DeviceGroup struct {
+	ID          string    `json:"id"`
+	TenantID    string    `json:"tenantId,omitempty"`
+	OutletID    string    `json:"outletId"`
+	Name        string    `json:"name"`
+	DeviceCount int       `json:"deviceCount"`
+	Devices     []Device  `json:"devices"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 type Device struct {
@@ -167,6 +182,7 @@ type Device struct {
 	AgentID       string     `json:"agentId,omitempty"`  // effective routing agent: the branch's agent when a branch is set, else the direct assignment
 	BranchID      string     `json:"branchId,omitempty"` // physical site the device belongs to
 	Reach         string     `json:"reach,omitempty"`    // command transport: "direct" | "agent" | "otap" (empty = direct/agent auto)
+	AccessMode    string     `json:"accessMode"`         // normal_qr | hikvision_native
 	CreatedAt     time.Time  `json:"createdAt"`
 
 	// Password is a transient field used only when writing; never serialized

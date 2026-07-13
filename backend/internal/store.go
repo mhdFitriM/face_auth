@@ -242,6 +242,12 @@ ALTER TABLE devices ADD COLUMN IF NOT EXISTS reach TEXT DEFAULT '';
 -- NULL = follow the global setting; TRUE / FALSE = explicit override.
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS require_qr_2fa BOOLEAN;
 
+-- Authoritative per-device credential path. normal_qr means FaceAuth verifies
+-- a third-party scanner token and Hikvision is only an OpenDoor relay.
+-- hikvision_native means the terminal verifies face, enrolled cards, and QR
+-- images whose payload is the enrolled card number.
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS access_mode TEXT NOT NULL DEFAULT 'normal_qr';
+
 -- ============================================================
 --  Multi-tenant tables (added late — existing data lives in a
 --  "default" tenant created on first boot by the seed routine).
@@ -392,12 +398,36 @@ CREATE TABLE IF NOT EXISTS branches (
     address TEXT DEFAULT '',
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
+-- Existing outlets remain permissive until an administrator chooses the new
+-- Static/Dynamic toggle. Newly created outlets default to Static.
+ALTER TABLE branches ADD COLUMN IF NOT EXISTS qr_mode TEXT NOT NULL DEFAULT 'both';
+ALTER TABLE branches ALTER COLUMN qr_mode SET DEFAULT 'static';
 CREATE INDEX IF NOT EXISTS idx_branches_tenant ON branches(tenant_id);
 ALTER TABLE agents  ADD COLUMN IF NOT EXISTS branch_id TEXT;
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS branch_id TEXT;
 DROP INDEX IF EXISTS idx_agents_branch_unique;
 CREATE INDEX IF NOT EXISTS idx_agents_branch ON agents(branch_id);
 CREATE INDEX IF NOT EXISTS idx_devices_branch ON devices(branch_id);
+
+-- Named device groups belong to exactly one merchant outlet. They are used by
+-- bulk face enrolment so Entrance A + Entrance B can be managed as one target.
+CREATE TABLE IF NOT EXISTS device_groups (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    outlet_id TEXT NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(tenant_id, outlet_id, name)
+);
+CREATE TABLE IF NOT EXISTS device_group_members (
+    group_id TEXT NOT NULL REFERENCES device_groups(id) ON DELETE CASCADE,
+    device_id TEXT NOT NULL REFERENCES devices(device_id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY(group_id, device_id)
+);
+CREATE INDEX IF NOT EXISTS idx_device_groups_outlet ON device_groups(tenant_id, outlet_id);
+CREATE INDEX IF NOT EXISTS idx_device_group_members_device ON device_group_members(device_id);
 
 -- Backfill: every pre-branch agent becomes its own branch (deterministic id
 -- 'br-<agent id>' keeps this idempotent), and devices that pointed at the
@@ -435,6 +465,13 @@ CREATE TABLE IF NOT EXISTS access_points (
 );
 CREATE INDEX IF NOT EXISTS idx_access_points_tenant_outlet ON access_points(tenant_id, outlet_id);
 CREATE INDEX IF NOT EXISTS idx_access_points_agent ON access_points(agent_id);
+-- Preserve native terminals when upgrading from the older access-point-only
+-- mode setting. Device-mode changes keep access points synchronized afterward.
+UPDATE devices d SET access_mode='hikvision_native'
+WHERE EXISTS (
+    SELECT 1 FROM access_points ap
+    WHERE ap.device_id=d.device_id AND ap.auth_mode='hikvision'
+);
 CREATE TABLE IF NOT EXISTS person_access_points (
     person_id TEXT NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
     access_point_id TEXT NOT NULL REFERENCES access_points(id) ON DELETE CASCADE,
@@ -488,12 +525,12 @@ func (s *Store) GetDevice(ctx context.Context, deviceID string) (*Device, error)
 	row := s.PG.QueryRow(ctx, `
 		SELECT device_id, name, salt, challenge, iterations, username, digest_type, is_auth,
 		       ip, port, use_https, isapi_username, isapi_password, fdid, face_lib_type,
-		       online, last_seen, model, firmware, `+effectiveAgentSQL+`, COALESCE(branch_id,''), COALESCE(reach,''), created_at
+		       online, last_seen, model, firmware, `+effectiveAgentSQL+`, COALESCE(branch_id,''), COALESCE(reach,''), COALESCE(access_mode,'normal_qr'), created_at
 		FROM devices WHERE device_id=$1`, deviceID)
 	d := &Device{}
 	err := row.Scan(&d.DeviceID, &d.Name, &d.Salt, &d.Challenge, &d.Iterations, &d.Username, &d.DigestType,
 		&d.IsAuth, &d.IP, &d.Port, &d.UseHTTPS, &d.ISAPIUsername, &d.ISAPIPassword, &d.FDID, &d.FaceLibType,
-		&d.Online, &d.LastSeen, &d.Model, &d.Firmware, &d.AgentID, &d.BranchID, &d.Reach, &d.CreatedAt)
+		&d.Online, &d.LastSeen, &d.Model, &d.Firmware, &d.AgentID, &d.BranchID, &d.Reach, &d.AccessMode, &d.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -513,7 +550,7 @@ func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 	rows, err := s.PG.Query(ctx, `
 		SELECT device_id, name, username, digest_type, is_auth,
 		       ip, port, use_https, isapi_username, fdid, face_lib_type,
-		       online, last_seen, model, firmware, `+effectiveAgentSQL+`, COALESCE(branch_id,''), COALESCE(reach,''), created_at
+		       online, last_seen, model, firmware, `+effectiveAgentSQL+`, COALESCE(branch_id,''), COALESCE(reach,''), COALESCE(access_mode,'normal_qr'), created_at
 		FROM devices ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -524,7 +561,7 @@ func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
 		var d Device
 		if err := rows.Scan(&d.DeviceID, &d.Name, &d.Username, &d.DigestType, &d.IsAuth,
 			&d.IP, &d.Port, &d.UseHTTPS, &d.ISAPIUsername, &d.FDID, &d.FaceLibType,
-			&d.Online, &d.LastSeen, &d.Model, &d.Firmware, &d.AgentID, &d.BranchID, &d.Reach, &d.CreatedAt); err != nil {
+			&d.Online, &d.LastSeen, &d.Model, &d.Firmware, &d.AgentID, &d.BranchID, &d.Reach, &d.AccessMode, &d.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, d)

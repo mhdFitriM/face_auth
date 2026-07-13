@@ -457,7 +457,7 @@ function DevicesTab() {
                       <button className="btn-ghost" onClick={() => probe(d.deviceID)}>Probe</button>
                       <button className="btn-ghost" onClick={() => setupAlarm(d.deviceID)}>Events</button>
                       <button className="btn-ghost" onClick={() => setWifiDevice(d)}>Wi-Fi</button>
-                      <button className="btn-ghost" onClick={() => setQrDevice(d)}>Camera QR</button>
+                      {d.accessMode === 'hikvision_native' && <button className="btn-ghost" onClick={() => setQrDevice(d)}>Hikvision QR</button>}
                       <button className="btn-ghost" onClick={() => setHealthDevice(d)}>Health</button>
                       <button className="btn-ghost" onClick={() => setScheduleDevice(d)}>Schedule</button>
                       <button className="btn-ghost" onClick={() => setEditing(d)}>Edit</button>
@@ -647,42 +647,24 @@ function ScheduleModal({ device, onClose }: { device: any; onClose: () => void }
   )
 }
 
-// Probe + toggle device-native QR-code scanning (user shows QR to the device camera).
+// Probe device-native card-number QR support.
 function QRCameraModal({ device, onClose }: { device: any; onClose: () => void }) {
   const id = device.deviceID
-  const [busy, setBusy] = useState<'' | 'probe' | 'on' | 'off' | 'diag' | 'push' | 'all' | 'enc' | 'persons'>('')
+  const [busy, setBusy] = useState<'' | 'probe' | 'diag'>('')
   const [supported, setSupported] = useState<boolean | null>(null)
   const [raw, setRaw] = useState('')
-  const [result, setResult] = useState<any>(null)
   const [err, setErr] = useState('')
   const [diag, setDiag] = useState<Array<{ label: string; method: string; path: string; status: number; body: string; qrHits?: string[]; error?: string }> | null>(null)
-  const [persons, setPersons] = useState<any[]>([])
-  const [personId, setPersonId] = useState('')
-  const [mode, setMode] = useState('face')
-  const [validSec, setValidSec] = useState(43200)
-  const [times, setTimes] = useState(0)
-  const [encKey, setEncKey] = useState('')
-  const [encIV, setEncIV] = useState('')
 
   const probe = async () => {
-    setBusy('probe'); setErr(''); setResult(null)
+    setBusy('probe'); setErr('')
     try {
       const r = await api.qrCapability(id)
       setSupported(!!r.supported); setRaw(r.raw || '')
     } catch (e: any) { setErr(String(e)) } finally { setBusy('') }
   }
 
-  const loadPersons = async () => {
-    setBusy('persons')
-    try {
-      const r = await api.listPersons()
-      const list = (r?.persons || r || []) as any[]
-      setPersons(list)
-      if (!personId && list.length > 0) setPersonId(list[0].id)
-    } catch (e: any) { setErr(String(e)) } finally { setBusy('') }
-  }
-
-  useEffect(() => { probe(); loadPersons() }, [])
+  useEffect(() => { probe() }, [])
 
   const diagnose = async () => {
     setBusy('diag'); setErr(''); setDiag(null)
@@ -692,48 +674,10 @@ function QRCameraModal({ device, onClose }: { device: any; onClose: () => void }
     } catch (e: any) { setErr(String(e)) } finally { setBusy('') }
   }
 
-  const toggle = async (enable: boolean) => {
-    setBusy(enable ? 'on' : 'off'); setErr(''); setResult(null)
-    try { setResult(await api.setQrScan(id, enable)) }
-    catch (e: any) { setErr(String(e)) } finally { setBusy('') }
-  }
-
-  const pushOne = async () => {
-    if (!personId) { setErr('Pick a person first'); return }
-    setBusy('push'); setErr(''); setResult(null)
-    try { setResult(await api.qrPush(id, { personId, mode, validSec, times })) }
-    catch (e: any) { setErr(String(e)) } finally { setBusy('') }
-  }
-
-  const applyAll = async () => {
-    if (!confirm(`Set verifyMode to "${mode}" for EVERY enrolled person on this device? This will overwrite their current verify mode.`)) return
-    setBusy('all'); setErr(''); setResult(null)
-    try { setResult(await api.qrModeAll(id, { mode, validSec, times })) }
-    catch (e: any) { setErr(String(e)) } finally { setBusy('') }
-  }
-
-  const saveEncryption = async () => {
-    if (encKey && encKey.length !== 32) { setErr('Key must be exactly 32 characters'); return }
-    if (encIV && encIV.length !== 32) { setErr('IV must be exactly 32 characters'); return }
-    setBusy('enc'); setErr(''); setResult(null)
-    try { setResult(await api.qrEncryption(id, { key: encKey, iv: encIV })) }
-    catch (e: any) { setErr(String(e)) } finally { setBusy('') }
-  }
-
-  const gen32 = () => {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
-    let s = ''
-    const buf = new Uint32Array(32)
-    crypto.getRandomValues(buf)
-    for (let i = 0; i < 32; i++) s += chars[buf[i] % chars.length]
-    return s
-  }
-
   return (
-    <Modal title={`Camera QR — ${device.name || id}`} onClose={onClose}>
+    <Modal title={`Hikvision card-number QR — ${device.name || id}`} onClose={onClose}>
       <p className="card-sub">
-        Let the device's own camera read a user's QR code and authenticate — no separate USB scanner.
-        Whether this works depends on the device firmware.
+        The device verifies this locally. Enrol a card for the member, then display a QR whose payload is exactly that enrolled card number. Do not use a FaceAuth static or dynamic QR token here.
       </p>
       <div className="detail-row">
         <span className="detail-label">Firmware support</span>
@@ -745,7 +689,7 @@ function QRCameraModal({ device, onClose }: { device: any; onClose: () => void }
         </span>
       </div>
       {supported === false && (
-        <div className="err">This device's firmware reports no camera QR support. Users must use the USB scanner or another method.</div>
+        <div className="err">This firmware reports no camera QR support. Native face and physical card can still work, but card-number QR cannot be used on this terminal.</div>
       )}
       <div className="form-row" style={{ gap: 8, marginTop: 12 }}>
         <button type="button" className="btn-ghost" disabled={!!busy} onClick={probe}>Re-probe</button>
@@ -754,62 +698,10 @@ function QRCameraModal({ device, onClose }: { device: any; onClose: () => void }
         </button>
       </div>
 
-      <div className="form-section-label" style={{ marginTop: 18 }}>Register QR + set verify mode</div>
-      <p className="muted small">
-        Registers this person's QR token on the device so the on-screen <strong>Camera QR</strong> button can
-        authenticate them. Optionally updates their verify mode (face / card / password combinations).
-      </p>
-      <p className="muted small" style={{ padding: 8, background: 'var(--surface-2)', borderRadius: 4 }}>
-        ⚠️ <strong>Firmware limitation:</strong> DS-K1T671MF v3.7.60's <code>userVerifyMode</code> enum has no QR value,
-        so the device cannot auto-prompt the QR scanner as part of user auth. A registered QR is only matched when
-        the user (or operator) presses <strong>Camera QR</strong> on the touchscreen. Confirmed against
-        <code>/UserInfo/capabilities</code>.
-      </p>
-      <div className="form-row" style={{ gap: 8 }}>
-        <select value={personId} onChange={e => setPersonId(e.target.value)} disabled={!!busy}>
-          <option value="">— pick a person —</option>
-          {persons.map(p => (
-            <option key={p.id} value={p.id} disabled={!p.qrToken || !p.employeeNo}>
-              {p.name} ({p.employeeNo || 'no employeeNo'}){!p.qrToken ? ' — no QR token' : ''}
-            </option>
-          ))}
-        </select>
-        <select value={mode} onChange={e => setMode(e.target.value)} disabled={!!busy}>
-          <option value="face">face</option>
-          <option value="faceAndPw">face + password</option>
-          <option value="faceAndCard">face + card</option>
-          <option value="card">card only</option>
-          <option value="cardAndPw">card + password (locked)</option>
-          <option value="cardOrFace">card OR face</option>
-          <option value="cardOrfaceOrPw">card OR face OR password</option>
-        </select>
-        <input type="number" value={validSec} onChange={e => setValidSec(+e.target.value)} min={5} max={43200} title="TTL seconds (5–43200)" style={{ width: 100 }} disabled={!!busy} />
-        <input type="number" value={times} onChange={e => setTimes(+e.target.value)} min={0} max={1000} title="Max uses (0=unlimited; the times field is omitted from the request when 0)" style={{ width: 80 }} disabled={!!busy} />
-      </div>
-      <div className="form-row" style={{ gap: 8, marginTop: 8 }}>
-        <button type="button" className="btn-primary" disabled={!!busy || !personId} onClick={pushOne}>
-          {busy === 'push' ? 'Pushing…' : 'Push + set mode (one person)'}
-        </button>
-        <button type="button" className="btn-ghost" disabled={!!busy} onClick={applyAll}>
-          {busy === 'all' ? 'Applying…' : `Apply "${mode}" to ALL persons`}
-        </button>
-      </div>
-
-      <div className="form-section-label" style={{ marginTop: 18 }}>QR encryption (optional)</div>
-      <p className="muted small">
-        AES128-CBC signs QR strings so only your backend can mint valid QRs. Both fields must be exactly 32 characters.
-        Leave both blank and save to clear.
-      </p>
-      <div className="form-row" style={{ gap: 8 }}>
-        <input value={encKey} onChange={e => setEncKey(e.target.value)} placeholder="key (32 chars)" maxLength={32} style={{ flex: 1 }} disabled={!!busy} />
-        <input value={encIV} onChange={e => setEncIV(e.target.value)} placeholder="iv (32 chars)" maxLength={32} style={{ flex: 1 }} disabled={!!busy} />
-        <button type="button" className="btn-ghost" disabled={!!busy} onClick={() => { setEncKey(gen32()); setEncIV(gen32()) }}>Generate</button>
-        <button type="button" className="btn-primary" disabled={!!busy} onClick={saveEncryption}>
-          {busy === 'enc' ? 'Saving…' : 'Save'}
-        </button>
+      <div className="muted small" style={{ marginTop: 14, padding: 10, background: 'var(--surface-2)', borderRadius: 6 }}>
+        Member setup: choose <strong>Hikvision QR/card</strong>, enrol the card number on this device, and use the card-number QR shown in the member record. The selected device mode applies <code>cardOrFace</code>, so face, physical card, and the same number presented as QR use Hikvision's local verification.
       </div>
       {err && <div className="err">{err}</div>}
-      {result && <pre className="result">{JSON.stringify(result, null, 2)}</pre>}
       {diag && (
         <div style={{ marginTop: 12 }}>
           <div className="muted small" style={{ marginBottom: 6 }}>
@@ -1838,8 +1730,15 @@ function DetailRow({ label, value }: { label: string; value: React.ReactNode }) 
 
 function EnrolTab({ initialPersonId, onConsumeInitial }: { initialPersonId?: string; onConsumeInitial?: () => void } = {}) {
   const [devices, setDevices] = useState<any[]>([])
+  const [outlets, setOutlets] = useState<any[]>([])
+  const [groups, setGroups] = useState<any[]>([])
   const [persons, setPersons] = useState<any[]>([])
+  const [outletId, setOutletId] = useState('')
+  const [targetMode, setTargetMode] = useState<'device' | 'group'>('device')
   const [deviceId, setDeviceId] = useState('')
+  const [groupId, setGroupId] = useState('')
+  const [readiness, setReadiness] = useState<any>(null)
+  const [checkingReady, setCheckingReady] = useState(false)
   const [personId, setPersonId] = useState(initialPersonId || '')
   const [file, setFile] = useState<File | null>(null)
   const [FDID, setFDID] = useState('1')
@@ -1855,18 +1754,40 @@ function EnrolTab({ initialPersonId, onConsumeInitial }: { initialPersonId?: str
   const [cardNo, setCardNo] = useState('')
 
   useEffect(() => {
-    api.listDevices().then((d) => {
+    Promise.all([api.listDevices(), api.listBranches()]).then(([d, o]) => {
       const list = d || []
       setDevices(list)
-      // Pre-select the device: the only one, else the first that's online.
-      if (list.length === 1) setDeviceId(list[0].deviceID)
-      else { const on = list.find((x: any) => x.online); if (on) setDeviceId(on.deviceID) }
-    }).catch(() => setDevices([]))
+      setOutlets(o || [])
+      const firstOutlet = (o || []).find((x: any) => list.some((d: any) => d.branchId === x.id))
+      if (firstOutlet) setOutletId(firstOutlet.id)
+    }).catch(() => { setDevices([]); setOutlets([]) })
     api.listPersons().then((p) => setPersons(p || [])).catch(() => setPersons([]))
     // If we arrived here from a person's "Enrol face" button, clear that
     // hand-off state now that personId has been seeded from it.
     if (initialPersonId) onConsumeInitial?.()
   }, [])
+
+  const outletDevices = devices.filter((d: any) => d.branchId === outletId)
+
+  useEffect(() => {
+    if (!outletId) { setGroups([]); setGroupId(''); return }
+    api.listDeviceGroups(outletId).then((g) => setGroups(g || [])).catch(() => setGroups([]))
+    const current = devices.find((d: any) => d.deviceID === deviceId && d.branchId === outletId)
+    if (!current) {
+      const next = devices.find((d: any) => d.branchId === outletId && d.online) || devices.find((d: any) => d.branchId === outletId)
+      setDeviceId(next?.deviceID || '')
+    }
+    setGroupId(''); setReadiness(null)
+  }, [outletId, devices.length])
+
+  const checkGroup = async (id = groupId) => {
+    if (!id) { setReadiness(null); return }
+    setCheckingReady(true); setErr('')
+    try { setReadiness(await api.deviceGroupReadiness(id)) }
+    catch (e: any) { setReadiness(null); setErr(String(e)) }
+    finally { setCheckingReady(false) }
+  }
+  useEffect(() => { if (targetMode === 'group' && groupId) checkGroup(groupId); else setReadiness(null) }, [targetMode, groupId])
 
   useEffect(() => {
     if (!file) { setPreview(null); return }
@@ -1876,12 +1797,23 @@ function EnrolTab({ initialPersonId, onConsumeInitial }: { initialPersonId?: str
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!deviceId || !file || !personId) { setErr('Pick a device, a person, and a face image'); return }
+    if (!file || !personId || (targetMode === 'device' ? !deviceId : !groupId)) { setErr('Pick a target, a person, and a face image'); return }
+    if (targetMode === 'group' && !readiness?.ready) { setErr('Every device in the group must be ready before enrolment'); return }
     setBusy(true); setErr(''); setResult(null)
     try {
-      const r = await api.enrolFace(deviceId, personId, file, { FDID, faceLibType })
+      const r = targetMode === 'group'
+        ? await api.enrolFaceGroup(groupId, personId, file)
+        : await api.enrolFace(deviceId, personId, file, { FDID, faceLibType })
       setResult(r)
     } catch (e: any) { setErr(String(e)) } finally { setBusy(false) }
+  }
+
+  const retryFailed = async () => {
+    const failedIds = (result?.results || []).filter((r: any) => !r.ok).map((r: any) => r.deviceId)
+    if (!file || !personId || !groupId || failedIds.length === 0) return
+    setBusy(true); setErr('')
+    try { setResult(await api.enrolFaceGroup(groupId, personId, file, failedIds)) }
+    catch (e: any) { setErr(String(e)) } finally { setBusy(false) }
   }
 
   const selectedPerson = persons.find((p) => p.id === personId)
@@ -1905,19 +1837,46 @@ function EnrolTab({ initialPersonId, onConsumeInitial }: { initialPersonId?: str
     <>
       <div className="page-toolbar"><h1 className="page-title">Enrol face</h1></div>
       <div className="grid two-col">
-        <Card title="Push face to device">
-          <p className="card-sub">Sends the person record (with role and validity) to the device, then attaches the face image.</p>
+        <Card title="Push face">
+          <p className="card-sub">Push to one device, or enrol every device in an outlet group with one action.</p>
           <form onSubmit={submit} className="form">
-            <Field label="Device">
+            <Field label="Outlet">
+              <select value={outletId} onChange={(e) => setOutletId(e.target.value)} required>
+                <option value="">— Select outlet —</option>
+                {outlets.map((o: any) => <option key={o.id} value={o.id}>{o.name}</option>)}
+              </select>
+            </Field>
+            <Field label="Push target">
+              <div className="seg">
+                <button type="button" className={targetMode === 'device' ? 'active' : ''} onClick={() => setTargetMode('device')}>Individual device</button>
+                <button type="button" className={targetMode === 'group' ? 'active' : ''} onClick={() => setTargetMode('group')}>Device group</button>
+              </div>
+            </Field>
+            {targetMode === 'device' ? <Field label="Device">
               <select value={deviceId} onChange={(e) => setDeviceId(e.target.value)} required>
-                <option value="">— Select device —</option>
-                {devices.map((d) => (
+                <option value="">— Select outlet device —</option>
+                {outletDevices.map((d) => (
                   <option key={d.deviceID} value={d.deviceID}>
                     {(d.name || d.deviceID) + (d.online ? '  (online)' : '  (offline)')}
                   </option>
                 ))}
               </select>
-            </Field>
+            </Field> : <>
+              <Field label="Device group" hint="The face is pushed to every device listed in the selected group.">
+                <select value={groupId} onChange={(e) => setGroupId(e.target.value)} required>
+                  <option value="">— Select device group —</option>
+                  {groups.map((g: any) => <option key={g.id} value={g.id}>{g.name} · {g.deviceCount} device{g.deviceCount === 1 ? '' : 's'}</option>)}
+                </select>
+              </Field>
+              {groupId && <div style={{ padding: 10, border: '1px solid var(--border)', borderRadius: 6 }}>
+                <div className="small" style={{ marginBottom: 6 }}><strong>{checkingReady ? 'Checking every device…' : readiness?.ready ? 'All devices ready' : 'Group not ready'}</strong></div>
+                {(readiness?.devices || []).map((d: any) => <div key={d.deviceId} className="small" style={{ color: d.ready ? 'var(--ok)' : 'var(--err)', marginTop: 4 }}>
+                  {d.ready ? '✓' : '✗'} {d.name || d.deviceId}{d.reason ? ` · ${d.reason}` : ' · ready'}
+                </div>)}
+                <button type="button" className="btn-ghost" style={{ marginTop: 8 }} disabled={checkingReady} onClick={() => checkGroup()}>Recheck readiness</button>
+              </div>}
+              {!groups.length && outletId && <div className="muted small">No groups yet. Create one from Outlets → Device groups.</div>}
+            </>}
             <Field label="Person">
               <select value={personId} onChange={(e) => setPersonId(e.target.value)} required>
                 <option value="">— Select person —</option>
@@ -1940,14 +1899,14 @@ function EnrolTab({ initialPersonId, onConsumeInitial }: { initialPersonId?: str
               </div>
               {file && <div className="muted small file-info">{file.name} · {(file.size / 1024).toFixed(0)} KB</div>}
             </Field>
-            <div className="form-row">
+            {targetMode === 'device' && <div className="form-row">
               <Field label="FDID"><input value={FDID} onChange={(e) => setFDID(e.target.value)} /></Field>
               <Field label="Face lib type"><input value={faceLibType} onChange={(e) => setFaceLibType(e.target.value)} /></Field>
-            </div>
-            <button type="submit" className="btn-primary" disabled={busy}>{busy ? 'Pushing to device…' : 'Enrol'}</button>
+            </div>}
+            <button type="submit" className="btn-primary" disabled={busy || (targetMode === 'group' && (!readiness?.ready || checkingReady))}>{busy ? 'Pushing face…' : targetMode === 'group' ? `Push face to ${readiness?.devices?.length || 0} devices` : 'Push face to device'}</button>
           </form>
           {err && <div className="err">{err}</div>}
-          {result && <pre className="result">{JSON.stringify(result, null, 2)}</pre>}
+          {result && <><pre className="result">{JSON.stringify(result, null, 2)}</pre>{result.failed > 0 && <button className="btn-ghost" style={{ marginTop: 8 }} disabled={busy} onClick={retryFailed}>Retry failed devices only</button>}</>}
         </Card>
         <Card title="Preview">
           {preview
@@ -1964,6 +1923,12 @@ function EnrolTab({ initialPersonId, onConsumeInitial }: { initialPersonId?: str
             ? <> Card/fingerprint actions bind to <strong>{selectedPerson?.name}</strong> (#{employeeNo}).</>
             : <> Select a person above to bind cards/fingerprints.</>}
         </p>
+        <Field label="Source reader" hint="Live capture/card/fingerprint actions always use one physical reader.">
+          <select value={deviceId} onChange={(e) => setDeviceId(e.target.value)}>
+            <option value="">— Select outlet device —</option>
+            {outletDevices.map((d: any) => <option key={d.deviceID} value={d.deviceID}>{d.name || d.deviceID}{d.online ? ' (online)' : ' (offline)'}</option>)}
+          </select>
+        </Field>
         <div className="form-row" style={{ flexWrap: 'wrap', gap: 8 }}>
           <button type="button" className="btn-ghost" disabled={!!capBusy}
             onClick={() => runCapture('face', () => api.captureFace(deviceId))}>
@@ -2335,6 +2300,7 @@ function BranchesTab() {
   const [agents, setAgents] = useState<any[]>([])
   const [creating, setCreating] = useState(false)
   const [editing, setEditing] = useState<any | null>(null)
+  const [groupOutlet, setGroupOutlet] = useState<any | null>(null)
   const [err, setErr] = useState('')
 
   const load = () => Promise.all([api.listBranches(), api.listAgents()])
@@ -2379,7 +2345,7 @@ function BranchesTab() {
         <div className="table-wrap">
           <table className="data-table">
             <thead>
-              <tr><th>Outlet</th><th>Agent</th><th>Devices</th><th>Created</th><th className="ta-right">Actions</th></tr>
+              <tr><th>Outlet</th><th>FaceAuth QR</th><th>Agent</th><th>Devices</th><th>Created</th><th className="ta-right">Actions</th></tr>
             </thead>
             <tbody>
               {branches.map((b) => (
@@ -2389,6 +2355,9 @@ function BranchesTab() {
                       <strong>{b.name}</strong>
                       <span className="muted mono small">{b.id}{b.address ? ` · ${b.address}` : ''}</span>
                     </div>
+                  </td>
+                  <td data-label="FaceAuth QR">
+                    <span className="badge">{b.qrMode === 'dynamic' ? 'Dynamic' : b.qrMode === 'static' ? 'Static' : 'Static + dynamic'}</span>
                   </td>
                   <td data-label="Agent">
                     {b.agentId ? (
@@ -2414,6 +2383,7 @@ function BranchesTab() {
                   <td data-label="Actions" className="ta-right">
                     <div className="cell-actions">
                       {b.agentId && <button className="btn-ghost" onClick={() => unassign(b)}>Unassign agent</button>}
+                      <button className="btn-ghost" onClick={() => setGroupOutlet(b)}>Device groups</button>
                       <button className="btn-ghost" onClick={() => setEditing(b)}>Edit</button>
                       <button className="btn-danger" onClick={() => del(b)}>Delete</button>
                     </div>
@@ -2421,7 +2391,7 @@ function BranchesTab() {
                 </tr>
               ))}
               {branches.length === 0 && (
-                <tr><td colSpan={5}><div className="empty">No outlets yet. Click "Add outlet" — then assign an agent and attach devices to it.</div></td></tr>
+                <tr><td colSpan={6}><div className="empty">No outlets yet. Click "Add outlet" — then assign an agent and attach devices to it.</div></td></tr>
               )}
             </tbody>
           </table>
@@ -2430,6 +2400,7 @@ function BranchesTab() {
 
       {creating && <BranchModal onClose={() => setCreating(false)} onSaved={() => { setCreating(false); load() }} />}
       {editing && <BranchModal branch={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); load() }} />}
+      {groupOutlet && <DeviceGroupsModal branch={groupOutlet} onClose={() => setGroupOutlet(null)} />}
     </>
   )
 }
@@ -2438,6 +2409,7 @@ function BranchModal({ branch, onClose, onSaved }: { branch?: any; onClose: () =
   const editing = !!branch
   const [name, setName] = useState(branch?.name || '')
   const [address, setAddress] = useState(branch?.address || '')
+  const [qrMode, setQRMode] = useState<'static' | 'dynamic' | 'both'>(branch?.qrMode || 'static')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
 
@@ -2445,8 +2417,8 @@ function BranchModal({ branch, onClose, onSaved }: { branch?: any; onClose: () =
     e.preventDefault()
     setBusy(true); setErr('')
     try {
-      if (editing) await api.updateBranch(branch.id, name, address)
-      else await api.createBranch(name, address)
+      if (editing) await api.updateBranch(branch.id, name, address, qrMode)
+      else await api.createBranch(name, address, qrMode === 'both' ? 'static' : qrMode)
       onSaved()
     } catch (e: any) { setErr(String(e)) } finally { setBusy(false) }
   }
@@ -2460,12 +2432,90 @@ function BranchModal({ branch, onClose, onSaved }: { branch?: any; onClose: () =
         <Field label="Address (optional)">
           <input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="Jalan Stesen Sentral 5" />
         </Field>
+        <Field label="FaceAuth QR mode" hint="Applies to every FaceAuth QR scanner and gate in this outlet. Hikvision-native QR/card mode is unchanged.">
+          <div className="seg">
+            <button type="button" className={qrMode === 'static' ? 'active' : ''} onClick={() => setQRMode('static')}>Static QR</button>
+            <button type="button" className={qrMode === 'dynamic' ? 'active' : ''} onClick={() => setQRMode('dynamic')}>Dynamic QR</button>
+          </div>
+          {qrMode === 'both' && <p className="muted small" style={{ marginTop: 8 }}>This existing outlet currently accepts both modes. Select Static or Dynamic to enforce one mode.</p>}
+        </Field>
         <div className="form-actions">
           <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
           <button type="submit" className="btn-primary" disabled={busy}>{busy ? 'Saving…' : (editing ? 'Save changes' : 'Create outlet')}</button>
         </div>
       </form>
       {err && <div className="err">{err}</div>}
+    </Modal>
+  )
+}
+
+function DeviceGroupsModal({ branch, onClose }: { branch: any; onClose: () => void }) {
+  const [groups, setGroups] = useState<any[]>([])
+  const [devices, setDevices] = useState<any[]>([])
+  const [editing, setEditing] = useState<any | null>(null)
+  const [name, setName] = useState('')
+  const [selected, setSelected] = useState<string[]>([])
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const outletDevices = devices.filter((d: any) => d.branchId === branch.id)
+
+  const load = () => Promise.all([api.listDeviceGroups(branch.id), api.listDevices()])
+    .then(([g, d]) => { setGroups(g || []); setDevices(d || []) })
+    .catch((e) => setErr(String(e)))
+  useEffect(() => { load() }, [branch.id])
+
+  const reset = () => { setEditing(null); setName(''); setSelected([]) }
+  const startEdit = (g: any) => {
+    setEditing(g)
+    setName(g.name || '')
+    setSelected((g.devices || []).map((d: any) => d.deviceID))
+  }
+  const toggleDevice = (id: string) => setSelected((old) => old.includes(id) ? old.filter((x) => x !== id) : [...old, id])
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault(); setBusy(true); setErr('')
+    try {
+      const body = { outletId: branch.id, name: name.trim(), deviceIds: selected }
+      if (editing) await api.updateDeviceGroup(editing.id, body)
+      else await api.createDeviceGroup(body)
+      reset(); await load()
+    } catch (e: any) { setErr(String(e)) } finally { setBusy(false) }
+  }
+  const remove = async (g: any) => {
+    if (!confirm(`Delete device group "${g.name}"? Devices are not deleted.`)) return
+    try { await api.deleteDeviceGroup(g.id); if (editing?.id === g.id) reset(); await load() } catch (e: any) { setErr(String(e)) }
+  }
+
+  return (
+    <Modal title={`Device groups · ${branch.name}`} onClose={onClose}>
+      <p className="card-sub">A face pushed to a group is enrolled on every device currently inside that group.</p>
+      {groups.length > 0 && <div className="table-wrap" style={{ marginBottom: 16 }}>
+        <table className="data-table"><thead><tr><th>Group</th><th>Devices</th><th /></tr></thead><tbody>
+          {groups.map((g: any) => <tr key={g.id}>
+            <td><strong>{g.name}</strong><div className="muted mono small">{g.id}</div></td>
+            <td>{(g.devices || []).map((d: any) => d.name || d.deviceID).join(', ') || '—'}</td>
+            <td className="ta-right"><div className="cell-actions"><button className="btn-ghost" onClick={() => startEdit(g)}>Edit</button><button className="btn-danger" onClick={() => remove(g)}>Delete</button></div></td>
+          </tr>)}
+        </tbody></table>
+      </div>}
+      <form className="form" onSubmit={save}>
+        <Field label={editing ? 'Edit group name' : 'New group name'} hint="e.g. Member entrances or Staff entrance">
+          <input value={name} onChange={(e) => setName(e.target.value)} required placeholder="Member entrances" />
+        </Field>
+        <Field label="Devices in this outlet" hint="Every selected device receives the face when this group is targeted.">
+          <div style={{ display: 'grid', gap: 8 }}>
+            {outletDevices.map((d: any) => <label className="check" key={d.deviceID}>
+              <input type="checkbox" checked={selected.includes(d.deviceID)} onChange={() => toggleDevice(d.deviceID)} />
+              <span><strong>{d.name || d.deviceID}</strong> <span className="muted small">· {d.deviceID} · {d.online ? 'online' : 'offline'}</span></span>
+            </label>)}
+            {outletDevices.length === 0 && <div className="empty">No devices are assigned to this outlet yet.</div>}
+          </div>
+        </Field>
+        {err && <div className="err">{err}</div>}
+        <div className="form-actions">
+          {editing && <button type="button" className="btn-ghost" onClick={reset}>Cancel edit</button>}
+          <button className="btn-primary" disabled={busy || !name.trim() || selected.length === 0}>{busy ? 'Saving…' : editing ? 'Save group' : 'Create device group'}</button>
+        </div>
+      </form>
     </Modal>
   )
 }
@@ -2634,9 +2684,9 @@ AGENT_TOKEN=${credentials.token} \\
         <p className="card-sub">Pre-built for every common platform. Download, drop on your LAN machine, run with the env vars from a new agent.</p>
         <div className="download-grid">
           {downloads.map((d) => (
-            <a key={d.file} className="download-tile" href={api.agentDownloadUrl(d.file)} download>
-              <strong>{d.label}</strong>
-              <span className="muted mono small">{d.file}</span>
+            <a key={d.file} className="download-tile" href={api.agentDownloadUrl(d.file, d.version)} download>
+              <strong>{d.label} · v{d.version}</strong>
+              <span className="muted mono small">face_auth-agent-v{d.version}-{d.platform}{d.platform.startsWith('windows') ? '.exe' : ''}</span>
               <span className="muted small">{(d.size / 1024 / 1024).toFixed(1)} MB</span>
             </a>
           ))}
@@ -3052,7 +3102,6 @@ function Modal({ title, children, onClose }: { title: string; children: React.Re
 function SettingsTab() {
   const [settings, setSettings] = useState<any | null>(null)
   const [devices, setDevices] = useState<any[]>([])
-  const [devOverrides, setDevOverrides] = useState<Record<string, any>>({})
   const [keys, setKeys] = useState<any[]>([])
   const [newKeyName, setNewKeyName] = useState('')
   const [createdKey, setCreatedKey] = useState<any | null>(null)
@@ -3063,11 +3112,6 @@ function SettingsTab() {
     try {
       const [s, ds, ks] = await Promise.all([api.getSettings(), api.listDevices(), api.listAPIKeys()])
       setSettings(s); setDevices(ds || []); setKeys(ks || [])
-      const overrides: Record<string, any> = {}
-      await Promise.all((ds || []).map(async (d: any) => {
-        try { overrides[d.deviceID] = await api.getDeviceRequireQR(d.deviceID) } catch {}
-      }))
-      setDevOverrides(overrides)
     } catch (e: any) { setErr(String(e)) }
   }
   useEffect(() => { load() }, [])
@@ -3092,13 +3136,12 @@ function SettingsTab() {
     } catch (e: any) { setErr(String(e)) } finally { setBusy(false) }
   }
 
-  const setDeviceOverride = async (deviceId: string, value: boolean | null) => {
+  const setDeviceAccessMode = async (deviceId: string, accessMode: 'normal_qr' | 'hikvision_native') => {
     setApplyMsg('')
     try {
-      const r: any = await api.setDeviceRequireQR(deviceId, value)
-      if (typeof r?.appliedToUsers === 'number') {
-        setApplyMsg(`${deviceId}: pushed ${r.appliedMode} to ${r.appliedToUsers} user(s).`)
-      }
+      const r: any = await api.setDeviceAccessMode(deviceId, accessMode)
+      const label = accessMode === 'normal_qr' ? 'Normal QR relay' : 'Hikvision QR / face / card'
+      setApplyMsg(`${deviceId}: ${label}. ${r.stationsUpdated || 0} scanner station(s) synchronized; ${r.usersUpdated || 0} Hikvision user(s) updated.${r.applyError ? ` Device sync warning: ${r.applyError}` : ''}`)
       load()
     } catch (e: any) { setErr(String(e)) }
   }
@@ -3141,20 +3184,10 @@ function SettingsTab() {
       </div>
       {err && <div className="err">{err}</div>}
 
-      <Card title="Authentication policy">
+      <Card title="FaceAuth service">
         <div className="muted small" style={{ marginBottom: 12, lineHeight: 1.5 }}>
-          <strong>How it works:</strong><br />
-          <strong>QR required (ON)</strong> — every user is parked in <code>cardAndPw</code> mode on the device, which is unsatisfiable, so face alone does nothing. The system briefly flips the user to <code>face</code> mode only after a QR scan identifies them.<br />
-          <strong>Face only (OFF)</strong> — every user sits in <code>face</code> mode permanently; walking up and showing a face unlocks the door without any QR.
-          <br /><br />
-          Saving this card pushes the new mode to every device that follows the global setting. Per-device overrides below are unaffected.
+          Device credential behavior is selected per device below. These settings only control the FaceAuth API and session timing.
         </div>
-        <Field label="Require QR before face (global default)" hint="When ON, every user must scan a QR before face will work. When OFF, face matching alone unlocks the door.">
-          <label className="toggle">
-            <input type="checkbox" checked={!!settings.requireQR2FA} onChange={(e) => setSettings({ ...settings, requireQR2FA: e.target.checked })} />
-            <span>{settings.requireQR2FA ? 'QR required' : 'Face only'}</span>
-          </label>
-        </Field>
         <Field label="Face-auth window (seconds)" hint="How long the device stays in face-verify mode after a session opens. 5–60 typical.">
           <input
             type="number"
@@ -3170,29 +3203,29 @@ function SettingsTab() {
           </label>
         </Field>
         <div className="form-actions" style={{ gap: 8 }}>
-          <button className="btn-primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save policy'}</button>
-          <button className="btn-ghost" disabled={busy} onClick={applyAll} title="Re-push current verify mode to every device, without changing the toggle">Re-apply to all devices</button>
+          <button className="btn-primary" disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save service settings'}</button>
+          <button className="btn-ghost" disabled={busy} onClick={applyAll} title="Re-push every device's selected access mode">Re-apply all device modes</button>
         </div>
         {applyMsg && <div className="muted small" style={{ marginTop: 8 }}>{applyMsg}</div>}
       </Card>
 
-      <Card title="Per-device overrides">
+      <Card title="Per-device access mode">
         <div className="muted small" style={{ marginBottom: 12 }}>
-          Per-device override wins over the global default. Choose "Inherit" to follow the global setting.
+          <strong>Normal QR</strong> — a third-party USB/network scanner sends a FaceAuth static or dynamic QR. FaceAuth verifies access, then Hikvision is used only as an <code>OpenDoor</code> relay.<br />
+          <strong>Hikvision QR / face / card</strong> — the terminal verifies enrolled faces and cards itself. Its QR payload is the enrolled <strong>card number</strong>, not a FaceAuth QR token.
         </div>
         <div className="table-wrap">
           <table className="data-table">
             <thead>
               <tr>
                 <th>Device</th>
-                <th>Effective</th>
-                <th className="ta-right">Override</th>
+                <th>Operating path</th>
+                <th className="ta-right">Device setting</th>
               </tr>
             </thead>
             <tbody>
               {devices.map((d) => {
-                const ov = devOverrides[d.deviceID] || {}
-                const current = ov.override === undefined || ov.override === null ? 'inherit' : (ov.override ? 'require' : 'face-only')
+                const current = d.accessMode === 'hikvision_native' ? 'hikvision_native' : 'normal_qr'
                 return (
                   <tr key={d.deviceID}>
                     <td>
@@ -3202,19 +3235,17 @@ function SettingsTab() {
                       </div>
                     </td>
                     <td>
-                      <span className={ov.effectiveRequireQR ? 'badge ok' : 'badge'}>
-                        {ov.effectiveRequireQR ? 'QR required' : 'Face only'}
+                      <span className={current === 'normal_qr' ? 'badge ok' : 'badge'}>
+                        {current === 'normal_qr' ? 'FaceAuth verifies · relay open' : 'Hikvision verifies locally'}
                       </span>
                     </td>
                     <td className="ta-right">
                       <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
                         <select value={current} onChange={(e) => {
-                          const v = e.target.value
-                          setDeviceOverride(d.deviceID, v === 'inherit' ? null : (v === 'require'))
+                          setDeviceAccessMode(d.deviceID, e.target.value as 'normal_qr' | 'hikvision_native')
                         }}>
-                          <option value="inherit">Inherit global</option>
-                          <option value="require">Force require QR</option>
-                          <option value="face-only">Force face-only</option>
+                          <option value="normal_qr">Normal QR (FaceAuth relay)</option>
+                          <option value="hikvision_native">Hikvision QR / face / card</option>
                         </select>
                         <button className="btn-ghost" onClick={() => applyOne(d.deviceID)} title="Re-push the effective mode to this device now">Apply</button>
                       </div>
@@ -3536,9 +3567,9 @@ AGENT_TOKEN=paste-token \\
             ) : (
               <div className="download-grid">
                 {downloads.map((d) => (
-                  <a key={d.file} className="download-tile" href={api.agentDownloadUrl(d.file)} download>
-                    <strong>{d.label}</strong>
-                    <span className="muted mono small">{d.file}</span>
+                  <a key={d.file} className="download-tile" href={api.agentDownloadUrl(d.file, d.version)} download>
+                    <strong>{d.label} · v{d.version}</strong>
+                    <span className="muted mono small">face_auth-agent-v{d.version}-{d.platform}{d.platform.startsWith('windows') ? '.exe' : ''}</span>
                     <span className="muted small">{Math.round(d.size / (1024 * 1024) * 10) / 10} MB</span>
                   </a>
                 ))}
@@ -3839,7 +3870,9 @@ const ENDPOINTS: EndpointDef[] = [
   { method: 'GET', path: '/api/status', group: 'admin — System', summary: 'System status summary', auth: 'admin' },
   { method: 'GET', path: '/api/settings', group: 'admin — Settings', summary: 'Get global settings', auth: 'admin' },
   { method: 'PUT', path: '/api/settings', group: 'admin — Settings', summary: 'Save global settings', auth: 'admin', bodyExample: { requireQR2FA: true, faceAuthWindowSec: 10, publicApiEnabled: true } },
-  { method: 'PUT', path: '/api/devices/:id/require-qr', group: 'admin — Settings', summary: 'Per-device QR override', auth: 'admin', bodyExample: { value: true } },
+  { method: 'GET', path: '/api/devices/:id/access-mode', group: 'admin — Settings', summary: 'Read the device credential authority', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'PUT', path: '/api/devices/:id/access-mode', group: 'admin — Settings', summary: 'Choose FaceAuth QR relay or Hikvision-native face/card/card-number QR', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { accessMode: 'normal_qr' } },
+  { method: 'PUT', path: '/api/devices/:id/require-qr', group: 'admin — Settings', summary: 'Legacy QR-before-face override', auth: 'admin', bodyExample: { value: true } },
   { method: 'GET', path: '/api/api-keys', group: 'admin — API Keys', summary: 'List API keys', auth: 'admin' },
   { method: 'POST', path: '/api/api-keys', group: 'admin — API Keys', summary: 'Create API key (returns plaintext once)', auth: 'admin', bodyExample: { name: 'kiosk' } },
   { method: 'DELETE', path: '/api/api-keys/:id', group: 'admin — API Keys', summary: 'Revoke API key', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
@@ -3859,6 +3892,12 @@ const ENDPOINTS: EndpointDef[] = [
   { method: 'PUT', path: '/api/access-points/:id', group: 'admin — Access topology', summary: 'Update access point settings', auth: 'admin' },
   { method: 'DELETE', path: '/api/access-points/:id', group: 'admin — Access topology', summary: 'Delete access point', auth: 'admin' },
   { method: 'POST', path: '/api/access-points/:id/test', group: 'admin — Access topology', summary: 'Readiness test without opening the door', auth: 'admin' },
+  { method: 'GET', path: '/api/device-groups', group: 'admin — Device groups', summary: 'List outlet-scoped device groups', auth: 'admin', params: [{ name: 'outletId', in: 'query', required: false }] },
+  { method: 'POST', path: '/api/device-groups', group: 'admin — Device groups', summary: 'Create a group from devices in one outlet', auth: 'admin', bodyExample: { outletId: 'outlet-a', name: 'Entrance A and B', deviceIds: ['DEVICE-A', 'DEVICE-B'] } },
+  { method: 'PUT', path: '/api/device-groups/:id', group: 'admin — Device groups', summary: 'Rename a group or replace its device membership', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { outletId: 'outlet-a', name: 'Entrance A and B', deviceIds: ['DEVICE-A', 'DEVICE-B'] } },
+  { method: 'DELETE', path: '/api/device-groups/:id', group: 'admin — Device groups', summary: 'Delete a group without deleting its devices', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'GET', path: '/api/device-groups/:id/readiness', group: 'admin — Device groups', summary: 'Live readiness check for every device before grouped face push', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'POST', path: '/api/device-groups/:id/faces', group: 'admin — Device groups', summary: 'Push one face to every ready device in a group', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'personId', in: 'form', required: true }, { name: 'file', in: 'form', required: true }, { name: 'deviceIds', in: 'form', required: false, description: 'JSON array used to retry failed devices only' }] },
   { method: 'GET', path: '/api/access-log/export.csv', group: 'admin — Reports', summary: 'Export scoped access log as CSV', auth: 'admin' },
   { method: 'GET', path: '/api/reports/access-summary', group: 'admin — Reports', summary: 'Access and occupancy summary', auth: 'admin' },
   { method: 'GET', path: '/api/reports/attendance', group: 'admin — Reports', summary: 'Daily member attendance', auth: 'admin' },
@@ -3910,8 +3949,8 @@ const ENDPOINTS: EndpointDef[] = [
   { method: 'GET', path: '/api/devices/:id/qr-capability', group: 'admin — QR & Intercom', summary: 'Does the camera support QR?', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
   { method: 'POST', path: '/api/devices/:id/qr-scan', group: 'admin — QR & Intercom', summary: 'Enable/disable camera QR scanning', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { enable: true } },
   { method: 'GET', path: '/api/devices/:id/qr-diagnose', group: 'admin — QR & Intercom', summary: 'Sweep every ISAPI namespace where firmwares expose camera QR', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
-  { method: 'POST', path: '/api/devices/:id/qr-push', group: 'admin — QR & Intercom', summary: 'Push one person\'s QR to device + set their verifyMode', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { personId: 'psn_xxx', mode: 'faceAndQRCode', validSec: 43200, times: 0 } },
-  { method: 'POST', path: '/api/devices/:id/qr-mode-all', group: 'admin — QR & Intercom', summary: 'Push all persons\' QRs + set their verifyMode', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { mode: 'faceAndQRCode', validSec: 43200, times: 0 } },
+  { method: 'POST', path: '/api/devices/:id/qr-push', group: 'admin — QR & Intercom', summary: 'Register one enrolled card number as Hikvision-native QR payload', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { personId: 'psn_xxx', mode: 'cardOrFace', validSec: 43200, times: 0 } },
+  { method: 'POST', path: '/api/devices/:id/qr-mode-all', group: 'admin — QR & Intercom', summary: 'Register enrolled card numbers as native QR payloads for all persons', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { mode: 'cardOrFace', validSec: 43200, times: 0 } },
   { method: 'POST', path: '/api/devices/:id/qr-encryption', group: 'admin — QR & Intercom', summary: 'Set AES128-CBC QR verification key/IV (32 chars each)', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { key: '…32 chars…', iv: '…32 chars…' } },
   { method: 'GET', path: '/api/devices/:id/intercom/capabilities', group: 'admin — QR & Intercom', summary: 'VideoIntercom support (isSupportCallSignal)', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
   { method: 'GET', path: '/api/devices/:id/intercom/status', group: 'admin — QR & Intercom', summary: 'Current call status', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
@@ -5416,7 +5455,7 @@ function AccessPointsTab() {
   const [err,setErr]=useState(''),[busy,setBusy]=useState(false)
   const load=()=>Promise.all([api.listAccessPoints(),api.listBranches(),api.listAgents(),api.listDevices()]).then(([p,o,a,d])=>{setPoints(p||[]);setOutlets(o||[]);setAgents(a||[]);setDevices(d||[])}).catch(e=>setErr(String(e)))
   useEffect(()=>{load()},[])
-  const outletAgents=agents.filter((a:any)=>a.branchId===form.outletId), outletDevices=devices.filter((d:any)=>d.branchId===form.outletId)
+  const outletAgents=agents.filter((a:any)=>a.branchId===form.outletId), outletDevices=devices.filter((d:any)=>d.branchId===form.outletId), selectedOutlet=outlets.find((o:any)=>o.id===form.outletId), selectedDevice=devices.find((d:any)=>d.deviceID===form.deviceId)
   const save=async(e:React.FormEvent)=>{e.preventDefault();setBusy(true);setErr('');try{await api.createAccessPoint({...form,scannerPort:Number(form.scannerPort),doorNo:Number(form.doorNo)});setForm({...form,name:'',scannerId:'scanner-1',enabled:false});await load()}catch(e:any){setErr(String(e))}finally{setBusy(false)}}
   return <>
     <div className="page-toolbar"><h1 className="page-title">Access points <span className="muted">· {points.length}</span></h1></div>
@@ -5426,13 +5465,13 @@ function AccessPointsTab() {
         <div className="form-row"><Field label="Outlet"><select required value={form.outletId} onChange={e=>setForm({...form,outletId:e.target.value,agentId:'',deviceId:''})}><option value="">— Select —</option>{outlets.map((o:any)=><option key={o.id} value={o.id}>{o.name}</option>)}</select></Field><Field label="Name"><input required value={form.name} onChange={e=>setForm({...form,name:e.target.value})} placeholder="Front entry"/></Field></div>
         <div className="form-row"><Field label="Agent"><select required value={form.agentId} onChange={e=>setForm({...form,agentId:e.target.value})}><option value="">— Select outlet agent —</option>{outletAgents.map((a:any)=><option key={a.id} value={a.id}>{a.name||a.id}{a.online?' (online)':''}</option>)}</select></Field><Field label="Device"><select required value={form.deviceId} onChange={e=>setForm({...form,deviceId:e.target.value})}><option value="">— Select outlet device —</option>{outletDevices.map((d:any)=><option key={d.deviceID} value={d.deviceID}>{d.name||d.deviceID}</option>)}</select></Field></div>
         <div className="form-row"><Field label="Scanner ID"><input required value={form.scannerId} onChange={e=>setForm({...form,scannerId:e.target.value})}/></Field><Field label="Listener port"><input type="number" min={1} max={65535} value={form.scannerPort} onChange={e=>setForm({...form,scannerPort:e.target.value})}/></Field><Field label="Door"><input type="number" min={1} max={32} value={form.doorNo} onChange={e=>setForm({...form,doorNo:e.target.value})}/></Field></div>
-        <div className="form-row"><Field label="Direction"><select value={form.direction} onChange={e=>setForm({...form,direction:e.target.value})}><option value="in">Entry</option><option value="out">Exit</option><option value="bidirectional">Bidirectional</option></select></Field><Field label="Authentication"><select value={form.authMode} onChange={e=>setForm({...form,authMode:e.target.value})}><option value="disabled">Disabled</option><option value="faceauth_qr">FaceAuth QR relay</option><option value="hikvision">Hikvision native</option></select></Field><Field label="Accepted FaceAuth QR"><select disabled={form.authMode!=='faceauth_qr'} value={form.acceptedQr} onChange={e=>setForm({...form,acceptedQr:e.target.value})}><option value="both">Static + dynamic</option><option value="static">Static only</option><option value="dynamic">Dynamic only</option></select></Field></div>
+        <div className="form-row"><Field label="Direction"><select value={form.direction} onChange={e=>setForm({...form,direction:e.target.value})}><option value="in">Entry</option><option value="out">Exit</option><option value="bidirectional">Bidirectional</option></select></Field><Field label="Authentication path"><div className="muted small" style={{padding:'10px 0'}}>{!selectedDevice?'Select a device':selectedDevice.accessMode==='hikvision_native'?'Hikvision verifies face, card, or card-number QR':'Normal QR · FaceAuth verifies and sends OpenDoor'}</div></Field><Field label="QR policy"><div className="muted small" style={{padding:'10px 0'}}>{selectedDevice?.accessMode==='hikvision_native'?'Card number encoded as QR':selectedOutlet?.qrMode==='dynamic'?'Dynamic FaceAuth QR · outlet policy':selectedOutlet?.qrMode==='static'?'Static FaceAuth QR · outlet policy':'Static + dynamic FaceAuth QR · outlet policy'}</div></Field></div>
         <label className="check"><input type="checkbox" checked={form.rejectionSound} onChange={e=>setForm({...form,rejectionSound:e.target.checked})}/><span>Rejection sound</span></label>
         <label className="check"><input type="checkbox" checked={form.enabled} onChange={e=>setForm({...form,enabled:e.target.checked})}/><span>Enable immediately</span></label>
         <button className="btn-primary" disabled={busy}>{busy?'Saving…':'Create access point'}</button>
       </form>
     </Card>
-    <Card title="Outlet topology"><div className="table-wrap"><table className="data-table"><thead><tr><th>Access point</th><th>Outlet</th><th>Agent / scanner</th><th>Device / door</th><th>Mode</th><th>Direction</th><th>Status</th><th/></tr></thead><tbody>{points.map((p:any)=><tr key={p.id}><td><strong>{p.name}</strong><div className="muted mono small">{p.id}</div></td><td>{outlets.find((o:any)=>o.id===p.outletId)?.name||p.outletId}</td><td>{p.agentId}<div className="muted small">{p.scannerId} · :{p.scannerPort}</div></td><td>{p.deviceId}<div className="muted small">door {p.doorNo}</div></td><td>{p.authMode}{p.authMode==='faceauth_qr'&&<div className="muted small">{p.acceptedQr}</div>}</td><td>{p.direction}</td><td><span className={`badge ${p.enabled&&p.agentOnline?'ok':''}`}>{p.enabled?(p.agentOnline?'online':'agent offline'):'disabled'}</span></td><td><button className="btn-danger" onClick={async()=>{if(confirm(`Delete ${p.name}?`)){await api.deleteAccessPoint(p.id);load()}}}>Delete</button></td></tr>)}</tbody></table></div></Card>
+    <Card title="Outlet topology"><div className="table-wrap"><table className="data-table"><thead><tr><th>Access point</th><th>Outlet</th><th>Agent / scanner</th><th>Device / door</th><th>Mode</th><th>Direction</th><th>Status</th><th/></tr></thead><tbody>{points.map((p:any)=><tr key={p.id}><td><strong>{p.name}</strong><div className="muted mono small">{p.id}</div></td><td>{outlets.find((o:any)=>o.id===p.outletId)?.name||p.outletId}</td><td>{p.agentId}<div className="muted small">{p.scannerId} · :{p.scannerPort}</div></td><td>{p.deviceId}<div className="muted small">door {p.doorNo}</div></td><td>{p.authMode==='hikvision'?'Hikvision native':'Normal QR relay'}<div className="muted small">{p.authMode==='faceauth_qr'?`${outlets.find((o:any)=>o.id===p.outletId)?.qrMode||p.acceptedQr} FaceAuth QR`:'card-number QR / face / card'}</div></td><td>{p.direction}</td><td><span className={`badge ${p.enabled&&p.agentOnline?'ok':''}`}>{p.enabled?(p.agentOnline?'online':'agent offline'):'disabled'}</span></td><td><button className="btn-danger" onClick={async()=>{if(confirm(`Delete ${p.name}?`)){await api.deleteAccessPoint(p.id);load()}}}>Delete</button></td></tr>)}</tbody></table></div></Card>
   </>
 }
 

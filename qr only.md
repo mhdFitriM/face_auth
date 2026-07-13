@@ -22,6 +22,15 @@ Do not combine FaceAuth QR-only with Hikvision QR/card authentication for the sa
 - FaceAuth generates the Card QR with the enrolled Hikvision `cardNo` as its exact payload.
 - The connected device advertises `cardNo` length `1..20`; FaceAuth rejects longer values before enrollment or QR generation.
 
+## Per-device access mode
+
+Choose the authoritative path under **Settings → Per-device access mode**. The setting is merchant-scoped and stored on the device.
+
+- **Normal QR (FaceAuth relay)** maps linked scanner stations to `faceauth_qr`. FaceAuth accepts only its own static/dynamic token, evaluates access, and sends `OpenDoor`. Native Hikvision users are kept locked so face, card, and built-in camera QR cannot bypass FaceAuth.
+- **Hikvision QR / face / card** maps linked stations to `hikvision`, blocks the third-party FaceAuth direct-open path, and applies `cardOrFace` to enrolled users. Physical card and a QR containing that same enrolled `cardNo` are the same native credential.
+
+Changing the mode updates all access points targeting that device and reapplies the matching user verification baseline. It never enables a disabled station and never opens a door.
+
 ## Access flow
 
 1. A member presents a FaceAuth-issued QR to the USB scanner connected to the agent PC.

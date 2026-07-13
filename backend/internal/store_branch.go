@@ -34,25 +34,51 @@ func (s *Store) CreateBranch(ctx context.Context, b Branch) error {
 	if strings.TrimSpace(b.Name) == "" {
 		return errors.New("branch name required")
 	}
+	b.QRMode = normalizeOutletQRMode(b.QRMode, "static")
 	_, err := s.PG.Exec(ctx, `
-		INSERT INTO branches (id, tenant_id, name, address)
-		VALUES ($1, NULLIF($2,''), $3, $4)
-		ON CONFLICT (id) DO UPDATE SET name=$3, address=$4
-	`, b.ID, b.TenantID, b.Name, b.Address)
+		INSERT INTO branches (id, tenant_id, name, address, qr_mode)
+		VALUES ($1, NULLIF($2,''), $3, $4, $5)
+		ON CONFLICT (id) DO UPDATE SET name=$3, address=$4, qr_mode=$5
+	`, b.ID, b.TenantID, b.Name, b.Address, b.QRMode)
 	return err
 }
 
-func (s *Store) UpdateBranch(ctx context.Context, id, name, address string) error {
+func normalizeOutletQRMode(mode, fallback string) string {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "static" || mode == "dynamic" || mode == "both" {
+		return mode
+	}
+	return fallback
+}
+
+func (s *Store) UpdateBranch(ctx context.Context, tenantID, id, name, address, qrMode string) error {
 	if strings.TrimSpace(name) == "" {
 		return errors.New("branch name required")
 	}
-	_, err := s.PG.Exec(ctx, `UPDATE branches SET name=$1, address=$2 WHERE id=$3`, name, address, id)
-	return err
+	qrMode = normalizeOutletQRMode(qrMode, "static")
+	tx, err := s.PG.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	result, err := tx.Exec(ctx, `UPDATE branches SET name=$1, address=$2, qr_mode=$3 WHERE id=$4 AND tenant_id=$5`, name, address, qrMode, id, tenantID)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return errors.New("outlet not found in merchant")
+	}
+	// Outlet policy is authoritative for every FaceAuth access point. Hikvision
+	// native/card points remain untouched because they do not consume FaceAuth QR.
+	if _, err = tx.Exec(ctx, `UPDATE access_points SET accepted_qr=$1, updated_at=NOW() WHERE outlet_id=$2 AND tenant_id=$3 AND auth_mode='faceauth_qr'`, qrMode, id, tenantID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Store) GetBranch(ctx context.Context, id string) (*Branch, error) {
 	row := s.PG.QueryRow(ctx, `
-		SELECT b.id, COALESCE(b.tenant_id,''), b.name, COALESCE(b.address,''), b.created_at,
+		SELECT b.id, COALESCE(b.tenant_id,''), b.name, COALESCE(b.address,''), COALESCE(b.qr_mode,'both'), b.created_at,
 		       COALESCE((SELECT a.id FROM agents a WHERE a.branch_id=b.id ORDER BY a.created_at LIMIT 1),''),
 		       COALESCE((SELECT a.name FROM agents a WHERE a.branch_id=b.id ORDER BY a.created_at LIMIT 1),''),
 		       (SELECT COUNT(*) FROM agents a WHERE a.branch_id=b.id),
@@ -60,7 +86,7 @@ func (s *Store) GetBranch(ctx context.Context, id string) (*Branch, error) {
 		FROM branches b
 		WHERE b.id=$1`, id)
 	b := &Branch{}
-	err := row.Scan(&b.ID, &b.TenantID, &b.Name, &b.Address, &b.CreatedAt, &b.AgentID, &b.AgentName, &b.AgentCount, &b.DeviceCount)
+	err := row.Scan(&b.ID, &b.TenantID, &b.Name, &b.Address, &b.QRMode, &b.CreatedAt, &b.AgentID, &b.AgentName, &b.AgentCount, &b.DeviceCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -69,7 +95,7 @@ func (s *Store) GetBranch(ctx context.Context, id string) (*Branch, error) {
 
 func (s *Store) ListBranchesByTenant(ctx context.Context, tenantID string) ([]Branch, error) {
 	rows, err := s.PG.Query(ctx, `
-		SELECT b.id, COALESCE(b.tenant_id,''), b.name, COALESCE(b.address,''), b.created_at,
+		SELECT b.id, COALESCE(b.tenant_id,''), b.name, COALESCE(b.address,''), COALESCE(b.qr_mode,'both'), b.created_at,
 		       COALESCE((SELECT a.id FROM agents a WHERE a.branch_id=b.id ORDER BY a.created_at LIMIT 1),''),
 		       COALESCE((SELECT a.name FROM agents a WHERE a.branch_id=b.id ORDER BY a.created_at LIMIT 1),''),
 		       (SELECT COUNT(*) FROM agents a WHERE a.branch_id=b.id),
@@ -84,7 +110,7 @@ func (s *Store) ListBranchesByTenant(ctx context.Context, tenantID string) ([]Br
 	out := []Branch{}
 	for rows.Next() {
 		var b Branch
-		if err := rows.Scan(&b.ID, &b.TenantID, &b.Name, &b.Address, &b.CreatedAt, &b.AgentID, &b.AgentName, &b.AgentCount, &b.DeviceCount); err != nil {
+		if err := rows.Scan(&b.ID, &b.TenantID, &b.Name, &b.Address, &b.QRMode, &b.CreatedAt, &b.AgentID, &b.AgentName, &b.AgentCount, &b.DeviceCount); err != nil {
 			return nil, err
 		}
 		out = append(out, b)

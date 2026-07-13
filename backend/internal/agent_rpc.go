@@ -1,23 +1,27 @@
 package internal
 
+// AgentVersion is shared by the agent hello frame and the server's bundled
+// download metadata so the UI and executable always advertise one version.
+const AgentVersion = "2.4.7"
+
 // Frame is the wire envelope sent between cloud and agent over WebSocket.
 // Bodies are byte slices — Go's json encoder base64-encodes them automatically.
 type Frame struct {
-	Type        string            `json:"type"` // hello | req | resp | ping | pong | event
-	ID          string            `json:"id,omitempty"`
-	AgentID     string            `json:"agentId,omitempty"`
-	AgentName   string            `json:"agentName,omitempty"`
-	Version     string            `json:"version,omitempty"`
+	Type      string `json:"type"` // hello | req | resp | ping | pong | event
+	ID        string `json:"id,omitempty"`
+	AgentID   string `json:"agentId,omitempty"`
+	AgentName string `json:"agentName,omitempty"`
+	Version   string `json:"version,omitempty"`
 
 	// Request fields (cloud → agent)
-	DeviceID    string            `json:"deviceId,omitempty"`
-	BaseURL     string            `json:"baseUrl,omitempty"` // http(s)://ip:port
-	Username    string            `json:"username,omitempty"`
-	Password    string            `json:"password,omitempty"`
-	Method      string            `json:"method,omitempty"`
-	Path        string            `json:"path,omitempty"`
-	ContentType string            `json:"contentType,omitempty"`
-	Body        []byte            `json:"body,omitempty"`
+	DeviceID    string `json:"deviceId,omitempty"`
+	BaseURL     string `json:"baseUrl,omitempty"` // http(s)://ip:port
+	Username    string `json:"username,omitempty"`
+	Password    string `json:"password,omitempty"`
+	Method      string `json:"method,omitempty"`
+	Path        string `json:"path,omitempty"`
+	ContentType string `json:"contentType,omitempty"`
+	Body        []byte `json:"body,omitempty"`
 
 	// Response fields (agent → cloud)
 	Status      int               `json:"status,omitempty"`

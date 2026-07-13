@@ -84,6 +84,7 @@ export interface DeviceForm {
   agentId?: string
   branchId?: string
   reach?: string
+	accessMode?: 'normal_qr' | 'hikvision_native'
 }
 
 export const api = {
@@ -251,19 +252,33 @@ export const api = {
   createAccessPoint: (body: any) => req('/api/access-points', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   updateAccessPoint: (id: string, body: any) => req(`/api/access-points/${encodeURIComponent(id)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   deleteAccessPoint: (id: string) => req(`/api/access-points/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  createBranch: (name: string, address?: string) =>
+  createBranch: (name: string, address?: string, qrMode: 'static' | 'dynamic' = 'static') =>
     req('/api/branches', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, address }),
+      body: JSON.stringify({ name, address, qrMode }),
     }),
-  updateBranch: (id: string, name: string, address?: string) =>
+  updateBranch: (id: string, name: string, address?: string, qrMode: 'static' | 'dynamic' | 'both' = 'static') =>
     req(`/api/branches/${encodeURIComponent(id)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, address }),
+      body: JSON.stringify({ name, address, qrMode }),
     }),
   deleteBranch: (id: string) => req(`/api/branches/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  listDeviceGroups: (outletId = '') => req(`/api/device-groups${outletId ? `?outletId=${encodeURIComponent(outletId)}` : ''}`),
+  createDeviceGroup: (body: { outletId: string; name: string; deviceIds: string[] }) =>
+    req('/api/device-groups', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+  updateDeviceGroup: (id: string, body: { outletId: string; name: string; deviceIds: string[] }) =>
+    req(`/api/device-groups/${encodeURIComponent(id)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+  deleteDeviceGroup: (id: string) => req(`/api/device-groups/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  deviceGroupReadiness: (id: string) => req(`/api/device-groups/${encodeURIComponent(id)}/readiness`),
+  enrolFaceGroup: async (groupId: string, personId: string, file: File, deviceIds?: string[]) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    fd.append('personId', personId)
+    if (deviceIds?.length) fd.append('deviceIds', JSON.stringify(deviceIds))
+    return req(`/api/device-groups/${encodeURIComponent(groupId)}/faces`, { method: 'POST', body: fd })
+  },
   assignBranchAgent: (branchId: string, agentId: string) =>
     req(`/api/branches/${encodeURIComponent(branchId)}/agent`, {
       method: 'POST',
@@ -283,7 +298,9 @@ export const api = {
   agentDownloads: () => req('/api/agents/downloads'),
   // Agent binaries + scripts are public, secret-free downloads (the per-agent
   // token is generated separately), so these links need no auth token.
-  agentDownloadUrl: (file: string) => apiUrl(`/api/agents/downloads/${encodeURIComponent(file)}`),
+  agentDownloadUrl: (file: string, version?: string) => apiUrl(
+    `/api/agents/downloads/${encodeURIComponent(file)}${version ? `?v=${encodeURIComponent(version)}` : ''}`,
+  ),
   agentScriptUrl: (file: string) => apiUrl(`/api/agents/scripts/${encodeURIComponent(file)}`),
   rotateQR: (personId: string) => req(`/api/persons/${encodeURIComponent(personId)}/qr/rotate`, { method: 'POST' }),
   currentQR: (personId: string) => req(`/api/persons/${encodeURIComponent(personId)}/qr/current`),
@@ -335,6 +352,14 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ value }),
     }),
+	getDeviceAccessMode: (deviceId: string) =>
+		req(`/api/devices/${encodeURIComponent(deviceId)}/access-mode`),
+	setDeviceAccessMode: (deviceId: string, accessMode: 'normal_qr' | 'hikvision_native') =>
+		req(`/api/devices/${encodeURIComponent(deviceId)}/access-mode`, {
+			method: 'PUT',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ accessMode }),
+		}),
 
   applyDeviceMode: (deviceId: string) =>
     req(`/api/devices/${encodeURIComponent(deviceId)}/apply-mode`, { method: 'POST' }),

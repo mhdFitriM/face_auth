@@ -28,6 +28,7 @@ import (
 const (
 	lockedVerifyMode   = "cardAndPw"
 	unlockedVerifyMode = "face"
+	nativeVerifyMode   = "cardOrFace"
 )
 
 type QRSession struct {
@@ -115,15 +116,38 @@ func (q *QRAuth) Scan(ctx context.Context, qrToken, agentID string) (*QRSession,
 	return q.openSession(ctx, p, devices, "qr", "agent")
 }
 
-func (q *QRAuth) DirectOpen(ctx context.Context, credential, agentID, deviceID string, doorNo int) (*Person, string, error) {
+// ClaimScanCorrelation makes an HTTP retry idempotent across backend replicas.
+// The LAN agent separately suppresses duplicate physical scanner events.
+func (q *QRAuth) ClaimScanCorrelation(ctx context.Context, agentID, correlationID string) (bool, error) {
+	if strings.TrimSpace(correlationID) == "" {
+		return true, nil
+	}
+	return q.store.Redis.SetNX(ctx, "qr-auth:scan:"+agentID+":"+correlationID, "1", time.Minute).Result()
+}
+
+func (q *QRAuth) DirectOpen(ctx context.Context, credential, agentID, deviceID string, doorNo int, details AccessLogContext) (*Person, string, error) {
 	if deviceID == "" {
 		return nil, "", errors.New("deviceId required for direct open")
+	}
+	agentTenantID, agentOutletID, err := q.store.GetAgentScope(ctx, agentID)
+	if err != nil || agentTenantID == "" {
+		return nil, "", errors.New("agent has no merchant assignment")
 	}
 	d, err := q.store.GetDevice(ctx, deviceID)
 	if err != nil || d == nil {
 		return nil, "", errors.New("device not found")
 	}
-	if d.AgentID != agentID {
+	if d.AccessMode != DeviceAccessModeNormalQR {
+		return nil, "", errors.New("device uses Hikvision-native face/card/card-number QR authentication")
+	}
+	deviceTenantID, _ := q.store.GetDeviceTenant(ctx, deviceID)
+	if deviceTenantID == "" || deviceTenantID != agentTenantID {
+		return nil, "", errors.New("target device is outside the agent merchant")
+	}
+	if agentOutletID != "" && d.BranchID != agentOutletID {
+		return nil, "", errors.New("target device is outside the agent outlet")
+	}
+	if agentOutletID == "" && d.AgentID != agentID {
 		return nil, "", errors.New("device is not assigned to this agent")
 	}
 	// Direct-open mode deliberately trusts only QR credentials issued by
@@ -137,10 +161,16 @@ func (q *QRAuth) DirectOpen(ctx context.Context, credential, agentID, deviceID s
 	if p == nil {
 		return nil, "", errors.New("unknown face_auth QR")
 	}
+	q.store.PopulatePersonQRSettings(ctx, p)
 	tenantID, _ := q.store.GetPersonTenant(ctx, p.ID)
-	deviceTenantID, _ := q.store.GetDeviceTenant(ctx, deviceID)
 	if tenantID == "" || deviceTenantID == "" || tenantID != deviceTenantID {
 		return nil, "", errors.New("QR person and target device are not in the same tenant")
+	}
+	if d.BranchID != "" {
+		outlet, _ := q.store.GetBranch(ctx, d.BranchID)
+		if outlet != nil && outlet.QRMode != "" && outlet.QRMode != "both" && p.QRMode != outlet.QRMode {
+			return p, "", fmt.Errorf("outlet accepts %s FaceAuth QR only", outlet.QRMode)
+		}
 	}
 	now := time.Now()
 	if p.ValidBegin != nil && now.Before(*p.ValidBegin) {
@@ -149,19 +179,31 @@ func (q *QRAuth) DirectOpen(ctx context.Context, credential, agentID, deviceID s
 	if p.ValidEnd != nil && now.After(*p.ValidEnd) {
 		return nil, "", errors.New("access expired")
 	}
-	decision := q.store.EvaluateAccess(ctx, p.ID, now)
+	decision := q.store.EvaluateAccessForDirection(ctx, p.ID, now, details.Direction)
+	details.OutletID = agentOutletID
+	details.AgentID = agentID
+	details.MemberName = p.Name
+	details.CredentialMode = p.QRMode
 	if !decision.Allow {
-		_ = q.store.CommitAccess(ctx, decision, p.ID, p.EmployeeNo, deviceID, tenantID, "qr")
+		_ = q.store.CommitAccess(ctx, decision, p.ID, p.EmployeeNo, deviceID, tenantID, "qr", details)
 		return p, decision.Reason, errors.New("access denied: " + decision.Reason)
 	}
 	if doorNo <= 0 {
 		doorNo = 1
 	}
+	details.DoorNo = doorNo
 	resp, err := NewISAPIClientForDevice(d, q.hub).OpenDoor(doorNo)
+	details.DoorResult = resp
+	if len(details.DoorResult) > 1000 {
+		details.DoorResult = details.DoorResult[:1000]
+	}
 	if err != nil {
+		failed := decision
+		failed.Allow, failed.Reason = false, "door command failed: "+err.Error()
+		_ = q.store.CommitAccess(ctx, failed, p.ID, p.EmployeeNo, deviceID, tenantID, "qr", details)
 		return p, resp, err
 	}
-	_ = q.store.CommitAccess(ctx, decision, p.ID, p.EmployeeNo, deviceID, tenantID, "qr")
+	_ = q.store.CommitAccess(ctx, decision, p.ID, p.EmployeeNo, deviceID, tenantID, "qr", details)
 	return p, resp, nil
 }
 
@@ -180,6 +222,14 @@ func (q *QRAuth) DirectOpenAccessPoint(ctx context.Context, credential, agentID,
 	if !a.Enabled || a.AuthMode == "disabled" {
 		q.logAccessPointDenial(ctx, tenantID, a, nil, "access point is disabled", "unknown", correlationID)
 		return nil, a, "", errors.New("access point is disabled")
+	}
+	d, err := q.store.GetDevice(ctx, a.DeviceID)
+	if err != nil || d == nil {
+		return nil, a, "", errors.New("target device not found")
+	}
+	if d.AccessMode != DeviceAccessModeNormalQR {
+		q.logAccessPointDenial(ctx, tenantID, a, nil, "device uses Hikvision-native authentication", "unknown", correlationID)
+		return nil, a, "", errors.New("device uses Hikvision-native face/card/card-number QR authentication")
 	}
 	if a.AuthMode != "faceauth_qr" {
 		q.logAccessPointDenial(ctx, tenantID, a, nil, "access point uses Hikvision-native authentication", "unknown", correlationID)
@@ -225,10 +275,6 @@ func (q *QRAuth) DirectOpenAccessPoint(ctx context.Context, credential, agentID,
 	if !decision.Allow {
 		_ = q.store.CommitAccess(ctx, decision, p.ID, p.EmployeeNo, a.DeviceID, tenantID, "qr", details)
 		return p, a, decision.Reason, errors.New("access denied: " + decision.Reason)
-	}
-	d, err := q.store.GetDevice(ctx, a.DeviceID)
-	if err != nil || d == nil {
-		return p, a, "", errors.New("target device not found")
 	}
 	resp, err := NewISAPIClientForDevice(d, q.hub).OpenDoor(a.DoorNo)
 	details.DoorResult = resp
@@ -679,20 +725,31 @@ func (q *QRAuth) SetAllUsersVerifyMode(ctx context.Context, deviceID, mode strin
 	}
 	n := 0
 	for _, u := range users {
+		verifyMode := mode
+		beginTime := "2020-01-01T00:00:00"
+		endTime := "2037-12-31T23:59:59"
+		if mode == lockedVerifyMode {
+			// Relay-only must not accidentally become usable if a member also
+			// has a password. Keep face feedback enabled but expire the user,
+			// matching the short-window lock mechanism used by QR sessions.
+			verifyMode = unlockedVerifyMode
+			beginTime = "2000-01-01T00:00:00"
+			endTime = "2000-12-31T23:59:59"
+		}
 		body, _ := json.Marshal(map[string]any{
 			"UserInfo": map[string]any{
 				"employeeNo":     sanitizeFPID(u.EmployeeNo),
 				"name":           u.Name,
 				"userType":       firstNonEmpty(u.UserType, "normal"),
 				"localUIRight":   u.LocalUIRight,
-				"userVerifyMode": mode,
+				"userVerifyMode": verifyMode,
 				"gender":         firstNonEmpty(u.Gender, "unknown"),
 				"doorRight":      firstNonEmpty(u.DoorRight, "1"),
 				"RightPlan":      []map[string]any{{"doorNo": 1, "planTemplateNo": "1"}},
 				"Valid": map[string]any{
 					"enable":    true,
-					"beginTime": "2020-01-01T00:00:00",
-					"endTime":   "2037-12-31T23:59:59",
+					"beginTime": beginTime,
+					"endTime":   endTime,
 					"timeType":  "local",
 				},
 			},
@@ -705,16 +762,18 @@ func (q *QRAuth) SetAllUsersVerifyMode(ctx context.Context, deviceID, mode strin
 	return n, nil
 }
 
-// ApplyDeviceMode reads the effective requireQR2FA setting for a device and
-// pushes the corresponding verify mode to every user on it. Idempotent.
+// ApplyDeviceMode pushes the baseline implied by the device access mode.
+// Normal QR locks native credentials because FaceAuth is the authority and
+// Hikvision is only a relay. Native mode enables face OR enrolled card; a QR
+// containing that card number follows the same Hikvision card credential.
 func (q *QRAuth) ApplyDeviceMode(ctx context.Context, deviceID string) (int, string, error) {
-	needsQR, err := q.settings.DeviceRequiresQR(ctx, deviceID)
-	if err != nil {
-		return 0, "", err
+	d, err := q.store.GetDevice(ctx, deviceID)
+	if err != nil || d == nil {
+		return 0, "", errors.New("device not found")
 	}
-	mode := unlockedVerifyMode
-	if needsQR {
-		mode = lockedVerifyMode
+	mode := lockedVerifyMode
+	if d.AccessMode == DeviceAccessModeHikvisionNative {
+		mode = nativeVerifyMode
 	}
 	n, err := q.SetAllUsersVerifyMode(ctx, deviceID, mode)
 	return n, mode, err
@@ -746,11 +805,11 @@ func (q *QRAuth) ApplyAllDeviceModes(ctx context.Context) []map[string]any {
 // ModeForDevice returns the baseline verify mode that should be on the device
 // right now (used by enrolment paths so new users land in the right state).
 func (q *QRAuth) ModeForDevice(ctx context.Context, deviceID string) string {
-	needsQR, _ := q.settings.DeviceRequiresQR(ctx, deviceID)
-	if needsQR {
-		return lockedVerifyMode
+	d, _ := q.store.GetDevice(ctx, deviceID)
+	if d != nil && d.AccessMode == DeviceAccessModeHikvisionNative {
+		return nativeVerifyMode
 	}
-	return unlockedVerifyMode
+	return lockedVerifyMode
 }
 
 // ActiveSessions returns currently-open windows for the live panel.

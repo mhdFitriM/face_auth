@@ -135,6 +135,11 @@ func runDashboardServer(reconnect chan<- struct{}) {
 					c.ScannerBindings = old.ScannerBindings
 				}
 			}
+			if c.ScannerStations == nil {
+				if old, _ := loadConfig(); old != nil {
+					c.ScannerStations = old.ScannerStations
+				}
+			}
 			if !c.Valid() {
 				httpJSON(w, 400, map[string]any{"ok": false, "error": "cloud_url, agent_id, agent_token, and target device when direct opening is enabled are required"})
 				return
@@ -222,6 +227,25 @@ func runDashboardServer(reconnect chan<- struct{}) {
 		}
 		_, last := scannerSnapshot()
 		httpJSON(w, 200, map[string]any{"devices": devices, "bindings": cfg.ScannerBindings, "accessPoints": points, "lastHardwareId": last, "nativeSupported": runtimeGOOS == "windows"})
+	})
+
+	mux.HandleFunc("/api/station-devices", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		cfg, _ := loadConfig()
+		if cfg == nil || !cfg.Valid() {
+			httpJSON(w, 400, map[string]any{"error": "configure the agent first"})
+			return
+		}
+		devices, err := fetchAgentDevices(normalizeCloudHTTPBase(cfg.CloudURL), cfg.AgentID, cfg.AgentToken)
+		if err != nil {
+			log.Printf("station device picker: %v", err)
+			httpJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+			return
+		}
+		httpJSON(w, 200, map[string]any{"devices": devices})
 	})
 
 	mux.HandleFunc("/api/scanners/identify", func(w http.ResponseWriter, r *http.Request) {
@@ -371,6 +395,10 @@ func runDashboardServer(reconnect chan<- struct{}) {
 			for _, existing := range cfg.ScannerStations {
 				if existing.ID != st.ID && existing.Port == st.Port {
 					httpJSON(w, 409, map[string]any{"ok": false, "error": fmt.Sprintf("local HTTP port %d is already assigned to %s", st.Port, existing.Name)})
+					return
+				}
+				if existing.ID != st.ID && strings.EqualFold(existing.DeviceID, st.DeviceID) {
+					httpJSON(w, 409, map[string]any{"ok": false, "error": fmt.Sprintf("Hikvision device %s is already paired with scanner station %s", st.DeviceID, existing.Name)})
 					return
 				}
 			}
@@ -545,6 +573,11 @@ func runDashboardServer(reconnect chan<- struct{}) {
 			return
 		}
 		httpJSON(w, 200, map[string]any{"ok": true, "output": out})
+		if runtimeGOOS == "windows" {
+			// The newly installed service owns the stable ProgramData copy. Exit
+			// this downloaded/interactive copy so only one agent remains online.
+			go func() { time.Sleep(1200 * time.Millisecond); os.Exit(0) }()
+		}
 	})
 
 	// ─── QR watcher (USB scanner → agent) ─────────────────────────
@@ -629,6 +662,7 @@ func renderDashboard(w http.ResponseWriter, cfg *AgentConfig) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = dashboardTpl.Execute(w, map[string]any{
 		"Config":   cfg,
+		"Version":  agentVersion,
 		"OS":       osName(),
 		"ConfPath": configPath(),
 		"Hostname": hostnameOr(""),
