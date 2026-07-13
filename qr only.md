@@ -99,6 +99,56 @@ API keys are merchant-scoped. Access logs include outlet, access point, agent, s
 
 ## Scanner and diagnostics
 
+### Multiple scanners on one Windows agent
+
+The Windows agent uses a native hybrid reader for device-bound scanner routing.
+It prefers a scanner's HID POS interface (`MI_01`, usage page `0x8C`) and reads
+decoded barcode reports directly. Long values are reassembled using the HID POS
+`Decode Data Continued` flag. If HID POS is unavailable, the agent falls back
+to Windows Raw Input on the scanner's keyboard interface (`MI_00`). Open
+the agent dashboard at `http://127.0.0.1:7780`, select **QR scanner**, then:
+
+1. Connect the USB scanners and click **Refresh devices**.
+2. Click **Identify scanner** and scan a test QR with the intended physical scanner.
+3. Assign that detected hardware device to an enabled FaceAuth QR access point.
+4. Repeat for every scanner. Each access point already defines its local port,
+   Hikvision device, door number, and direction.
+
+The dashboard labels **HID POS direct** as preferred and **Raw Input fallback**
+for keyboard-only devices. The preferred identity is the scanner's USB serial number together with its
+vendor and product IDs. When the scanner exposes no serial number, Windows uses
+its full HID device-instance path; moving it to another USB socket can require
+rebinding. Unknown or unassigned keyboards and scanners are never routed to a
+door. Once a native binding exists, the agent stops the legacy global
+AutoHotkey watcher to prevent the same scan being submitted twice.
+
+To replace hardware, unbind the disconnected scanner, identify the replacement,
+and bind it to the same scanner/access-point ID. The port, target Hikvision
+device, door, direction, and QR policy remain unchanged.
+
+The local agent dashboard also provides **Scanner stations** for direct local
+configuration. Each station requires a unique local HTTP port (for example,
+`7771` and `7772`), Hikvision device ID, door number, and direction. Under
+**Bind Windows USB port to station**, select the detected HID POS or Raw Input
+device and bind it to the station. The resulting route is:
+
+`Windows USB/HID device path -> station -> local HTTP port -> device and door`.
+
+Each agent PC supports a maximum of four scanner stations.
+
+Scanner stations are exclusively for third-party USB/HID QR or barcode
+scanners connected to the agent PC. They are stored as
+`scanner_source: third_party_usb`. Never add a Hikvision terminal's built-in
+QR/card scanner as an agent scanner station. Hikvision-native QR/card remains a
+separate `hikvision` access-point mode: the terminal performs its own credential
+verification and the agent scanner watcher, local HTTP ports, HID POS reader,
+and Raw Input reader are not involved.
+
+Local ports must be unique on the agent, must be between 1 and 65535, and cannot
+use the agent dashboard port `7780`. When a station is deleted or its port is
+changed, the previous listener immediately fails closed and returns scanner not
+ready rather than retaining the former door route.
+
 - Scanner submission endpoint: `POST http://127.0.0.1:7771/scan`
 - QR Debug page: `http://127.0.0.1:7771/qrdebug`
 - Agent dashboard: `http://127.0.0.1:7780`

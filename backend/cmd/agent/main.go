@@ -191,6 +191,10 @@ func runConnectionLoop(parent context.Context, reconnect <-chan struct{}) error 
 	// agent config, so no cloud access point row is needed.
 	if len(cfg.ScannerStations) > 0 {
 		for _, st := range cfg.ScannerStations {
+			if st.ScannerSource != "" && st.ScannerSource != "third_party_usb" {
+				log.Printf("QR station %q ignored: scanner source %q is not third_party_usb", st.Name, st.ScannerSource)
+				continue
+			}
 			if st.DeviceID == "" || st.Port == 0 {
 				continue
 			}

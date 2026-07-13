@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -349,6 +350,13 @@ func runDashboardServer(reconnect chan<- struct{}) {
 				httpJSON(w, 400, map[string]any{"ok": false, "error": "device_id is required"})
 				return
 			}
+			if st.ScannerSource == "" {
+				st.ScannerSource = "third_party_usb"
+			}
+			if st.ScannerSource != "third_party_usb" {
+				httpJSON(w, 400, map[string]any{"ok": false, "error": "scanner stations support third-party USB/HID QR scanners only; configure Hikvision QR/card mode in Admin Access points"})
+				return
+			}
 			if st.Port == 0 {
 				st.Port = nextStationPort(cfg.ScannerStations)
 			}
@@ -368,6 +376,17 @@ func runDashboardServer(reconnect chan<- struct{}) {
 			}
 			if !stationPortAvailable(st.Port) {
 				httpJSON(w, 409, map[string]any{"ok": false, "error": fmt.Sprintf("local HTTP port %d is already in use by another application", st.Port)})
+				return
+			}
+			existingStation := false
+			for _, existing := range cfg.ScannerStations {
+				if st.ID != "" && existing.ID == st.ID {
+					existingStation = true
+					break
+				}
+			}
+			if !existingStation && len(cfg.ScannerStations) >= 4 {
+				httpJSON(w, 409, map[string]any{"ok": false, "error": "maximum 4 scanner stations per agent"})
 				return
 			}
 			if st.ID == "" {
@@ -473,6 +492,10 @@ func runDashboardServer(reconnect chan<- struct{}) {
 		found := false
 		for i, s := range cfg.ScannerStations {
 			if s.ID == body.StationID {
+				if s.ScannerSource != "" && s.ScannerSource != "third_party_usb" {
+					httpJSON(w, 400, map[string]any{"ok": false, "error": "only third-party USB/HID scanner stations can be bound in the agent"})
+					return
+				}
 				cfg.ScannerStations[i].HardwareID = body.HardwareID
 				found = true
 				break
@@ -642,9 +665,13 @@ func stationPortAvailable(port int) bool {
 	qrListeners.RLock()
 	alreadyOwned := qrListeners.started[key]
 	qrListeners.RUnlock()
-	if alreadyOwned { return true }
+	if alreadyOwned {
+		return true
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:"+key)
-	if err != nil { return false }
+	if err != nil {
+		return false
+	}
 	_ = ln.Close()
 	return true
 }

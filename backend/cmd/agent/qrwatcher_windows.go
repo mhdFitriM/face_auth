@@ -72,14 +72,14 @@ func qrWatcherRunning() bool {
 
 // QRWatcherStatus is what the dashboard reads via /api/qr-watcher/status.
 type QRWatcherStatus struct {
-	Supported          bool   `json:"supported"`
-	AutoHotkeyInstalled bool  `json:"autohotkey_installed"`
-	AutoHotkeyPath     string `json:"autohotkey_path,omitempty"`
-	AutoHotkeyURL      string `json:"autohotkey_url"`
-	StartupInstalled   bool   `json:"startup_installed"`
-	StartupPath        string `json:"startup_path,omitempty"`
-	Running            bool   `json:"running"`
-	LogPath            string `json:"log_path,omitempty"`
+	Supported           bool   `json:"supported"`
+	AutoHotkeyInstalled bool   `json:"autohotkey_installed"`
+	AutoHotkeyPath      string `json:"autohotkey_path,omitempty"`
+	AutoHotkeyURL       string `json:"autohotkey_url"`
+	StartupInstalled    bool   `json:"startup_installed"`
+	StartupPath         string `json:"startup_path,omitempty"`
+	Running             bool   `json:"running"`
+	LogPath             string `json:"log_path,omitempty"`
 }
 
 func qrWatcherStatus() QRWatcherStatus {
@@ -186,6 +186,14 @@ func startQRWatchdog(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-t.C:
+				if strings.EqualFold(getenv("QR_NATIVE_BOUND", "false"), "true") {
+					// Native Raw Input has device-bound routing. A global AHK hook
+					// would duplicate scans and cannot identify their source.
+					if qrWatcherRunning() {
+						_ = qrWatcherStop()
+					}
+					continue
+				}
 				s := qrWatcherStatus()
 				if s.StartupInstalled && !s.Running {
 					log.Printf("[qr-watchdog] watcher stopped — restarting")

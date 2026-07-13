@@ -39,13 +39,14 @@ type ScannerBinding struct {
 // a cloud access point to be configured. The agent opens the door via ISAPI
 // directly after the cloud validates the QR token.
 type ScannerStation struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	HardwareID string `json:"hardware_id,omitempty"` // USB physical device path
-	DeviceID   string `json:"device_id"`             // Hikvision device to open
-	DoorNo     int    `json:"door_no"`
-	Direction  string `json:"direction,omitempty"` // in | out
-	Port       int    `json:"port"`                // local HTTP listener port
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	ScannerSource string `json:"scanner_source,omitempty"` // third_party_usb only
+	HardwareID    string `json:"hardware_id,omitempty"`    // USB physical device path
+	DeviceID      string `json:"device_id"`                // Hikvision device to open
+	DoorNo        int    `json:"door_no"`
+	Direction     string `json:"direction,omitempty"` // in | out
+	Port          int    `json:"port"`                // local HTTP listener port
 }
 
 func (c *AgentConfig) Valid() bool {
