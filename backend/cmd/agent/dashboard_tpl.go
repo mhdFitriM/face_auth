@@ -225,9 +225,9 @@ var dashboardTpl = template.Must(template.New("dash").Parse(`<!doctype html>
 
       <section class="card">
         <h2>QR scanner</h2>
-        <div class="kv"><span>Watcher</span><span id="kv-qr-running">—</span></div>
-        <div class="kv"><span>Auto-start</span><span id="kv-qr-startup">—</span></div>
-        <div class="kv"><span>AutoHotkey</span><span id="kv-qr-ahk">—</span></div>
+        <div class="kv"><span>Scanner capture</span><span id="kv-qr-running">—</span></div>
+        <div class="kv"><span>Capture method</span><span id="kv-qr-startup">—</span></div>
+        <div class="kv"><span>Legacy helper</span><span id="kv-qr-ahk">—</span></div>
         <div class="kv"><span id="kv-port-label">Listen port</span><span id="kv-port">…</span></div>
         <div class="kv"><span>Strip prefix</span><span id="kv-prefix">…</span></div>
         <div class="btn-row">
@@ -308,14 +308,45 @@ var dashboardTpl = template.Must(template.New("dash").Parse(`<!doctype html>
       <div id="scanner-bindings" style="margin-top:12px"></div>
     </section>
     <section class="card">
-      <h2>QR watcher — bundled setup</h2>
-      <p class="hint">The watcher captures keystrokes from your USB QR scanner and forwards each scan to the agent. Everything ships inside this app — there's nothing to download separately, except AutoHotkey itself if you don't already have it.</p>
+      <h2 id="qr-setup-title">QR scanner — bundled setup</h2>
+      <p class="hint" id="qr-setup-intro">Checking which scanner capture method this agent is using…</p>
+
+      <div id="native-setup" style="display:none">
+        <div class="step done">
+          <div class="step-num"><span>1</span></div>
+          <div class="step-body">
+            <h3>Native scanner capture</h3>
+            <p>The FaceAuth agent reads each bound Windows USB scanner directly using HID POS or Raw Input and routes it only to its assigned station and door.</p>
+            <div id="native-capture-state" class="step-state">Checking…</div>
+          </div>
+        </div>
+        <div class="step done">
+          <div class="step-num"><span>2</span></div>
+          <div class="step-body">
+            <h3>What you need to download</h3>
+            <p><strong>FaceAuth Windows agent v{{.Version}} only.</strong> Native scanner capture is already bundled inside the agent. Do not install AutoHotkey or the legacy QR watcher for bound scanner stations. Windows HID scanners normally need no separate driver.</p>
+            <div class="step-state ok">No separate watcher download required</div>
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num"><span>3</span></div>
+          <div class="step-body">
+            <h3>Scanner assignment</h3>
+            <p id="native-bound-count">Checking bound scanners…</p>
+            <div class="btn-row">
+              <button class="btn primary" onclick="loadScanners()">Refresh USB scanners</button>
+              <button class="btn" onclick="showTab('logs')">Open native-reader logs</button>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <div id="qr-platform-note" style="display:none">
         <p class="hint" style="color:var(--warn)">Auto-install is Windows-only. On Linux, point the agent at your HID device path under <a href="#" onclick="showTab('settings');return false" style="color:var(--accent)">Settings → QR device</a>.</p>
       </div>
 
-      <div id="qr-steps">
+      <div id="legacy-setup">
+       <div id="qr-steps">
         <div class="step" id="step-ahk">
           <div class="step-num"><span>1</span></div>
           <div class="step-body">
@@ -353,10 +384,11 @@ var dashboardTpl = template.Must(template.New("dash").Parse(`<!doctype html>
             </div>
           </div>
         </div>
-      </div>
+       </div>
 
-      <div class="kv" style="margin-top:14px"><span>Script path</span><span id="kv-qr-path">—</span></div>
-      <div class="kv"><span>Watcher log</span><span id="kv-qr-log">—</span></div>
+       <div class="kv" style="margin-top:14px"><span>Script path</span><span id="kv-qr-path">—</span></div>
+       <div class="kv"><span>Watcher log</span><span id="kv-qr-log">—</span></div>
+      </div>
     </section>
   </div>
 
@@ -580,6 +612,24 @@ async function refreshQR() {
     const r = await fetch('/api/qr-watcher/status').then(r => r.json());
     lastQR = r;
     $('ahk-link').href = r.autohotkey_url || 'https://www.autohotkey.com/';
+    const nativeCapture = r.capture_mode === 'native_usb';
+    const captureActive = typeof r.capture_active === 'boolean' ? r.capture_active : !!r.running;
+
+    $('native-setup').style.display = nativeCapture ? '' : 'none';
+    $('legacy-setup').style.display = nativeCapture ? 'none' : '';
+    if (nativeCapture) {
+      $('qr-setup-title').textContent = 'QR scanner — native bundled setup';
+      $('qr-setup-intro').textContent = 'Current method: native Windows USB HID / Raw Input. The FaceAuth agent itself is the scanner watcher.';
+      $('native-capture-state').className = 'step-state ' + (captureActive ? 'ok' : 'err');
+      $('native-capture-state').textContent = captureActive ? 'Active' : 'Offline — reconnect the USB scanner and refresh devices';
+      const count = Number(r.native_bound_scanners || 0);
+      $('native-bound-count').textContent = count
+        ? count + ' USB scanner' + (count === 1 ? ' is' : 's are') + ' bound to native routing.'
+        : 'No USB scanner is bound yet. Identify and bind a scanner above.';
+    } else {
+      $('qr-setup-title').textContent = 'QR watcher — legacy bundled setup';
+      $('qr-setup-intro').textContent = 'Legacy single-scanner mode uses the keyboard watcher below. AutoHotkey is required on Windows only for this mode.';
+    }
 
     if (!r.supported) {
       $('qr-platform-note').style.display = 'block';
@@ -604,10 +654,18 @@ async function refreshQR() {
     $('btn-qr-stop').style.display    = running ? '' : 'none';
     $('btn-qr-remove').style.display  = installed ? '' : 'none';
 
-    // Overview kv
-    $('kv-qr-running').innerHTML  = running ? '<span class="ok">running</span>' : (installed ? '<span class="warn">stopped</span>' : '<span class="err">not installed</span>');
-    $('kv-qr-startup').innerHTML  = installed ? '<span class="ok">enabled</span>' : '<span class="muted">disabled</span>';
-    $('kv-qr-ahk').innerHTML      = r.autohotkey_installed ? '<span class="ok">installed</span>' : '<span class="err">missing</span>';
+    // Overview reports the selected capture path. A bound Windows scanner uses
+    // the agent's native HID/Raw Input reader, so a stopped AutoHotkey helper is
+    // expected and must not make the whole scanner look offline.
+    $('kv-qr-running').innerHTML = captureActive
+      ? '<span class="ok">active</span>'
+      : '<span class="err">offline</span>';
+    $('kv-qr-startup').innerHTML = nativeCapture
+      ? '<span class="ok">Native USB HID / Raw Input</span>'
+      : '<span class="ok">Legacy keyboard watcher</span>';
+    $('kv-qr-ahk').innerHTML = nativeCapture
+      ? '<span class="muted">not used</span>'
+      : (running ? '<span class="ok">running</span>' : (installed ? '<span class="warn">stopped</span>' : '<span class="err">not installed</span>'));
     $('kv-qr-path').textContent   = r.startup_path || '—';
     $('kv-qr-log').textContent    = r.log_path || '—';
   } catch (e) {}

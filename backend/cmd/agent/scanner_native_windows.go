@@ -117,7 +117,9 @@ var winScanner = struct {
 	pos        map[string]posDevice
 	posStarted map[string]bool
 	managerCtx context.Context
-}{routes: map[string]scannerRoute{}, buffers: map[uintptr]*strings.Builder{}, shift: map[uintptr]bool{}, paths: map[uintptr]string{}, pos: map[string]posDevice{}, posStarted: map[string]bool{}}
+	rawActive  bool
+	posActive  map[string]bool
+}{routes: map[string]scannerRoute{}, buffers: map[uintptr]*strings.Builder{}, shift: map[uintptr]bool{}, paths: map[uintptr]string{}, pos: map[string]posDevice{}, posStarted: map[string]bool{}, posActive: map[string]bool{}}
 
 var rawInputLoopOnce sync.Once
 
@@ -297,6 +299,27 @@ func startNativeScannerManager(ctx context.Context, routes []scannerRoute) error
 	return nil
 }
 
+// nativeScannerCaptureStatus reports the capture path that is actually able to
+// receive input for a configured route. The dashboard uses this instead of the
+// legacy AutoHotkey process state when Windows USB bindings are active.
+func nativeScannerCaptureStatus() (active bool, bound int) {
+	winScanner.RLock()
+	defer winScanner.RUnlock()
+	bound = len(winScanner.routes)
+	for hardwareID := range winScanner.routes {
+		if _, isPOS := winScanner.pos[hardwareID]; isPOS {
+			if winScanner.posActive[hardwareID] {
+				return true, bound
+			}
+			continue
+		}
+		if winScanner.rawActive {
+			return true, bound
+		}
+	}
+	return false, bound
+}
+
 func ensurePOSReaders() {
 	winScanner.Lock()
 	defer winScanner.Unlock()
@@ -322,6 +345,9 @@ func readPOSScanner(ctx context.Context, hardwareID string, dev posDevice) {
 			time.Sleep(2 * time.Second)
 			continue
 		}
+		winScanner.Lock()
+		winScanner.posActive[hardwareID] = true
+		winScanner.Unlock()
 		log.Printf("HID POS direct reader active: %s report=%d", dev.Scanner.DevicePath, dev.InputLength)
 		buf := make([]byte, dev.InputLength)
 		var assembled strings.Builder
@@ -359,6 +385,9 @@ func readPOSScanner(ctx context.Context, hardwareID string, dev posDevice) {
 			log.Printf("HID POS %s -> cloud: %d %s", route.ScannerID, status, truncate(body, 120))
 		}
 		windows.CloseHandle(h)
+		winScanner.Lock()
+		delete(winScanner.posActive, hardwareID)
+		winScanner.Unlock()
 		if ctx.Err() == nil {
 			time.Sleep(time.Second)
 		}
@@ -385,6 +414,14 @@ func runRawInputLoop(ctx context.Context) {
 		log.Printf("register raw input: %v", e)
 		return
 	}
+	winScanner.Lock()
+	winScanner.rawActive = true
+	winScanner.Unlock()
+	defer func() {
+		winScanner.Lock()
+		winScanner.rawActive = false
+		winScanner.Unlock()
+	}()
 	log.Printf("Windows Raw Input scanner capture active (%d bound scanner(s))", len(winScanner.routes))
 	go func() { <-ctx.Done(); procPostQuitMessage.Call(0) }()
 	var m msg

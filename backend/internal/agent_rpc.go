@@ -2,7 +2,7 @@ package internal
 
 // AgentVersion is shared by the agent hello frame and the server's bundled
 // download metadata so the UI and executable always advertise one version.
-const AgentVersion = "2.4.7"
+const AgentVersion = "2.4.8"
 
 // Frame is the wire envelope sent between cloud and agent over WebSocket.
 // Bodies are byte slices — Go's json encoder base64-encodes them automatically.

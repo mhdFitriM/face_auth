@@ -80,6 +80,9 @@ type QRWatcherStatus struct {
 	StartupPath         string `json:"startup_path,omitempty"`
 	Running             bool   `json:"running"`
 	LogPath             string `json:"log_path,omitempty"`
+	CaptureActive       bool   `json:"capture_active"`
+	CaptureMode         string `json:"capture_mode"`
+	NativeBoundScanners int    `json:"native_bound_scanners,omitempty"`
 }
 
 func qrWatcherStatus() QRWatcherStatus {
@@ -98,6 +101,15 @@ func qrWatcherStatus() QRWatcherStatus {
 		}
 	}
 	s.Running = qrWatcherRunning()
+	nativeActive, nativeBound := nativeScannerCaptureStatus()
+	if strings.EqualFold(getenv("QR_NATIVE_BOUND", "false"), "true") {
+		s.CaptureActive = nativeActive
+		s.CaptureMode = "native_usb"
+		s.NativeBoundScanners = nativeBound
+	} else {
+		s.CaptureActive = s.Running
+		s.CaptureMode = "legacy_autohotkey"
+	}
 	if tmp := os.Getenv("TEMP"); tmp != "" {
 		s.LogPath = filepath.Join(tmp, "face_auth-qr-watcher.log")
 	}
