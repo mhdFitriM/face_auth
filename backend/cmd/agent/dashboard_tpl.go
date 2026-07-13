@@ -239,6 +239,53 @@ var dashboardTpl = template.Must(template.New("dash").Parse(`<!doctype html>
 
   <!-- ─── QR scanner ─── -->
   <div class="panel" data-panel="qr">
+
+    <!-- Scanner stations card (always shown) -->
+    <section class="card" style="margin-bottom:14px">
+      <div class="card-head">
+        <h2>Scanner stations</h2>
+        <button class="btn ghost" onclick="loadStations()">Refresh</button>
+      </div>
+      <p class="hint">Each station maps one physical scanner to a door. No cloud access point needed — just set the Hikvision device ID and door number. The cloud only validates the QR token.</p>
+      <div id="station-list"></div>
+      <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:14px">
+        <h2 style="margin-bottom:8px">Add station</h2>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <div>
+            <label style="margin-top:0">Station name</label>
+            <input id="st-name" placeholder="e.g. Main entrance">
+          </div>
+          <div>
+            <label style="margin-top:0">Hikvision device ID</label>
+            <input id="st-device" placeholder="from Devices tab in admin">
+          </div>
+          <div>
+            <label style="margin-top:0">Door number</label>
+            <input id="st-door" type="number" value="1" min="1">
+          </div>
+          <div>
+            <label style="margin-top:0">Direction</label>
+            <select id="st-dir">
+              <option value="in">In</option>
+              <option value="out">Out</option>
+              <option value="">Any</option>
+            </select>
+          </div>
+        </div>
+        <div class="btn-row" style="margin-top:10px">
+          <button class="btn primary" onclick="addStation()">Add station</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Physical scanner identification and assignment (Windows only) -->
+    <section class="card" id="native-scanner-card" style="display:none;margin-bottom:14px">
+      <div class="card-head"><h2>Assign physical scanner to station</h2><button class="btn ghost" onclick="loadScanners()">Refresh devices</button></div>
+      <p class="hint">Click <strong>Identify scanner</strong>, then scan a test QR with the physical device you want to assign. The agent will detect which USB scanner sent it.</p>
+      <div class="btn-row"><button class="btn primary" onclick="identifyScanner()">Identify scanner</button><span id="identify-state" class="hint" style="margin-left:8px">Connect a scanner, click Identify, then scan any test QR.</span></div>
+      <div id="scanner-list" style="margin-top:12px"></div>
+      <div id="scanner-bindings" style="margin-top:12px"></div>
+    </section>
     <section class="card">
       <h2>QR watcher — bundled setup</h2>
       <p class="hint">The watcher captures keystrokes from your USB QR scanner and forwards each scan to the agent. Everything ships inside this app — there's nothing to download separately, except AutoHotkey itself if you don't already have it.</p>
@@ -503,6 +550,7 @@ async function resetCfg() {
 
 // ─── QR watcher ────────────────────────────────────────────
 async function refreshQR() {
+  if (agentOS === 'windows') { loadStations(); loadScanners(); } else loadStations();
   try {
     const r = await fetch('/api/qr-watcher/status').then(r => r.json());
     lastQR = r;
@@ -539,6 +587,129 @@ async function refreshQR() {
     $('kv-qr-log').textContent    = r.log_path || '—';
   } catch (e) {}
 }
+
+function scannerLabel(d) {
+  const serial = d.serialNumber ? (' · serial ' + d.serialNumber) : ' · no serial (USB port may matter)';
+  const mode = d.readerMode === 'hid_pos' ? ' · HID POS direct (preferred)' : ' · Raw Input fallback';
+  return (d.name || 'HID scanner') + ' · ' + (d.vendorId || '----') + ':' + (d.productId || '----') + mode + serial;
+}
+
+// ─── Scanner stations ────────────────────────────────────────────
+let _stations = [];
+
+async function loadStations() {
+  try {
+    const r = await fetch('/api/stations').then(x => x.json());
+    _stations = r.stations || [];
+    renderStations();
+  } catch (e) {}
+}
+
+function renderStations() {
+  const el = $('station-list');
+  if (!_stations.length) {
+    el.innerHTML = '<p class="hint">No stations configured yet. Add one below.</p>';
+    return;
+  }
+  el.innerHTML = _stations.map(s => {
+    const hw = s.hardware_id ? '<span class="ok" style="font-size:11px">Scanner assigned</span>' : '<span class="warn" style="font-size:11px">No scanner assigned yet</span>';
+    return '<div class="kv" style="display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid var(--border)">' +
+      '<div style="flex:1;min-width:0">' +
+        '<strong>'+esc(s.name||s.id)+'</strong> '+hw+'<br>' +
+        '<span style="font-size:11px;color:var(--muted)">Device: '+esc(s.device_id)+' · Door '+s.door_no+(s.direction?' · '+s.direction:'')+' · Port :'+s.port+'</span>' +
+      '</div>' +
+      '<button class="btn danger" style="flex-shrink:0" onclick="deleteStation(\''+esc(s.id)+'\')">Delete</button>' +
+    '</div>';
+  }).join('');
+}
+
+async function addStation() {
+  const name = $('st-name').value.trim();
+  const device = $('st-device').value.trim();
+  const door = parseInt($('st-door').value) || 1;
+  const dir = $('st-dir').value;
+  if (!device) { toast('Device ID is required', 'err'); return; }
+  const r = await fetch('/api/stations', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name: name||device, device_id: device, door_no: door, direction: dir}),
+  }).then(x => x.json());
+  if (r.ok) {
+    toast('Station added ✓');
+    $('st-name').value = ''; $('st-device').value = ''; $('st-door').value = '1';
+    await loadStations();
+    if (agentOS === 'windows') loadScanners();
+  } else {
+    toast('Failed: ' + r.error, 'err');
+  }
+}
+
+async function deleteStation(id) {
+  if (!confirm('Delete this station?')) return;
+  const r = await fetch('/api/stations/delete', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id}),
+  }).then(x => x.json());
+  toast(r.ok ? 'Station deleted' : ('Failed: ' + r.error), r.ok ? 'ok' : 'err');
+  if (r.ok) { await loadStations(); if (agentOS === 'windows') loadScanners(); }
+}
+
+async function loadScanners() {
+  if (agentOS !== 'windows') return;
+  $('native-scanner-card').style.display = '';
+  try {
+    const r = await fetch('/api/scanners').then(x => x.json());
+    const devices = r.devices || [], bindings = r.bindings || [];
+    const boundHardware = new Set(bindings.map(b => (b.hardware_id || '').toLowerCase()));
+    // Also mark stations that already have a hardware_id
+    const stationBound = new Set(_stations.filter(s => s.hardware_id).map(s => s.hardware_id.toLowerCase()));
+    const allBound = new Set([...boundHardware, ...stationBound]);
+    const stationOptions = _stations.map(s =>
+      '<option value="'+esc(s.id)+'">'+esc((s.name||s.id)+' (door '+s.door_no+')')+'</option>'
+    ).join('');
+    $('scanner-list').innerHTML = devices.length ? devices.map((d, i) => {
+      const bound = allBound.has((d.hardwareId || '').toLowerCase());
+      return '<div class="kv" style="display:block;padding:10px"><div><strong>'+esc(scannerLabel(d))+'</strong></div>' +
+        '<div style="font-size:10px;color:var(--muted);word-break:break-all">'+esc(d.devicePath||d.hardwareId)+'</div>' +
+        (bound
+          ? '<span class="ok" style="font-size:11px">Already assigned</span>'
+          : (_stations.length
+              ? '<div class="btn-row"><select id="scanner-target-'+i+'"><option value="">— Select station —</option>'+stationOptions+'</select><button class="btn primary" onclick="bindScannerToStation('+i+')">Assign to station</button></div>'
+              : '<span class="warn" style="font-size:11px">Add a station first</span>'
+            )
+        ) + '</div>';
+    }).join('') : '<p class="hint" style="color:var(--warn)">No external HID scanner detected. Connect it, then click Refresh.</p>';
+    window._scannerDevices = devices;
+    $('scanner-bindings').innerHTML = '';
+    if (r.lastHardwareId) {
+      const d = devices.find(x => x.hardwareId === r.lastHardwareId);
+      $('identify-state').textContent = 'Last scan from: ' + (d ? scannerLabel(d) : r.lastHardwareId);
+    }
+  } catch (e) { $('scanner-list').textContent = 'Scanner discovery failed: '+e; }
+}
+
+async function bindScannerToStation(i) {
+  const d = (window._scannerDevices || [])[i];
+  const stationId = $('scanner-target-'+i) && $('scanner-target-'+i).value;
+  if (!d || !stationId) return toast('Select a station first', 'err');
+  const r = await fetch('/api/stations/assign', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({station_id: stationId, hardware_id: d.hardwareId}),
+  }).then(x => x.json());
+  toast(r.ok ? 'Scanner assigned to station ✓' : ('Failed: ' + r.error), r.ok ? 'ok' : 'err');
+  if (r.ok) { await loadStations(); setTimeout(loadScanners, 600); }
+}
+
+async function identifyScanner() {
+  await fetch('/api/scanners/identify', {method:'POST'});
+  $('identify-state').textContent = 'Waiting for a scan…';
+  let tries = 0;
+  const timer = setInterval(async () => { await loadScanners(); if (++tries >= 20 || !$('identify-state').textContent.includes('Waiting')) clearInterval(timer); }, 500);
+}
+
+function esc(v) { const d=document.createElement('div'); d.textContent=String(v==null?'':v); return d.innerHTML; }
 
 async function qrInstall() {
   $('btn-qr-install').disabled = true;
@@ -602,6 +773,7 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').cat
 
 refresh();
 refreshQR();
+loadStations();
 setInterval(refresh, 2000);
 setInterval(refreshQR, 5000);
 </script>

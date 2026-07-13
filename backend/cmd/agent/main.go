@@ -181,31 +181,71 @@ func runConnectionLoop(parent context.Context, reconnect <-chan struct{}) error 
 	} else if strings.HasPrefix(cloudHTTPBase, "wss://") {
 		cloudHTTPBase = "https://" + cloudHTTPBase[len("wss://"):]
 	}
-	points := fetchAgentAccessPoints(cloudHTTPBase, agentID, agentToken)
 	var scanFn scanFunc
+	nativeRoutes := []scannerRoute{}
 	activeScannerCount := 0
-	if len(points) == 0 {
-		scanFn = startQRListener(qrPort, cloudHTTPBase, agentID, agentToken, "")
-		log.Printf("QR legacy listener on http://127.0.0.1:%s/scan", qrPort)
-	} else {
-		for _, point := range points {
-			if point.AuthMode != "faceauth_qr" || !point.Enabled {
+
+	// Local scanner stations take priority over cloud access points.
+	// They are fully self-contained: device ID and door are stored in the
+	// agent config, so no cloud access point row is needed.
+	if len(cfg.ScannerStations) > 0 {
+		for _, st := range cfg.ScannerStations {
+			if st.DeviceID == "" || st.Port == 0 {
 				continue
 			}
 			activeScannerCount++
-			fn := startQRListener(strconv.Itoa(point.ScannerPort), cloudHTTPBase, agentID, agentToken, point.ID)
+			fn := startQRListener(strconv.Itoa(st.Port), cloudHTTPBase, agentID, agentToken, "", st.DeviceID)
+			if st.HardwareID != "" {
+				nativeRoutes = append(nativeRoutes, scannerRoute{ScannerID: st.ID, HardwareID: st.HardwareID, Scan: fn})
+			}
 			if scanFn == nil {
 				scanFn = fn
 			}
-			log.Printf("QR access point %s listener on http://127.0.0.1:%d/scan -> %s door %d", point.ID, point.ScannerPort, point.DeviceID, point.DoorNo)
+			log.Printf("QR local station %q on http://127.0.0.1:%d/scan -> device %s door %d", st.Name, st.Port, st.DeviceID, st.DoorNo)
+		}
+	} else {
+		points := fetchAgentAccessPoints(cloudHTTPBase, agentID, agentToken)
+		if len(points) == 0 {
+			scanFn = startQRListener(qrPort, cloudHTTPBase, agentID, agentToken, "", "")
+			log.Printf("QR legacy listener on http://127.0.0.1:%s/scan", qrPort)
+		} else {
+			for _, point := range points {
+				if point.AuthMode != "faceauth_qr" || !point.Enabled {
+					continue
+				}
+				activeScannerCount++
+				fn := startQRListener(strconv.Itoa(point.ScannerPort), cloudHTTPBase, agentID, agentToken, point.ID, "")
+				for _, binding := range cfg.ScannerBindings {
+					if binding.ScannerID == point.ScannerID && binding.HardwareID != "" {
+						nativeRoutes = append(nativeRoutes, scannerRoute{ScannerID: point.ScannerID, HardwareID: binding.HardwareID, Scan: fn})
+					}
+				}
+				if scanFn == nil {
+					scanFn = fn
+				}
+				log.Printf("QR access point %s listener on http://127.0.0.1:%d/scan -> %s door %d", point.ID, point.ScannerPort, point.DeviceID, point.DoorNo)
+			}
 		}
 	}
 
 	// On Linux, also read directly from /dev/input/eventN when QR_DEVICE
 	// (or QR_DEVICE_AUTO) is set. Same scanner-side flow, just no userspace
 	// helper needed.
-	startQRWatchdog(parent)
-	if scanFn != nil && activeScannerCount <= 1 {
+	if !(runtimeGOOS == "windows" && len(nativeRoutes) > 0) {
+		startQRWatchdog(parent)
+	}
+	if runtimeGOOS == "windows" {
+		_ = os.Setenv("QR_NATIVE_BOUND", fmt.Sprintf("%t", len(nativeRoutes) > 0))
+		if err := startNativeScannerManager(parent, nativeRoutes); err != nil {
+			log.Printf("native scanner manager: %v", err)
+		}
+		if len(nativeRoutes) > 0 {
+			// Native Raw Input owns approved scanners. Stop the global AHK hook so
+			// the same scan cannot also reach the legacy single-scanner route.
+			_ = qrWatcherStop()
+		}
+	} else if scanFn != nil && activeScannerCount <= 1 {
+		_ = os.Setenv("QR_NATIVE_BOUND", "false")
 		startNativeHID(func(line string) {
 			status, body := scanFn(line)
 			log.Printf("HID scan -> cloud: %d %s", status, strings.TrimSpace(body)[:min(120, len(strings.TrimSpace(body)))])
@@ -434,7 +474,7 @@ func recordScan(qr string, status int, body string, opened bool) {
 // the QR HTTP server is running. On reconnects the port stays bound (only one
 // server ever runs); the new scan function is stored in qrScan so the server
 // always forwards to the current cloud URL without rebinding.
-func startQRListener(port, cloudBase, agentID, agentToken, accessPointID string) scanFunc {
+func startQRListener(port, cloudBase, agentID, agentToken, accessPointID, targetDevice string) scanFunc {
 	httpClient := &http.Client{
 		Timeout:   8 * time.Second,
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
@@ -464,10 +504,14 @@ func startQRListener(port, cloudBase, agentID, agentToken, accessPointID string)
 		if qr == "" {
 			return 400, `{"error":"empty qr"}`
 		}
+		devID := targetDevice
+		if devID == "" {
+			devID = getenv("QR_TARGET_DEVICE", "")
+		}
 		payload, _ := json.Marshal(map[string]any{
 			"qrToken": qr, "agentId": agentID, "agentToken": agentToken,
-			"deviceId":      getenv("QR_TARGET_DEVICE", ""),
-			"directOpen":    accessPointID != "" || strings.EqualFold(getenv("QR_DIRECT_OPEN", "false"), "true"),
+			"deviceId":      devID,
+			"directOpen":    accessPointID != "" || devID != "" || strings.EqualFold(getenv("QR_DIRECT_OPEN", "false"), "true"),
 			"accessPointId": accessPointID,
 			"correlationId": fmt.Sprintf("%s-%d", firstNonEmpty(accessPointID, agentID), time.Now().UnixNano()),
 		})
@@ -565,9 +609,12 @@ func startQRListener(port, cloudBase, agentID, agentToken, accessPointID string)
 
 type agentAccessPoint struct {
 	ID          string `json:"id"`
+	Name        string `json:"name"`
+	ScannerID   string `json:"scannerId"`
 	ScannerPort int    `json:"scannerPort"`
 	DeviceID    string `json:"deviceId"`
 	DoorNo      int    `json:"doorNo"`
+	Direction   string `json:"direction"`
 	AuthMode    string `json:"authMode"`
 	Enabled     bool   `json:"enabled"`
 }
