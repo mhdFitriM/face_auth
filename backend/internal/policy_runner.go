@@ -82,7 +82,7 @@ func processFaceMatch(store *Store, hub *AgentHub, e Event, employeeNo, openMeth
 	// device so the very next swipe is refused. This is best-effort.
 	if !decision.Allow {
 		d, _ := store.GetDevice(bg, e.DeviceID)
-		if d != nil && d.IP != "" {
+		if d != nil && d.IP != "" && d.AccessMode == DeviceAccessModeHikvisionNative {
 			client := NewISAPIClientForDevice(d, hub)
 			// Same "expired Valid window" trick as the scheduler — the next
 			// face match will hit a denial sound + on-screen "user invalid"

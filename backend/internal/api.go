@@ -1617,6 +1617,10 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 	})
 
 	api.Post("/devices/:id/lock-all-users", func(c *fiber.Ctx) error {
+		d, _ := store.GetDevice(c.Context(), c.Params("id"))
+		if err := requireHikvisionNative(d); err != nil {
+			return c.Status(409).JSON(fiber.Map{"error": err.Error()})
+		}
 		n, err := qrAuth.LockAllUsersOnDevice(c.Context(), c.Params("id"))
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
@@ -1665,6 +1669,9 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if err != nil || d == nil {
 			return c.Status(404).JSON(fiber.Map{"error": "device not found"})
 		}
+		if err := requireHikvisionNative(d); err != nil {
+			return c.Status(409).JSON(fiber.Map{"error": err.Error()})
+		}
 		var body struct {
 			PersonID string `json:"personId"`
 		}
@@ -1706,6 +1713,9 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		d, err := store.GetDevice(ctx, c.Params("id"))
 		if err != nil || d == nil || d.IP == "" {
 			return c.Status(404).JSON(fiber.Map{"error": "device not found or not configured"})
+		}
+		if err := requireHikvisionNative(d); err != nil {
+			return c.Status(409).JSON(fiber.Map{"error": err.Error()})
 		}
 		client := NewISAPIClientForDevice(d, hub)
 		users, err := client.ListUsers()
@@ -1809,8 +1819,16 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 
 	// Open door (or any door number via ?door=N)
 	api.Post("/devices/:id/open-door", func(c *fiber.Ctx) error {
+		tid, scopeErr := tenantScope(c)
+		if scopeErr != nil {
+			return c.Status(400).JSON(fiber.Map{"error": scopeErr.Error()})
+		}
 		d, err := store.GetDevice(c.Context(), c.Params("id"))
 		if err != nil || d == nil || d.IP == "" {
+			return c.Status(404).JSON(fiber.Map{"error": "device not found"})
+		}
+		deviceTenant, _ := store.GetDeviceTenant(c.Context(), d.DeviceID)
+		if deviceTenant != tid {
 			return c.Status(404).JSON(fiber.Map{"error": "device not found"})
 		}
 		doorNo, _ := strconv.Atoi(c.Query("door", "1"))
@@ -1826,8 +1844,16 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 	// reachable returns the device if it can be commanded (has IP, an agent, or
 	// OTAP push). OTAP devices have no IP, so we must not require d.IP here.
 	reachable := func(c *fiber.Ctx) (*Device, error) {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return nil, err
+		}
 		d, err := store.GetDevice(c.Context(), c.Params("id"))
 		if err != nil || d == nil {
+			return nil, fmt.Errorf("device not found")
+		}
+		deviceTenant, _ := store.GetDeviceTenant(c.Context(), d.DeviceID)
+		if deviceTenant != tid {
 			return nil, fmt.Errorf("device not found")
 		}
 		if d.IP == "" && d.AgentID == "" && d.Reach != "otap" {
@@ -1842,6 +1868,9 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if err != nil {
 			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
 		}
+		if err := requireHikvisionNative(d); err != nil {
+			return c.Status(409).JSON(fiber.Map{"error": err.Error()})
+		}
 		client := NewISAPIClientForDevice(d, hub)
 		resp, err := client.CaptureFaceData(c.Query("infrared") == "true")
 		if err != nil {
@@ -1855,6 +1884,9 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		d, err := reachable(c)
 		if err != nil {
 			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		if err := requireHikvisionNative(d); err != nil {
+			return c.Status(409).JSON(fiber.Map{"error": err.Error()})
 		}
 		client := NewISAPIClientForDevice(d, hub)
 		resp, err := client.CaptureCardInfo()
@@ -1877,6 +1909,9 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		d, err := reachable(c)
 		if err != nil {
 			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		if err := requireHikvisionNative(d); err != nil {
+			return c.Status(409).JSON(fiber.Map{"error": err.Error()})
 		}
 		finger, _ := strconv.Atoi(c.Query("finger", "1"))
 		client := NewISAPIClientForDevice(d, hub)
@@ -1909,6 +1944,9 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		d, err := reachable(c)
 		if err != nil {
 			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		if err := requireHikvisionNative(d); err != nil {
+			return c.Status(409).JSON(fiber.Map{"error": err.Error()})
 		}
 		var body struct {
 			EmployeeNo string `json:"employeeNo"`
@@ -1967,6 +2005,9 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		d, err := reachable(c)
 		if err != nil {
 			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		if err := requireHikvisionNative(d); err != nil {
+			return c.Status(409).JSON(fiber.Map{"error": err.Error()})
 		}
 		var body struct {
 			EmployeeNo    string `json:"employeeNo"`
@@ -2146,6 +2187,9 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if err != nil {
 			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
 		}
+		if err := requireHikvisionNative(d); err != nil {
+			return c.Status(409).JSON(fiber.Map{"error": err.Error()})
+		}
 		var body struct {
 			Enable bool `json:"enable"`
 		}
@@ -2189,6 +2233,11 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if err != nil || p == nil {
 			return c.Status(404).JSON(fiber.Map{"error": "person not found"})
 		}
+		tid, _ := tenantScope(c)
+		personTenant, _ := store.GetPersonTenant(c.Context(), p.ID)
+		if personTenant != tid {
+			return c.Status(404).JSON(fiber.Map{"error": "person not found"})
+		}
 		if p.EmployeeNo == "" {
 			return c.Status(400).JSON(fiber.Map{"error": "person has no employeeNo"})
 		}
@@ -2198,9 +2247,6 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 			if card.DeviceID == d.DeviceID {
 				cardNo = card.CardNo
 				break
-			}
-			if cardNo == "" {
-				cardNo = card.CardNo
 			}
 		}
 		if cardNo == "" {
@@ -2253,7 +2299,11 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if d.AccessMode != DeviceAccessModeHikvisionNative {
 			return c.Status(409).JSON(fiber.Map{"error": "device is Normal QR relay-only; built-in Hikvision QR is disabled"})
 		}
-		persons, err := store.ListPersons(c.Context())
+		tid, scopeErr := tenantScope(c)
+		if scopeErr != nil {
+			return c.Status(400).JSON(fiber.Map{"error": scopeErr.Error()})
+		}
+		persons, err := store.ListPersonsByTenant(c.Context(), tid)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
@@ -2283,9 +2333,6 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 						cardNo = card.CardNo
 						break
 					}
-					if cardNo == "" {
-						cardNo = card.CardNo
-					}
 				}
 				if cardNo == "" {
 					skipped++
@@ -2308,6 +2355,9 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		d, err := reachable(c)
 		if err != nil {
 			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		if err := requireHikvisionNative(d); err != nil {
+			return c.Status(409).JSON(fiber.Map{"error": err.Error()})
 		}
 		var body struct {
 			Key string `json:"key"`
@@ -2334,6 +2384,9 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		d, err := store.GetDevice(ctx, deviceID)
 		if err != nil || d == nil {
 			return c.Status(404).JSON(fiber.Map{"error": "device not found"})
+		}
+		if err := requireHikvisionNative(d); err != nil {
+			return c.Status(409).JSON(fiber.Map{"error": err.Error()})
 		}
 		if d.IP == "" || d.ISAPIUsername == "" {
 			return c.Status(400).JSON(fiber.Map{"error": "device has no ISAPI credentials — set ip/port/username/password first"})
@@ -2430,13 +2483,6 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 				"error":          err.Error(),
 			})
 		}
-		if d.AccessMode == DeviceAccessModeNormalQR {
-			if err := qrAuth.setUserVerifyMode(ctx, d, person, lockedVerifyMode); err != nil {
-				_ = store.UpdateFaceStatus(ctx, face.ID, "failed")
-				face.Status = "failed"
-				return c.Status(502).JSON(fiber.Map{"ok": false, "face": face, "error": "face enrolled but relay-only lock failed: " + err.Error()})
-			}
-		}
 		_ = store.UpdateFaceStatus(ctx, face.ID, "enrolled")
 		face.Status = "enrolled" // keep the returned object in sync with the DB
 		return c.JSON(fiber.Map{
@@ -2519,6 +2565,9 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		}
 		if body.Method == "" {
 			body.Method = "GET"
+		}
+		if d.AccessMode == DeviceAccessModeNormalQR && isNativeCredentialISAPIPath(body.Path) && body.Method != "GET" {
+			return c.Status(409).JSON(fiber.Map{"error": "Normal QR relay-only blocks native credential ISAPI writes"})
 		}
 		if body.ContentType == "" && body.Body != "" {
 			body.ContentType = "application/json"
@@ -2700,7 +2749,6 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		return c.JSON(settings.Get())
 	})
 	api.Put("/settings", func(c *fiber.Ctx) error {
-		prev := settings.Get()
 		var body Settings
 		if err := json.Unmarshal(c.Body(), &body); err != nil {
 			return c.Status(400).JSON(fiber.Map{"error": "bad body"})
@@ -2708,14 +2756,9 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if err := settings.Save(c.Context(), body); err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
-		// If the global QR-2FA toggle actually changed, push the new verify mode
-		// to every device that follows the global setting. This is what makes
-		// the toggle do something at device level — without it the device keeps
-		// the previous user verify mode and the toggle has no real effect.
+		// Legacy requireQR2FA is retained for configuration compatibility only.
+		// Per-device access_mode is now the sole credential-path authority.
 		applied := []map[string]any{}
-		if prev.RequireQR2FA != body.RequireQR2FA {
-			applied = qrAuth.ApplyAllDeviceModes(c.Context())
-		}
 		return c.JSON(fiber.Map{"settings": settings.Get(), "applied": applied})
 	})
 
@@ -2729,18 +2772,12 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if err := settings.SetDeviceRequireQR(c.Context(), c.Params("id"), body.Value); err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
-		// Push the new mode to the device so the change actually takes effect.
-		n, mode, err := qrAuth.ApplyDeviceMode(c.Context(), c.Params("id"))
 		eff, _ := settings.DeviceRequiresQR(c.Context(), c.Params("id"))
 		out := fiber.Map{
-			"ok":                 err == nil,
+			"ok":                 true,
 			"effectiveRequireQR": eff,
 			"override":           body.Value,
-			"appliedToUsers":     n,
-			"appliedMode":        mode,
-		}
-		if err != nil {
-			out["applyError"] = err.Error()
+			"deprecated":         true,
 		}
 		return c.JSON(out)
 	})
@@ -2766,6 +2803,52 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		return c.JSON(fiber.Map{"deviceId": d.DeviceID, "accessMode": d.AccessMode})
 	})
 
+	api.Get("/devices/:id/access-mode/preview", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		preview, err := qrAuth.PreviewDeviceAccessMode(c.Context(), tid, c.Params("id"), c.Query("accessMode"))
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(preview)
+	})
+
+	api.Get("/devices/:id/native-data/cleanup/preview", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		preview, _, err := previewNativeCredentialCleanup(c.Context(), store, hub, tid, c.Params("id"))
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(preview)
+	})
+
+	api.Post("/devices/:id/native-data/cleanup", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		var body struct {
+			Confirm string `json:"confirm"`
+		}
+		if json.Unmarshal(c.Body(), &body) != nil || body.Confirm != "DELETE_NATIVE_CREDENTIALS" {
+			return c.Status(400).JSON(fiber.Map{"error": "confirm must equal DELETE_NATIVE_CREDENTIALS"})
+		}
+		out, err := cleanupNativeCredentials(c.Context(), store, hub, tid, c.Params("id"))
+		if err != nil {
+			if out != nil {
+				out["error"] = err.Error()
+				return c.Status(502).JSON(out)
+			}
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error()})
+		}
+		return c.JSON(out)
+	})
+
 	api.Put("/devices/:id/access-mode", func(c *fiber.Ctx) error {
 		tid, err := tenantScope(c)
 		if err != nil {
@@ -2781,30 +2864,49 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if err != nil {
 			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 		}
-		stations, err := store.SetDeviceAccessMode(c.Context(), tid, c.Params("id"), mode)
+		out, err := qrAuth.ApplyDeviceAccessMode(c.Context(), tid, c.Params("id"), mode)
 		if err != nil {
-			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
-		}
-		users, appliedMode, applyErr := qrAuth.ApplyDeviceMode(c.Context(), c.Params("id"))
-		out := fiber.Map{"ok": applyErr == nil, "deviceId": c.Params("id"), "accessMode": mode, "stationsUpdated": stations, "usersUpdated": users, "hikvisionVerifyMode": appliedMode}
-		if applyErr != nil {
-			out["applyError"] = applyErr.Error()
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error()})
 		}
 		return c.JSON(out)
 	})
 
 	// Manual "apply now" — re-pushes the effective mode to one device.
 	api.Post("/devices/:id/apply-mode", func(c *fiber.Ctx) error {
-		n, mode, err := qrAuth.ApplyDeviceMode(c.Context(), c.Params("id"))
+		tid, err := tenantScope(c)
 		if err != nil {
-			return c.Status(500).JSON(fiber.Map{"ok": false, "error": err.Error()})
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 		}
-		return c.JSON(fiber.Map{"ok": true, "users": n, "mode": mode})
+		d, err := store.GetDevice(c.Context(), c.Params("id"))
+		if err != nil || d == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "device not found"})
+		}
+		out, err := qrAuth.ApplyDeviceAccessMode(c.Context(), tid, d.DeviceID, d.AccessMode)
+		if err != nil {
+			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error()})
+		}
+		return c.JSON(out)
 	})
 
 	// Manual "apply to all" — re-pushes the effective mode to every device.
 	api.Post("/settings/apply-all", func(c *fiber.Ctx) error {
-		results := qrAuth.ApplyAllDeviceModes(c.Context())
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		devices, err := store.ListDevicesByTenant(c.Context(), tid)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		results := []map[string]any{}
+		for _, d := range devices {
+			out, applyErr := qrAuth.ApplyDeviceAccessMode(c.Context(), tid, d.DeviceID, d.AccessMode)
+			if applyErr != nil {
+				results = append(results, map[string]any{"deviceId": d.DeviceID, "error": applyErr.Error()})
+				continue
+			}
+			results = append(results, out)
+		}
 		return c.JSON(fiber.Map{"ok": true, "results": results})
 	})
 	api.Get("/devices/:id/require-qr", func(c *fiber.Ctx) error {
@@ -2860,6 +2962,32 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 	// All endpoints sit under /api/v1.
 
 	v1 := app.Group("/api/v1", apiKeyAuth(settings))
+	v1.Use(func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		path := c.Path()
+		if rest, ok := strings.CutPrefix(path, "/api/v1/devices/"); ok {
+			deviceID := strings.SplitN(rest, "/", 2)[0]
+			if deviceID != "" {
+				deviceTenant, _ := store.GetDeviceTenant(c.Context(), deviceID)
+				if deviceTenant != tid {
+					return c.Status(404).JSON(fiber.Map{"error": "device not found"})
+				}
+			}
+		}
+		if rest, ok := strings.CutPrefix(path, "/api/v1/persons/"); ok {
+			personID := strings.SplitN(rest, "/", 2)[0]
+			if personID != "" {
+				personTenant, _ := store.GetPersonTenant(c.Context(), personID)
+				if personTenant != tid {
+					return c.Status(404).JSON(fiber.Map{"error": "person not found"})
+				}
+			}
+		}
+		return c.Next()
+	})
 
 	// Plugins — each plugin's RegisterX call mounts its own routes under
 	// /api/plugins/<name>/* (admin) and /api/v1/plugins/<name>/* (public).
@@ -3008,7 +3136,11 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 	})
 
 	v1.Get("/devices", func(c *fiber.Ctx) error {
-		devs, err := store.ListDevices(c.Context())
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		devs, err := store.ListDevicesByTenant(c.Context(), tid)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
@@ -3032,9 +3164,10 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 	// R6: register a device via the public API, tenant-scoped from the key.
 	// Mirrors the admin POST /devices so qstudio can add devices self-serve.
 	v1.Post("/devices", func(c *fiber.Ctx) error {
-		// v1 is API-key authed (no session user) — tenant comes from the
-		// X-Tenant-Id header the caller sends, NOT tenantScope (session-only).
-		tid := c.Get("X-Tenant-Id")
+		tid, scopeErr := tenantScope(c)
+		if scopeErr != nil {
+			return c.Status(400).JSON(fiber.Map{"error": scopeErr.Error()})
+		}
 		var body struct {
 			DeviceID      string `json:"deviceId"`
 			Name          string `json:"name"`
@@ -3061,9 +3194,7 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if err := store.RegisterDevice(c.Context(), dev); err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
-		if tid != "" {
-			_ = store.SetDeviceTenant(c.Context(), dev.DeviceID, tid)
-		}
+		_ = store.SetDeviceTenant(c.Context(), dev.DeviceID, tid)
 		var probe map[string]any
 		if body.IP != "" && body.ISAPIUsername != "" {
 			if d, _ := store.GetDevice(c.Context(), body.DeviceID); d != nil {
@@ -3082,15 +3213,16 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 
 	// R6: delete a device, but only within the caller's tenant.
 	v1.Delete("/devices/:id", func(c *fiber.Ctx) error {
-		tid := c.Get("X-Tenant-Id")
+		tid, scopeErr := tenantScope(c)
+		if scopeErr != nil {
+			return c.Status(400).JSON(fiber.Map{"error": scopeErr.Error()})
+		}
 		d, _ := store.GetDevice(c.Context(), c.Params("id"))
 		if d == nil {
 			return c.Status(404).JSON(fiber.Map{"error": "device not found"})
 		}
-		if tid != "" {
-			if dtid, _ := store.GetDeviceTenant(c.Context(), c.Params("id")); dtid != tid {
-				return c.Status(404).JSON(fiber.Map{"error": "device not found"})
-			}
+		if dtid, _ := store.GetDeviceTenant(c.Context(), c.Params("id")); dtid != tid {
+			return c.Status(404).JSON(fiber.Map{"error": "device not found"})
 		}
 		if err := store.DeleteDevice(c.Context(), c.Params("id")); err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
@@ -3099,7 +3231,11 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 	})
 
 	v1.Get("/persons", func(c *fiber.Ctx) error {
-		ps, err := store.ListPersons(c.Context())
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		ps, err := store.ListPersonsByTenant(c.Context(), tid)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
@@ -3311,6 +3447,9 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if err != nil || d == nil {
 			return c.Status(404).JSON(fiber.Map{"error": "device not found"})
 		}
+		if err := requireHikvisionNative(d); err != nil {
+			return c.Status(409).JSON(fiber.Map{"error": err.Error()})
+		}
 		if d.IP == "" || d.ISAPIUsername == "" {
 			return c.Status(400).JSON(fiber.Map{"error": "device has no ISAPI credentials"})
 		}
@@ -3371,13 +3510,6 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 			face.Status = "failed" // keep the returned object in sync with the DB
 			return c.Status(502).JSON(fiber.Map{"ok": false, "face": face, "error": err.Error(), "deviceResponse": json.RawMessage(safeJSONFromBytes([]byte(resp)))})
 		}
-		if d.AccessMode == DeviceAccessModeNormalQR {
-			if err := qrAuth.setUserVerifyMode(ctx, d, person, lockedVerifyMode); err != nil {
-				_ = store.UpdateFaceStatus(ctx, face.ID, "failed")
-				face.Status = "failed"
-				return c.Status(502).JSON(fiber.Map{"ok": false, "face": face, "error": "face enrolled but relay-only lock failed: " + err.Error()})
-			}
-		}
 		_ = store.UpdateFaceStatus(ctx, face.ID, "enrolled")
 		face.Status = "enrolled" // keep the returned object in sync with the DB
 		return c.JSON(fiber.Map{"ok": true, "face": face, "deviceResponse": json.RawMessage(safeJSONFromBytes([]byte(resp)))})
@@ -3426,6 +3558,9 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		d, err := store.GetDevice(ctx, c.Params("id"))
 		if err != nil || d == nil || d.IP == "" {
 			return c.Status(404).JSON(fiber.Map{"error": "device not found or not configured"})
+		}
+		if err := requireHikvisionNative(d); err != nil {
+			return c.Status(409).JSON(fiber.Map{"error": err.Error()})
 		}
 		client := NewISAPIClientForDevice(d, hub)
 		users, err := client.ListUsers()
@@ -3488,6 +3623,9 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		}
 		if body.Method == "" {
 			body.Method = "GET"
+		}
+		if d.AccessMode == DeviceAccessModeNormalQR && isNativeCredentialISAPIPath(body.Path) && body.Method != "GET" {
+			return c.Status(409).JSON(fiber.Map{"error": "Normal QR relay-only blocks native credential ISAPI writes"})
 		}
 		if body.ContentType == "" && body.Body != "" {
 			body.ContentType = "application/json"
@@ -3605,6 +3743,9 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if err != nil {
 			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
 		}
+		if err := requireHikvisionNative(d); err != nil {
+			return c.Status(409).JSON(fiber.Map{"error": err.Error()})
+		}
 		resp, err := NewISAPIClientForDevice(d, hub).CaptureFaceData(c.Query("infrared") == "true")
 		if err != nil {
 			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
@@ -3615,6 +3756,9 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		d, err := reachable(c)
 		if err != nil {
 			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		if err := requireHikvisionNative(d); err != nil {
+			return c.Status(409).JSON(fiber.Map{"error": err.Error()})
 		}
 		resp, err := NewISAPIClientForDevice(d, hub).CaptureCardInfo()
 		if err != nil {
@@ -3634,6 +3778,9 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if err != nil {
 			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
 		}
+		if err := requireHikvisionNative(d); err != nil {
+			return c.Status(409).JSON(fiber.Map{"error": err.Error()})
+		}
 		finger, _ := strconv.Atoi(c.Query("finger", "1"))
 		resp, err := NewISAPIClientForDevice(d, hub).CaptureFingerPrint(finger)
 		if err != nil {
@@ -3652,6 +3799,9 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		d, err := reachable(c)
 		if err != nil {
 			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		if err := requireHikvisionNative(d); err != nil {
+			return c.Status(409).JSON(fiber.Map{"error": err.Error()})
 		}
 		var b struct{ EmployeeNo, CardNo, CardType, Mode string }
 		if e := json.Unmarshal(c.Body(), &b); e != nil || b.EmployeeNo == "" || b.CardNo == "" {
@@ -3682,6 +3832,9 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		d, err := reachable(c)
 		if err != nil {
 			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		if err := requireHikvisionNative(d); err != nil {
+			return c.Status(409).JSON(fiber.Map{"error": err.Error()})
 		}
 		var b struct {
 			EmployeeNo    string `json:"employeeNo"`
@@ -3770,6 +3923,9 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		d, err := reachable(c)
 		if err != nil {
 			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		if err := requireHikvisionNative(d); err != nil {
+			return c.Status(409).JSON(fiber.Map{"error": err.Error()})
 		}
 		var b struct {
 			Enable bool `json:"enable"`

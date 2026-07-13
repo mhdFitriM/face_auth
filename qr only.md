@@ -12,6 +12,7 @@ Do not combine FaceAuth QR-only with Hikvision QR/card authentication for the sa
 - The USB scanner is connected to the FaceAuth agent PC.
 - Hikvision receives only the final `OpenDoor` relay command after FaceAuth approves access.
 - The QR must not be pushed to the Hikvision camera or treated as a Hikvision card number.
+- Member profiles, QR secrets, validity, plans, cloud face images, card records, and access logs stay in FaceAuth cloud. Normal QR devices reject native face/card/fingerprint/QR enrolment APIs with HTTP `409`.
 
 ### Hikvision QR/card
 
@@ -29,7 +30,11 @@ Choose the authoritative path under **Settings → Per-device access mode**. The
 - **Normal QR (FaceAuth relay)** maps linked scanner stations to `faceauth_qr`. FaceAuth accepts only its own static/dynamic token, evaluates access, and sends `OpenDoor`. Native Hikvision users are kept locked so face, card, and built-in camera QR cannot bypass FaceAuth.
 - **Hikvision QR / face / card** maps linked stations to `hikvision`, blocks the third-party FaceAuth direct-open path, and applies `cardOrFace` to enrolled users. Physical card and a QR containing that same enrolled `cardNo` are the same native credential.
 
-Changing the mode updates all access points targeting that device and reapplies the matching user verification baseline. It never enables a disabled station and never opens a door.
+Changing the dropdown does not touch the terminal. Use **Preview** first to read the current Hikvision users, then **Apply** after checking the affected count. Apply preserves a complete snapshot of every original Hikvision user record, changes only the verification/validity fields required by the selected mode, reads the users back, and updates the FaceAuth database only after verification succeeds. A partial failure rolls back every user changed in that attempt.
+
+The two modes are the only active credential-path authority. The older global `requireQR2FA` value remains readable for compatibility but no longer pushes user changes to terminals. Changing a device mode updates access points targeting that device; it never enables a disabled station and never opens a door.
+
+After changing a device to Normal QR, use **Preview terminal credential cleanup**. The preview reads terminal user/face/card counts without writing. **Delete from terminal** requires typing `DELETE_NATIVE_CREDENTIALS`; it removes native terminal credentials and verifies the terminal is empty while keeping cloud members, face images, card numbers, QR settings, and logs. Switching back to Hikvision-native does not silently copy everyone: explicitly enrol members to an individual native device or native device group.
 
 ## Access flow
 

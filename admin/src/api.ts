@@ -354,11 +354,20 @@ export const api = {
     }),
 	getDeviceAccessMode: (deviceId: string) =>
 		req(`/api/devices/${encodeURIComponent(deviceId)}/access-mode`),
+	previewDeviceAccessMode: (deviceId: string, accessMode: 'normal_qr' | 'hikvision_native') =>
+		req(`/api/devices/${encodeURIComponent(deviceId)}/access-mode/preview?accessMode=${encodeURIComponent(accessMode)}`),
 	setDeviceAccessMode: (deviceId: string, accessMode: 'normal_qr' | 'hikvision_native') =>
 		req(`/api/devices/${encodeURIComponent(deviceId)}/access-mode`, {
 			method: 'PUT',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ accessMode }),
+		}),
+	previewNativeCredentialCleanup: (deviceId: string) =>
+		req(`/api/devices/${encodeURIComponent(deviceId)}/native-data/cleanup/preview`),
+	cleanupNativeCredentials: (deviceId: string) =>
+		req(`/api/devices/${encodeURIComponent(deviceId)}/native-data/cleanup`, {
+			method: 'POST', headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ confirm: 'DELETE_NATIVE_CREDENTIALS' }),
 		}),
 
   applyDeviceMode: (deviceId: string) =>

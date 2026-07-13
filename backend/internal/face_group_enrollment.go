@@ -29,6 +29,10 @@ type GroupFaceResult struct {
 
 func checkFaceDeviceReadiness(ctx context.Context, d Device, hub *AgentHub) DeviceReadiness {
 	r := DeviceReadiness{DeviceID: d.DeviceID, Name: d.Name, AgentID: d.AgentID}
+	if err := requireHikvisionNative(&d); err != nil {
+		r.Reason = err.Error()
+		return r
+	}
 	if d.IP == "" || d.ISAPIUsername == "" {
 		r.Reason = "missing device IP or ISAPI credentials"
 		return r
@@ -62,6 +66,10 @@ func checkFaceDeviceReadiness(ctx context.Context, d Device, hub *AgentHub) Devi
 
 func enrollPersonFaceOnDevice(ctx context.Context, store *Store, hub *AgentHub, qrAuth *QRAuth, d Device, person *Person, jpeg []byte, imageKey string) GroupFaceResult {
 	r := GroupFaceResult{DeviceID: d.DeviceID, Name: d.Name, Status: "failed"}
+	if err := requireHikvisionNative(&d); err != nil {
+		r.Error = err.Error()
+		return r
+	}
 	client := NewISAPIClientForDevice(&d, hub)
 	hikUser := HikUserInfo{
 		EmployeeNo:     person.EmployeeNo,
@@ -97,13 +105,6 @@ func enrollPersonFaceOnDevice(ctx context.Context, store *Store, hub *AgentHub, 
 		_ = store.UpdateFaceStatus(ctx, face.ID, "failed")
 		r.Error = err.Error()
 		return r
-	}
-	if d.AccessMode == DeviceAccessModeNormalQR {
-		if err := qrAuth.setUserVerifyMode(ctx, &d, person, lockedVerifyMode); err != nil {
-			_ = store.UpdateFaceStatus(ctx, face.ID, "failed")
-			r.Error = "face enrolled but relay-only lock failed: " + err.Error()
-			return r
-		}
 	}
 	_ = store.UpdateFaceStatus(ctx, face.ID, "enrolled")
 	r.OK = true

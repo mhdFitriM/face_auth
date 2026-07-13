@@ -28,3 +28,27 @@ func TestAccessPointAuthModeForDevice(t *testing.T) {
 		t.Fatalf("native mapped to %q", got)
 	}
 }
+
+func TestNormalQRRejectsNativeCredentials(t *testing.T) {
+	if err := requireHikvisionNative(&Device{AccessMode: DeviceAccessModeNormalQR}); err == nil {
+		t.Fatal("Normal QR accepted native credentials")
+	}
+	if err := requireHikvisionNative(&Device{AccessMode: DeviceAccessModeHikvisionNative}); err != nil {
+		t.Fatalf("native mode rejected: %v", err)
+	}
+	blocked := []string{
+		"/ISAPI/AccessControl/UserInfo/Modify?format=json",
+		"/ISAPI/AccessControl/CardInfo/Record?format=json",
+		"/ISAPI/AccessControl/FingerPrint/SetUp?format=json",
+		"/ISAPI/Intelligent/FDLib/FaceDataRecord?format=json",
+		"/ISAPI/AccessControl/QRCodeInfo/Record?format=json",
+	}
+	for _, path := range blocked {
+		if !isNativeCredentialISAPIPath(path) {
+			t.Errorf("credential path was not blocked: %s", path)
+		}
+	}
+	if isNativeCredentialISAPIPath("/ISAPI/AccessControl/RemoteControl/door/1") {
+		t.Fatal("OpenDoor was incorrectly classified as a credential write")
+	}
+}

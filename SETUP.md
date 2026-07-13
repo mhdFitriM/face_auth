@@ -101,7 +101,7 @@ Use this when the backend can't reach the device directly.
 1. **Persons → New person** (name, employee number, role).
 2. **Enrol** tab → pick the **device** and **person**, then either:
    - **Upload a photo** / **Use camera**, then **Enrol**, or
-   - **Capture at the device (reader)** → *Capture face* (user looks at the terminal). You can also *Capture card* / *Capture fingerprint*, and *Bind card to person*.
+   - For a device set to **Hikvision QR / face / card**, **Capture at the device (reader)** → *Capture face* (user looks at the terminal). You can also *Capture card* / *Capture fingerprint*, and *Bind card to person*. Normal QR devices keep member data in FaceAuth cloud and reject native credential enrolment.
 3. The face now lives on the device; the person can authenticate.
 
 ---

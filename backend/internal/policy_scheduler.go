@@ -101,10 +101,10 @@ func tick(ctx context.Context, store *Store, hub *AgentHub, state *policyState) 
 	defer rows.Close()
 
 	type personRow struct {
-		PersonID, PlanID, TenantID                 string
-		EmployeeNo, Name, PersonType, Gender       string
-		LongTerm, LocalUIRight, AttendanceOnly     bool
-		DoorRight, PlanTemplate                    string
+		PersonID, PlanID, TenantID             string
+		EmployeeNo, Name, PersonType, Gender   string
+		LongTerm, LocalUIRight, AttendanceOnly bool
+		DoorRight, PlanTemplate                string
 	}
 	persons := []personRow{}
 	for rows.Next() {
@@ -152,7 +152,10 @@ func tick(ctx context.Context, store *Store, hub *AgentHub, state *policyState) 
 			devs = make([]Device, 0, len(all))
 			for _, d := range all {
 				full, _ := store.GetDevice(ctx, d.DeviceID)
-				if full != nil && full.IP != "" {
+				// Normal QR devices are relay-only. Their native users must stay
+				// expired until a FaceAuth QR directly opens the door; the policy
+				// scheduler must never re-enable face/card validity on them.
+				if full != nil && full.IP != "" && full.AccessMode == DeviceAccessModeHikvisionNative {
 					devs = append(devs, *full)
 				}
 			}

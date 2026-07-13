@@ -60,6 +60,7 @@ type QRAuth struct {
 	settings *SettingsStore
 
 	mu       sync.Mutex
+	modeMu   sync.Mutex            // mode reconciliation is destructive; serialize it
 	sessions map[string]*QRSession // by sessionID
 	history  []QRSession           // ring buffer for the live panel
 }
@@ -661,6 +662,24 @@ func extractFaceMatchFromEvent(e Event) (string, bool) {
 
 func (q *QRAuth) setUserVerifyMode(ctx context.Context, d *Device, p *Person, mode string) error {
 	client := NewISAPIClientForDevice(d, q.hub)
+	users, err := client.ListUsers()
+	if err != nil {
+		return err
+	}
+	var current map[string]any
+	wantEmployeeNo := sanitizeFPID(p.EmployeeNo)
+	for _, u := range users {
+		if sanitizeFPID(u.EmployeeNo) == wantEmployeeNo {
+			current = u.Raw
+			break
+		}
+	}
+	if len(current) == 0 {
+		return fmt.Errorf("user %s not found on device", wantEmployeeNo)
+	}
+	if err := q.store.SaveDeviceUserModeSnapshot(ctx, d.DeviceID, wantEmployeeNo, current); err != nil {
+		return fmt.Errorf("snapshot user: %w", err)
+	}
 	// Always keep verifyMode=face so the camera produces visible/audible
 	// feedback on every attempt. Distinguish allow vs deny via the Valid
 	// window — an expired window makes Hik emit a "user invalid" denial.
@@ -669,35 +688,26 @@ func (q *QRAuth) setUserVerifyMode(ctx context.Context, d *Device, p *Person, mo
 	if mode == lockedVerifyMode {
 		beginTime = "2000-01-01T00:00:00"
 		endTime = "2000-12-31T23:59:59"
+	} else {
+		if p.ValidBegin != nil {
+			beginTime = p.ValidBegin.Format("2006-01-02T15:04:05")
+		}
+		if p.ValidEnd != nil {
+			endTime = p.ValidEnd.Format("2006-01-02T15:04:05")
+		}
 	}
-	body, _ := json.Marshal(map[string]any{
-		"UserInfo": map[string]any{
-			"employeeNo":     sanitizeFPID(p.EmployeeNo),
-			"name":           p.Name,
-			"userType":       mapDeviceUserType(p.PersonType),
-			"localUIRight":   p.PersonRole == "administrator",
-			"userVerifyMode": unlockedVerifyMode,
-			"gender":         ifElse(p.Gender == "", "unknown", p.Gender),
-			"doorRight":      ifElse(p.DoorRight == "", "1", p.DoorRight),
-			"RightPlan": []map[string]any{
-				{"doorNo": 1, "planTemplateNo": ifElse(p.PlanTemplate == "", "1", p.PlanTemplate)},
-			},
-			"Valid": map[string]any{
-				"enable":    true, // must be true so Hik checks the dates
-				"beginTime": beginTime,
-				"endTime":   endTime,
-				"timeType":  "local",
-			},
-		},
-	})
-	resp, respBody, err := client.Do("PUT", "/ISAPI/AccessControl/UserInfo/Modify?format=json", "application/json", body)
-	if err != nil {
-		return err
+	next := cloneUserRecord(current)
+	next["userVerifyMode"] = unlockedVerifyMode
+	valid, _ := next["Valid"].(map[string]any)
+	if valid == nil {
+		valid = map[string]any{}
 	}
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("modify user: status %d: %s", resp.StatusCode, string(respBody))
+	valid["enable"], valid["beginTime"], valid["endTime"] = true, beginTime, endTime
+	if _, ok := valid["timeType"]; !ok {
+		valid["timeType"] = "local"
 	}
-	return nil
+	next["Valid"] = valid
+	return client.ModifyRawUser(next)
 }
 
 // LockAllUsersOnDevice sweeps every user on a device into the locked state.
@@ -725,6 +735,9 @@ func (q *QRAuth) SetAllUsersVerifyMode(ctx context.Context, deviceID, mode strin
 	}
 	n := 0
 	for _, u := range users {
+		if len(u.Raw) == 0 {
+			return n, fmt.Errorf("device returned incomplete user record for %s", u.EmployeeNo)
+		}
 		verifyMode := mode
 		beginTime := "2020-01-01T00:00:00"
 		endTime := "2037-12-31T23:59:59"
@@ -736,30 +749,189 @@ func (q *QRAuth) SetAllUsersVerifyMode(ctx context.Context, deviceID, mode strin
 			beginTime = "2000-01-01T00:00:00"
 			endTime = "2000-12-31T23:59:59"
 		}
-		body, _ := json.Marshal(map[string]any{
-			"UserInfo": map[string]any{
-				"employeeNo":     sanitizeFPID(u.EmployeeNo),
-				"name":           u.Name,
-				"userType":       firstNonEmpty(u.UserType, "normal"),
-				"localUIRight":   u.LocalUIRight,
-				"userVerifyMode": verifyMode,
-				"gender":         firstNonEmpty(u.Gender, "unknown"),
-				"doorRight":      firstNonEmpty(u.DoorRight, "1"),
-				"RightPlan":      []map[string]any{{"doorNo": 1, "planTemplateNo": "1"}},
-				"Valid": map[string]any{
-					"enable":    true,
-					"beginTime": beginTime,
-					"endTime":   endTime,
-					"timeType":  "local",
-				},
-			},
-		})
-		resp, _, err := client.Do("PUT", "/ISAPI/AccessControl/UserInfo/Modify?format=json", "application/json", body)
-		if err == nil && resp.StatusCode == 200 {
-			n++
+		record := cloneUserRecord(u.Raw)
+		record["userVerifyMode"] = verifyMode
+		valid, _ := record["Valid"].(map[string]any)
+		if valid == nil {
+			valid = map[string]any{}
 		}
+		valid["enable"], valid["beginTime"], valid["endTime"] = true, beginTime, endTime
+		if _, ok := valid["timeType"]; !ok {
+			valid["timeType"] = "local"
+		}
+		record["Valid"] = valid
+		if err := client.ModifyRawUser(record); err != nil {
+			return n, err
+		}
+		n++
 	}
 	return n, nil
+}
+
+func cloneUserRecord(in map[string]any) map[string]any {
+	b, _ := json.Marshal(in)
+	out := map[string]any{}
+	_ = json.Unmarshal(b, &out)
+	return out
+}
+
+func employeeNoOf(record map[string]any) string {
+	v, ok := record["employeeNo"].(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(v)
+}
+
+// PreviewDeviceAccessMode is read-only. It exposes exactly which terminal
+// users would change before an administrator applies a mode.
+func (q *QRAuth) PreviewDeviceAccessMode(ctx context.Context, tenantID, deviceID, desiredMode string) (map[string]any, error) {
+	desiredMode, err := normalizeDeviceAccessMode(desiredMode)
+	if err != nil {
+		return nil, err
+	}
+	deviceTenant, err := q.store.GetDeviceTenant(ctx, deviceID)
+	if err != nil || deviceTenant != tenantID {
+		return nil, errors.New("device not found in merchant")
+	}
+	d, err := q.store.GetDevice(ctx, deviceID)
+	if err != nil || d == nil {
+		return nil, errors.New("device not found")
+	}
+	users, err := NewISAPIClientForDevice(d, q.hub).ListUsers()
+	if err != nil {
+		return nil, err
+	}
+	targetVerify := nativeVerifyMode
+	if desiredMode == DeviceAccessModeNormalQR {
+		targetVerify = unlockedVerifyMode
+	}
+	items := make([]map[string]any, 0, len(users))
+	for _, u := range users {
+		items = append(items, map[string]any{"employeeNo": u.EmployeeNo, "name": u.Name, "currentVerifyMode": u.UserVerifyMode, "targetVerifyMode": targetVerify, "valid": u.Valid})
+	}
+	return map[string]any{"deviceId": deviceID, "currentMode": d.AccessMode, "desiredMode": desiredMode, "userCount": len(users), "users": items}, nil
+}
+
+// ApplyDeviceAccessMode performs a two-phase hardware-first update. Every raw
+// user is snapshotted, changed, read back, and verified. Any failure restores
+// users changed during this attempt; only a verified terminal updates the DB.
+func (q *QRAuth) ApplyDeviceAccessMode(ctx context.Context, tenantID, deviceID, desiredMode string) (map[string]any, error) {
+	q.modeMu.Lock()
+	defer q.modeMu.Unlock()
+	desiredMode, err := normalizeDeviceAccessMode(desiredMode)
+	if err != nil {
+		return nil, err
+	}
+	deviceTenant, err := q.store.GetDeviceTenant(ctx, deviceID)
+	if err != nil || deviceTenant != tenantID {
+		return nil, errors.New("device not found in merchant")
+	}
+	_ = q.store.SetDeviceModeApplyState(ctx, tenantID, deviceID, "applying", "")
+	fail := func(e error) (map[string]any, error) {
+		_ = q.store.SetDeviceModeApplyState(ctx, tenantID, deviceID, "failed", e.Error())
+		return nil, e
+	}
+	d, err := q.store.GetDevice(ctx, deviceID)
+	if err != nil || d == nil {
+		return fail(errors.New("device not found"))
+	}
+	client := NewISAPIClientForDevice(d, q.hub)
+	users, err := client.ListUsers()
+	if err != nil {
+		return fail(err)
+	}
+	before := make([]map[string]any, 0, len(users))
+	for _, u := range users {
+		if len(u.Raw) == 0 || employeeNoOf(u.Raw) == "" {
+			return fail(fmt.Errorf("incomplete user record for %s", u.EmployeeNo))
+		}
+		original := cloneUserRecord(u.Raw)
+		before = append(before, original)
+		if err := q.store.SaveDeviceUserModeSnapshot(ctx, deviceID, employeeNoOf(original), original); err != nil {
+			return fail(err)
+		}
+	}
+	snapshots, err := q.store.GetDeviceUserModeSnapshots(ctx, deviceID)
+	if err != nil {
+		return fail(err)
+	}
+	changed := make([]map[string]any, 0, len(before))
+	rollback := func() error {
+		var rollbackErr error
+		for i := len(changed) - 1; i >= 0; i-- {
+			if e := client.ModifyRawUser(changed[i]); e != nil && rollbackErr == nil {
+				rollbackErr = e
+			}
+		}
+		return rollbackErr
+	}
+	for _, current := range before {
+		employeeNo := employeeNoOf(current)
+		base := current
+		if desiredMode == DeviceAccessModeHikvisionNative {
+			if saved := snapshots[employeeNo]; saved != nil {
+				base = saved
+			}
+		}
+		next := cloneUserRecord(base)
+		if desiredMode == DeviceAccessModeNormalQR {
+			next["userVerifyMode"] = unlockedVerifyMode
+			valid, _ := next["Valid"].(map[string]any)
+			if valid == nil {
+				valid = map[string]any{}
+			}
+			valid["enable"], valid["beginTime"], valid["endTime"] = true, "2000-01-01T00:00:00", "2000-12-31T23:59:59"
+			if _, ok := valid["timeType"]; !ok {
+				valid["timeType"] = "local"
+			}
+			next["Valid"] = valid
+		} else {
+			next["userVerifyMode"] = nativeVerifyMode
+		}
+		if err := client.ModifyRawUser(next); err != nil {
+			rbErr := rollback()
+			if rbErr != nil {
+				err = fmt.Errorf("%w; rollback failed: %v", err, rbErr)
+			}
+			return fail(fmt.Errorf("apply user %s: %w", employeeNo, err))
+		}
+		changed = append(changed, current)
+	}
+	verified, err := client.ListUsers()
+	if err != nil {
+		_ = rollback()
+		return fail(fmt.Errorf("read-back: %w", err))
+	}
+	targetVerify := nativeVerifyMode
+	if desiredMode == DeviceAccessModeNormalQR {
+		targetVerify = unlockedVerifyMode
+	}
+	verifiedByID := map[string]DeviceUserRecord{}
+	for _, u := range verified {
+		verifiedByID[u.EmployeeNo] = u
+	}
+	for _, old := range before {
+		id := employeeNoOf(old)
+		u, ok := verifiedByID[id]
+		if !ok || u.UserVerifyMode != targetVerify {
+			_ = rollback()
+			return fail(fmt.Errorf("read-back mismatch for user %s", id))
+		}
+		if desiredMode == DeviceAccessModeNormalQR && (u.Valid == nil || u.Valid.BeginTime != "2000-01-01T00:00:00" || u.Valid.EndTime != "2000-12-31T23:59:59") {
+			_ = rollback()
+			return fail(fmt.Errorf("read-back validity mismatch for user %s", id))
+		}
+	}
+	stations, err := q.store.SetDeviceAccessMode(ctx, tenantID, deviceID, desiredMode)
+	if err != nil {
+		rbErr := rollback()
+		if rbErr != nil {
+			err = fmt.Errorf("%w; rollback failed: %v", err, rbErr)
+		}
+		return fail(err)
+	}
+	return map[string]any{"ok": true, "deviceId": deviceID, "accessMode": desiredMode, "usersUpdated": len(before), "stationsUpdated": stations, "hikvisionVerifyMode": targetVerify}, nil
 }
 
 // ApplyDeviceMode pushes the baseline implied by the device access mode.

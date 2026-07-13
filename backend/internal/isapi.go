@@ -484,6 +484,44 @@ type DeviceUserRecord struct {
 	Raw            map[string]any   `json:"-"`
 }
 
+// UnmarshalJSON retains the complete device record. Hikvision firmwares add
+// model-specific fields, so rebuilding UserInfo from this typed subset can
+// silently erase door plans, schedules, PINs, and other permissions.
+func (u *DeviceUserRecord) UnmarshalJSON(data []byte) error {
+	type alias DeviceUserRecord
+	var typed alias
+	if err := json.Unmarshal(data, &typed); err != nil {
+		return err
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*u = DeviceUserRecord(typed)
+	u.Raw = raw
+	return nil
+}
+
+// ModifyRawUser writes a previously-read UserInfo record. Callers should copy
+// the map and change only the fields they own.
+func (c *ISAPIClient) ModifyRawUser(user map[string]any) error {
+	if strings.TrimSpace(fmt.Sprint(user["employeeNo"])) == "" {
+		return errors.New("user record has no employeeNo")
+	}
+	body, err := json.Marshal(map[string]any{"UserInfo": user})
+	if err != nil {
+		return err
+	}
+	resp, respBody, err := c.Do("PUT", "/ISAPI/AccessControl/UserInfo/Modify?format=json", "application/json", body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("modify user: status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
 type DeviceUserValid struct {
 	Enable    bool   `json:"enable"`
 	BeginTime string `json:"beginTime"`

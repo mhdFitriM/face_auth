@@ -57,6 +57,8 @@ All command methods funnel through `ISAPIClient.Do()` in [backend/internal/isapi
 
 ## Phase 2 — Better enrolment (capture-at-device + cards + fingerprints)
 
+> Native enrolment APIs apply only to devices set to **Hikvision QR / face / card**. A **Normal QR** device is relay-only: members and QR policy remain in FaceAuth cloud, and face/card/fingerprint/native-QR writes return HTTP `409`. Settings provides a preview-and-confirm terminal cleanup that preserves cloud records.
+
 **Goal:** enrol credentials by capturing them *live at the reader* (face shown / card swiped / finger pressed), not just by uploading a photo — plus write cards and fingerprints.
 
 **Backend ISAPI methods** — [backend/internal/isapi.go](backend/internal/isapi.go) (all route via OTAP/agent/direct):

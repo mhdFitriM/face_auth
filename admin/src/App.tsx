@@ -3107,6 +3107,10 @@ function SettingsTab() {
   const [createdKey, setCreatedKey] = useState<any | null>(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
+  const [modeDrafts, setModeDrafts] = useState<Record<string, 'normal_qr' | 'hikvision_native'>>({})
+  const [modePreviews, setModePreviews] = useState<Record<string, any>>({})
+  const [cleanupPreviews, setCleanupPreviews] = useState<Record<string, any>>({})
+  const [modeBusy, setModeBusy] = useState('')
 
   const load = async () => {
     try {
@@ -3138,12 +3142,52 @@ function SettingsTab() {
 
   const setDeviceAccessMode = async (deviceId: string, accessMode: 'normal_qr' | 'hikvision_native') => {
     setApplyMsg('')
+    const preview = modePreviews[deviceId]
+    if (!preview || preview.desiredMode !== accessMode) {
+      setErr('Preview this device change before applying it.')
+      return
+    }
+    if (!confirm(`Apply ${accessMode === 'normal_qr' ? 'Normal QR relay' : 'Hikvision QR / face / card'} to ${deviceId}? ${preview.userCount || 0} existing Hikvision user record(s) will be updated with rollback protection.`)) return
+    setModeBusy(deviceId); setErr('')
     try {
       const r: any = await api.setDeviceAccessMode(deviceId, accessMode)
       const label = accessMode === 'normal_qr' ? 'Normal QR relay' : 'Hikvision QR / face / card'
       setApplyMsg(`${deviceId}: ${label}. ${r.stationsUpdated || 0} scanner station(s) synchronized; ${r.usersUpdated || 0} Hikvision user(s) updated.${r.applyError ? ` Device sync warning: ${r.applyError}` : ''}`)
+      setModePreviews(p => { const next = { ...p }; delete next[deviceId]; return next })
       load()
-    } catch (e: any) { setErr(String(e)) }
+    } catch (e: any) { setErr(String(e)) } finally { setModeBusy('') }
+  }
+
+  const previewDeviceAccessMode = async (deviceId: string, accessMode: 'normal_qr' | 'hikvision_native') => {
+    setModeBusy(deviceId); setErr(''); setApplyMsg('')
+    try {
+      const preview: any = await api.previewDeviceAccessMode(deviceId, accessMode)
+      setModePreviews(p => ({ ...p, [deviceId]: preview }))
+      setApplyMsg(`${deviceId}: preview ready. ${preview.userCount || 0} existing Hikvision user record(s) will be preserved and verified.`)
+    } catch (e: any) { setErr(String(e)) } finally { setModeBusy('') }
+  }
+
+  const previewNativeCleanup = async (deviceId: string) => {
+    setModeBusy(deviceId); setErr(''); setApplyMsg('')
+    try {
+      const preview: any = await api.previewNativeCredentialCleanup(deviceId)
+      setCleanupPreviews(p => ({ ...p, [deviceId]: preview }))
+      setApplyMsg(`${deviceId}: terminal cleanup preview — ${preview.users?.length || 0} users, ${preview.faces || 0} faces, ${preview.cards || 0} cards. Cloud records will be preserved.`)
+    } catch (e: any) { setErr(String(e)) } finally { setModeBusy('') }
+  }
+
+  const applyNativeCleanup = async (deviceId: string) => {
+    const preview = cleanupPreviews[deviceId]
+    if (!preview) return
+    const typed = prompt(`This deletes native credentials from ${deviceId} only. Face images, cards, members and logs stay in FaceAuth cloud. Type DELETE_NATIVE_CREDENTIALS to continue.`)
+    if (typed !== 'DELETE_NATIVE_CREDENTIALS') return
+    setModeBusy(deviceId); setErr(''); setApplyMsg('')
+    try {
+      const r: any = await api.cleanupNativeCredentials(deviceId)
+      setApplyMsg(`${deviceId}: removed ${r.usersDeleted || 0} terminal users, ${r.facesDeleted || 0} faces and ${r.cardsDeleted || 0} cards. Cloud data preserved.`)
+      setCleanupPreviews(p => { const next = { ...p }; delete next[deviceId]; return next })
+      load()
+    } catch (e: any) { setErr(String(e)) } finally { setModeBusy('') }
   }
 
   const applyOne = async (deviceId: string) => {
@@ -3226,6 +3270,9 @@ function SettingsTab() {
             <tbody>
               {devices.map((d) => {
                 const current = d.accessMode === 'hikvision_native' ? 'hikvision_native' : 'normal_qr'
+                const draft = modeDrafts[d.deviceID] || current
+                const preview = modePreviews[d.deviceID]
+                const cleanup = cleanupPreviews[d.deviceID]
                 return (
                   <tr key={d.deviceID}>
                     <td>
@@ -3241,14 +3288,25 @@ function SettingsTab() {
                     </td>
                     <td className="ta-right">
                       <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-                        <select value={current} onChange={(e) => {
-                          setDeviceAccessMode(d.deviceID, e.target.value as 'normal_qr' | 'hikvision_native')
+                        <select value={draft} disabled={modeBusy === d.deviceID} onChange={(e) => {
+                          const value = e.target.value as 'normal_qr' | 'hikvision_native'
+                          setModeDrafts(p => ({ ...p, [d.deviceID]: value }))
+                          setModePreviews(p => { const next = { ...p }; delete next[d.deviceID]; return next })
                         }}>
                           <option value="normal_qr">Normal QR (FaceAuth relay)</option>
                           <option value="hikvision_native">Hikvision QR / face / card</option>
                         </select>
-                        <button className="btn-ghost" onClick={() => applyOne(d.deviceID)} title="Re-push the effective mode to this device now">Apply</button>
+                        <button className="btn-ghost" disabled={modeBusy === d.deviceID} onClick={() => previewDeviceAccessMode(d.deviceID, draft)}>Preview</button>
+                        <button className="btn-primary" disabled={modeBusy === d.deviceID || !preview || preview.desiredMode !== draft} onClick={() => setDeviceAccessMode(d.deviceID, draft)}>Apply</button>
                       </div>
+                      {preview && preview.desiredMode === draft && <div className="muted small" style={{ marginTop: 5 }}>{preview.userCount || 0} user(s) · current {preview.currentMode} · rollback protected</div>}
+                      {current === 'normal_qr' && <div style={{ marginTop: 7 }}>
+                        <button className="btn-ghost" disabled={modeBusy === d.deviceID} onClick={() => previewNativeCleanup(d.deviceID)}>Preview terminal credential cleanup</button>
+                        {cleanup && <div className="muted small" style={{ marginTop: 5 }}>
+                          {cleanup.users?.length || 0} users · {cleanup.faces || 0} faces · {cleanup.cards || 0} cards
+                          <button className="btn-danger" style={{ marginLeft: 7 }} disabled={modeBusy === d.deviceID} onClick={() => applyNativeCleanup(d.deviceID)}>Delete from terminal</button>
+                        </div>}
+                      </div>}
                     </td>
                   </tr>
                 )
@@ -3782,9 +3840,9 @@ const ENDPOINTS: EndpointDef[] = [
   { method: 'GET', path: '/api/v1/devices/:id/snapshot', group: 'v1 — Devices', summary: 'Single JPEG frame', auth: 'v1', responseType: 'image', params: [{ name: 'id', in: 'path', required: true }] },
   { method: 'GET', path: '/api/v1/devices/:id/stream.mjpg', group: 'v1 — Devices', summary: 'Continuous MJPEG stream', auth: 'v1', responseType: 'mjpeg', params: [{ name: 'id', in: 'path', required: true }, { name: 'fps', in: 'query', type: 'int', description: '1-15, default 4' }, { name: 'seconds', in: 'query', type: 'int', description: 'auto-close after N sec, 0=forever' }] },
   { method: 'POST', path: '/api/v1/devices/:id/open-door', group: 'v1 — Devices', summary: 'Trigger door unlock', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'door', in: 'query', type: 'int', description: 'door number, default 1' }] },
-  { method: 'POST', path: '/api/v1/devices/:id/sync-persons', group: 'v1 — Devices', summary: 'Pull users from device → local DB', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'POST', path: '/api/v1/devices/:id/sync-persons', group: 'v1 — Devices', summary: 'Pull users from a Hikvision-native device into cloud (Normal QR returns 409)', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
   { method: 'GET', path: '/api/v1/devices/:id/face-lib', group: 'v1 — Devices', summary: 'List faces stored on the device', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
-  { method: 'POST', path: '/api/v1/devices/:id/isapi', group: 'v1 — Devices', summary: 'Raw ISAPI passthrough (advanced)', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { method: 'GET', path: '/ISAPI/System/deviceInfo', body: '' } },
+  { method: 'POST', path: '/api/v1/devices/:id/isapi', group: 'v1 — Devices', summary: 'Raw ISAPI passthrough; credential writes are blocked for Normal QR', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { method: 'GET', path: '/ISAPI/System/deviceInfo', body: '' } },
 
   { method: 'GET', path: '/api/v1/persons', group: 'v1 — Persons', summary: 'List people', auth: 'v1' },
   { method: 'POST', path: '/api/v1/persons', group: 'v1 — Persons', summary: 'Create a person', auth: 'v1', bodyExample: { name: 'Alice', employeeNo: '1001', personType: 'normal', personRole: 'basic' } },
@@ -3794,7 +3852,7 @@ const ENDPOINTS: EndpointDef[] = [
   { method: 'GET', path: '/api/v1/persons/:id/qr.png', group: 'v1 — Persons', summary: 'Render QR as PNG', auth: 'v1', responseType: 'image', params: [{ name: 'id', in: 'path', required: true }, { name: 'size', in: 'query', type: 'int', description: '96-1024, default 256' }] },
 
   { method: 'GET', path: '/api/v1/devices/:id/faces', group: 'v1 — Faces', summary: 'List enrolled faces (local DB)', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'personId', in: 'query' }] },
-  { method: 'POST', path: '/api/v1/devices/:id/faces', group: 'v1 — Faces', summary: 'Enrol a face (multipart upload)', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'file', in: 'form', required: true, description: 'JPEG' }, { name: 'personId', in: 'form' }, { name: 'name', in: 'form' }, { name: 'employeeNo', in: 'form' }] },
+  { method: 'POST', path: '/api/v1/devices/:id/faces', group: 'v1 — Faces', summary: 'Enrol a face on a Hikvision-native device (Normal QR returns 409)', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'file', in: 'form', required: true, description: 'JPEG' }, { name: 'personId', in: 'form' }, { name: 'name', in: 'form' }, { name: 'employeeNo', in: 'form' }] },
   { method: 'DELETE', path: '/api/v1/devices/:id/faces/:personId', group: 'v1 — Faces', summary: 'Delete a face from device', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'personId', in: 'path', required: true }] },
 
   {
@@ -3871,7 +3929,10 @@ const ENDPOINTS: EndpointDef[] = [
   { method: 'GET', path: '/api/settings', group: 'admin — Settings', summary: 'Get global settings', auth: 'admin' },
   { method: 'PUT', path: '/api/settings', group: 'admin — Settings', summary: 'Save global settings', auth: 'admin', bodyExample: { requireQR2FA: true, faceAuthWindowSec: 10, publicApiEnabled: true } },
   { method: 'GET', path: '/api/devices/:id/access-mode', group: 'admin — Settings', summary: 'Read the device credential authority', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
-  { method: 'PUT', path: '/api/devices/:id/access-mode', group: 'admin — Settings', summary: 'Choose FaceAuth QR relay or Hikvision-native face/card/card-number QR', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { accessMode: 'normal_qr' } },
+  { method: 'GET', path: '/api/devices/:id/access-mode/preview', group: 'admin — Settings', summary: 'Read-only preview of affected Hikvision users before changing mode', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'accessMode', in: 'query', required: true, description: 'normal_qr or hikvision_native' }] },
+  { method: 'PUT', path: '/api/devices/:id/access-mode', group: 'admin — Settings', summary: 'Safely apply FaceAuth QR relay or Hikvision-native face/card/card-number QR with snapshot, read-back, and rollback', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { accessMode: 'normal_qr' } },
+  { method: 'GET', path: '/api/devices/:id/native-data/cleanup/preview', group: 'admin — Settings', summary: 'Preview terminal credentials that will be removed from a Normal QR relay', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'POST', path: '/api/devices/:id/native-data/cleanup', group: 'admin — Settings', summary: 'Delete terminal credentials while preserving FaceAuth cloud member data', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { confirm: 'DELETE_NATIVE_CREDENTIALS' } },
   { method: 'PUT', path: '/api/devices/:id/require-qr', group: 'admin — Settings', summary: 'Legacy QR-before-face override', auth: 'admin', bodyExample: { value: true } },
   { method: 'GET', path: '/api/api-keys', group: 'admin — API Keys', summary: 'List API keys', auth: 'admin' },
   { method: 'POST', path: '/api/api-keys', group: 'admin — API Keys', summary: 'Create API key (returns plaintext once)', auth: 'admin', bodyExample: { name: 'kiosk' } },
@@ -3880,6 +3941,7 @@ const ENDPOINTS: EndpointDef[] = [
   { method: 'POST', path: '/api/devices', group: 'admin — Devices', summary: 'Register a device', auth: 'admin', bodyExample: { deviceId: 'lobby-1', name: 'Lobby', ip: '192.168.1.50', port: 80, isapiUsername: 'admin', isapiPassword: 'pass' } },
   { method: 'DELETE', path: '/api/devices/:id', group: 'admin — Devices', summary: 'Delete a device', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
   { method: 'POST', path: '/api/devices/:id/setup-alarm-host', group: 'admin — Devices', summary: 'Register face_auth as alarm host on device', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'POST', path: '/api/devices/:id/isapi', group: 'admin — Devices', summary: 'Raw ISAPI passthrough; credential writes are blocked for Normal QR', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { method: 'GET', path: '/ISAPI/System/deviceInfo', body: '' } },
   { method: 'GET', path: '/api/devices/:id/wifi', group: 'admin — Devices', summary: 'Read device Wi-Fi config', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'ifId', in: 'query', required: false }] },
   { method: 'POST', path: '/api/devices/:id/wifi/scan', group: 'admin — Devices', summary: 'Scan for nearby Wi-Fi access points', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'ifId', in: 'query', required: false }] },
   { method: 'PUT', path: '/api/devices/:id/wifi', group: 'admin — Devices', summary: 'Join a Wi-Fi network', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { ssid: 'OfficeWiFi', password: 'secret123', securityMode: 'WPA2-personal' } },
@@ -3914,12 +3976,12 @@ const ENDPOINTS: EndpointDef[] = [
   { method: 'GET', path: '/api/events/stream', group: 'admin — Events', summary: 'SSE stream', auth: 'admin', responseType: 'sse' },
 
   // ---- Enrolment: capture-at-device + cards + fingerprints (v1 + admin) ----
-  { method: 'POST', path: '/api/v1/devices/:id/capture/face', group: 'v1 — Enrolment', summary: 'Capture a live face at the reader', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'infrared', in: 'query', description: 'true to also grab IR' }] },
-  { method: 'POST', path: '/api/v1/devices/:id/capture/card', group: 'v1 — Enrolment', summary: 'Capture a card swipe', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
-  { method: 'POST', path: '/api/v1/devices/:id/capture/fingerprint', group: 'v1 — Enrolment', summary: 'Capture a fingerprint', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'finger', in: 'query', type: 'int', description: 'finger no, default 1' }] },
-  { method: 'POST', path: '/api/v1/devices/:id/cards', group: 'v1 — Enrolment', summary: 'Bind/modify a card', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { employeeNo: '1001', cardNo: '0468229170', cardType: 'normalCard', mode: '' } },
+  { method: 'POST', path: '/api/v1/devices/:id/capture/face', group: 'v1 — Enrolment', summary: 'Capture a live face on a Hikvision-native device (Normal QR returns 409)', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'infrared', in: 'query', description: 'true to also grab IR' }] },
+  { method: 'POST', path: '/api/v1/devices/:id/capture/card', group: 'v1 — Enrolment', summary: 'Capture a card on a Hikvision-native device (Normal QR returns 409)', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'POST', path: '/api/v1/devices/:id/capture/fingerprint', group: 'v1 — Enrolment', summary: 'Capture a fingerprint on a Hikvision-native device (Normal QR returns 409)', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'finger', in: 'query', type: 'int', description: 'finger no, default 1' }] },
+  { method: 'POST', path: '/api/v1/devices/:id/cards', group: 'v1 — Enrolment', summary: 'Bind/modify a card on a Hikvision-native device (Normal QR returns 409)', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { employeeNo: '1001', cardNo: '0468229170', cardType: 'normalCard', mode: '' } },
   { method: 'DELETE', path: '/api/v1/devices/:id/cards/:cardNo', group: 'v1 — Enrolment', summary: 'Delete a card', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'cardNo', in: 'path', required: true }] },
-  { method: 'POST', path: '/api/v1/devices/:id/fingerprints', group: 'v1 — Enrolment', summary: 'Upload a fingerprint template', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { employeeNo: '1001', fingerPrintID: 1, fingerData: '<base64>' } },
+  { method: 'POST', path: '/api/v1/devices/:id/fingerprints', group: 'v1 — Enrolment', summary: 'Upload a fingerprint to a Hikvision-native device (Normal QR returns 409)', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { employeeNo: '1001', fingerPrintID: 1, fingerData: '<base64>' } },
   { method: 'DELETE', path: '/api/v1/devices/:id/fingerprints/:employeeNo', group: 'v1 — Enrolment', summary: 'Delete fingerprint(s)', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'employeeNo', in: 'path', required: true }, { name: 'finger', in: 'query', type: 'int', description: 'one print; omit for all' }] },
 
   // ---- Health & access schedules (v1) ----
@@ -3929,25 +3991,28 @@ const ENDPOINTS: EndpointDef[] = [
 
   // ---- QR-via-camera + intercom (v1) ----
   { method: 'GET', path: '/api/v1/devices/:id/qr-capability', group: 'v1 — QR & Intercom', summary: 'Does the camera support QR?', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
-  { method: 'POST', path: '/api/v1/devices/:id/qr-scan', group: 'v1 — QR & Intercom', summary: 'Enable/disable camera QR scanning', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { enable: true } },
+  { method: 'POST', path: '/api/v1/devices/:id/qr-scan', group: 'v1 — QR & Intercom', summary: 'Enable/disable native camera QR (Normal QR returns 409)', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { enable: true } },
   { method: 'GET', path: '/api/v1/devices/:id/intercom/capabilities', group: 'v1 — QR & Intercom', summary: 'VideoIntercom support (isSupportCallSignal)', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
   { method: 'GET', path: '/api/v1/devices/:id/intercom/status', group: 'v1 — QR & Intercom', summary: 'Current call status (idle/ring/onCall)', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
   { method: 'POST', path: '/api/v1/devices/:id/intercom/signal', group: 'v1 — QR & Intercom', summary: 'Drive the call (request/answer/hangUp/…)', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }, { name: 'cmd', in: 'query', description: 'request|answer|hangUp|cancel|reject, default request' }] },
 
   // ---- Same features on the admin mount (session auth) ----
-  { method: 'POST', path: '/api/devices/:id/capture/face', group: 'admin — Enrolment', summary: 'Capture a live face at the reader', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'infrared', in: 'query' }] },
-  { method: 'POST', path: '/api/devices/:id/capture/card', group: 'admin — Enrolment', summary: 'Capture a card swipe', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
-  { method: 'POST', path: '/api/devices/:id/capture/fingerprint', group: 'admin — Enrolment', summary: 'Capture a fingerprint', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'finger', in: 'query', type: 'int' }] },
-  { method: 'POST', path: '/api/devices/:id/cards', group: 'admin — Enrolment', summary: 'Bind/modify a card', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { employeeNo: '1001', cardNo: '0468229170' } },
+  { method: 'POST', path: '/api/devices/:id/push-user', group: 'admin — Enrolment', summary: 'Push cloud member UserInfo to a Hikvision-native device (Normal QR returns 409)', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { personId: 'psn_xxx' } },
+  { method: 'POST', path: '/api/devices/:id/sync-persons', group: 'admin — Enrolment', summary: 'Pull native terminal users into cloud (Normal QR returns 409)', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'POST', path: '/api/devices/:id/faces', group: 'admin — Enrolment', summary: 'Enrol a face on a Hikvision-native device (Normal QR returns 409)', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'file', in: 'form', required: true }, { name: 'personId', in: 'form' }] },
+  { method: 'POST', path: '/api/devices/:id/capture/face', group: 'admin — Enrolment', summary: 'Capture a face on a Hikvision-native device (Normal QR returns 409)', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'infrared', in: 'query' }] },
+  { method: 'POST', path: '/api/devices/:id/capture/card', group: 'admin — Enrolment', summary: 'Capture a card on a Hikvision-native device (Normal QR returns 409)', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'POST', path: '/api/devices/:id/capture/fingerprint', group: 'admin — Enrolment', summary: 'Capture a fingerprint on a Hikvision-native device (Normal QR returns 409)', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'finger', in: 'query', type: 'int' }] },
+  { method: 'POST', path: '/api/devices/:id/cards', group: 'admin — Enrolment', summary: 'Bind/modify a card on a Hikvision-native device (Normal QR returns 409)', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { employeeNo: '1001', cardNo: '0468229170' } },
   { method: 'DELETE', path: '/api/devices/:id/cards/:cardNo', group: 'admin — Enrolment', summary: 'Delete a card', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'cardNo', in: 'path', required: true }] },
-  { method: 'POST', path: '/api/devices/:id/fingerprints', group: 'admin — Enrolment', summary: 'Upload a fingerprint template', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { employeeNo: '1001', fingerPrintID: 1, fingerData: '<base64>' } },
+  { method: 'POST', path: '/api/devices/:id/fingerprints', group: 'admin — Enrolment', summary: 'Upload a fingerprint to a Hikvision-native device (Normal QR returns 409)', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { employeeNo: '1001', fingerPrintID: 1, fingerData: '<base64>' } },
   { method: 'DELETE', path: '/api/devices/:id/fingerprints/:employeeNo', group: 'admin — Enrolment', summary: 'Delete fingerprint(s)', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'employeeNo', in: 'path', required: true }, { name: 'finger', in: 'query', type: 'int' }] },
   { method: 'GET', path: '/api/devices/:id/work-status', group: 'admin — Health & Schedules', summary: 'Device health', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
   { method: 'GET', path: '/api/devices/:id/week-plan/:planNo', group: 'admin — Health & Schedules', summary: 'Read a week plan', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'planNo', in: 'path', required: true }] },
   { method: 'PUT', path: '/api/devices/:id/week-plan/:planNo', group: 'admin — Health & Schedules', summary: 'Write per-weekday allow windows', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'planNo', in: 'path', required: true }], bodyExample: { days: [{ week: 'Monday', enable: true, begin: '09:00:00', end: '18:00:00' }] } },
   { method: 'PUT', path: '/api/devices/:id/plan-template/:tplNo', group: 'admin — Health & Schedules', summary: 'Bind a template to a week plan', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }, { name: 'tplNo', in: 'path', required: true }], bodyExample: { name: 'office-hours', weekPlanNo: 1 } },
   { method: 'GET', path: '/api/devices/:id/qr-capability', group: 'admin — QR & Intercom', summary: 'Does the camera support QR?', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
-  { method: 'POST', path: '/api/devices/:id/qr-scan', group: 'admin — QR & Intercom', summary: 'Enable/disable camera QR scanning', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { enable: true } },
+  { method: 'POST', path: '/api/devices/:id/qr-scan', group: 'admin — QR & Intercom', summary: 'Enable/disable native camera QR (Normal QR returns 409)', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { enable: true } },
   { method: 'GET', path: '/api/devices/:id/qr-diagnose', group: 'admin — QR & Intercom', summary: 'Sweep every ISAPI namespace where firmwares expose camera QR', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
   { method: 'POST', path: '/api/devices/:id/qr-push', group: 'admin — QR & Intercom', summary: 'Register one enrolled card number as Hikvision-native QR payload', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { personId: 'psn_xxx', mode: 'cardOrFace', validSec: 43200, times: 0 } },
   { method: 'POST', path: '/api/devices/:id/qr-mode-all', group: 'admin — QR & Intercom', summary: 'Register enrolled card numbers as native QR payloads for all persons', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }], bodyExample: { mode: 'cardOrFace', validSec: 43200, times: 0 } },

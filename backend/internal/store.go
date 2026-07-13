@@ -247,6 +247,17 @@ ALTER TABLE devices ADD COLUMN IF NOT EXISTS require_qr_2fa BOOLEAN;
 -- hikvision_native means the terminal verifies face, enrolled cards, and QR
 -- images whose payload is the enrolled card number.
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS access_mode TEXT NOT NULL DEFAULT 'normal_qr';
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS mode_apply_status TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS mode_apply_error TEXT DEFAULT '';
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS mode_applied_at TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS device_user_mode_snapshots (
+    device_id TEXT NOT NULL REFERENCES devices(device_id) ON DELETE CASCADE,
+    employee_no TEXT NOT NULL,
+    snapshot JSONB NOT NULL,
+    captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (device_id, employee_no)
+);
 
 -- ============================================================
 --  Multi-tenant tables (added late — existing data lives in a

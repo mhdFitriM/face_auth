@@ -224,6 +224,7 @@ docker compose up -d --build backend admin</pre>
         <span class="sec-no">05 — Enrolment</span>
         <h2>Enrol a person's face, card &amp; finger</h2>
         <p>Create the person, then give them a credential. Upload a photo — or, better, <b>capture at the reader</b>: the user presents their face, card, or finger right at the door.</p>
+        <p><b>Hikvision-native devices only:</b> face, card, fingerprint, and card-number QR credentials are copied to the selected terminal. A <b>Normal QR</b> device keeps member data in FaceAuth cloud and acts only as an OpenDoor relay. Native enrolment is blocked for Normal QR devices.</p>
         <ol class="steps">
           <li><b>Members → New</b> (name, employee number, role).</li>
           <li>Open <b>Enrol</b>; choose the device and the person.</li>
