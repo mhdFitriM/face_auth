@@ -184,6 +184,7 @@ func runConnectionLoop(parent context.Context, reconnect <-chan struct{}) error 
 	var scanFn scanFunc
 	nativeRoutes := []scannerRoute{}
 	activeScannerCount := 0
+	activeQRPorts := map[string]bool{}
 
 	// Local scanner stations take priority over cloud access points.
 	// They are fully self-contained: device ID and door are stored in the
@@ -194,7 +195,8 @@ func runConnectionLoop(parent context.Context, reconnect <-chan struct{}) error 
 				continue
 			}
 			activeScannerCount++
-			fn := startQRListener(strconv.Itoa(st.Port), cloudHTTPBase, agentID, agentToken, "", st.DeviceID)
+			fn := startQRListener(strconv.Itoa(st.Port), cloudHTTPBase, agentID, agentToken, "", st.DeviceID, st.DoorNo)
+			activeQRPorts[strconv.Itoa(st.Port)] = true
 			if st.HardwareID != "" {
 				nativeRoutes = append(nativeRoutes, scannerRoute{ScannerID: st.ID, HardwareID: st.HardwareID, Scan: fn})
 			}
@@ -206,7 +208,8 @@ func runConnectionLoop(parent context.Context, reconnect <-chan struct{}) error 
 	} else {
 		points := fetchAgentAccessPoints(cloudHTTPBase, agentID, agentToken)
 		if len(points) == 0 {
-			scanFn = startQRListener(qrPort, cloudHTTPBase, agentID, agentToken, "", "")
+			scanFn = startQRListener(qrPort, cloudHTTPBase, agentID, agentToken, "", "", 1)
+			activeQRPorts[qrPort] = true
 			log.Printf("QR legacy listener on http://127.0.0.1:%s/scan", qrPort)
 		} else {
 			for _, point := range points {
@@ -214,7 +217,8 @@ func runConnectionLoop(parent context.Context, reconnect <-chan struct{}) error 
 					continue
 				}
 				activeScannerCount++
-				fn := startQRListener(strconv.Itoa(point.ScannerPort), cloudHTTPBase, agentID, agentToken, point.ID, "")
+				fn := startQRListener(strconv.Itoa(point.ScannerPort), cloudHTTPBase, agentID, agentToken, point.ID, "", point.DoorNo)
+				activeQRPorts[strconv.Itoa(point.ScannerPort)] = true
 				for _, binding := range cfg.ScannerBindings {
 					if binding.ScannerID == point.ScannerID && binding.HardwareID != "" {
 						nativeRoutes = append(nativeRoutes, scannerRoute{ScannerID: point.ScannerID, HardwareID: binding.HardwareID, Scan: fn})
@@ -227,6 +231,7 @@ func runConnectionLoop(parent context.Context, reconnect <-chan struct{}) error 
 			}
 		}
 	}
+	disableQRListenersExcept(activeQRPorts)
 
 	// On Linux, also read directly from /dev/input/eventN when QR_DEVICE
 	// (or QR_DEVICE_AUTO) is set. Same scanner-side flow, just no userspace
@@ -474,7 +479,7 @@ func recordScan(qr string, status int, body string, opened bool) {
 // the QR HTTP server is running. On reconnects the port stays bound (only one
 // server ever runs); the new scan function is stored in qrScan so the server
 // always forwards to the current cloud URL without rebinding.
-func startQRListener(port, cloudBase, agentID, agentToken, accessPointID, targetDevice string) scanFunc {
+func startQRListener(port, cloudBase, agentID, agentToken, accessPointID, targetDevice string, targetDoor int) scanFunc {
 	httpClient := &http.Client{
 		Timeout:   8 * time.Second,
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
@@ -511,6 +516,7 @@ func startQRListener(port, cloudBase, agentID, agentToken, accessPointID, target
 		payload, _ := json.Marshal(map[string]any{
 			"qrToken": qr, "agentId": agentID, "agentToken": agentToken,
 			"deviceId":      devID,
+			"doorNo":        targetDoor,
 			"directOpen":    accessPointID != "" || devID != "" || strings.EqualFold(getenv("QR_DIRECT_OPEN", "false"), "true"),
 			"accessPointId": accessPointID,
 			"correlationId": fmt.Sprintf("%s-%d", firstNonEmpty(accessPointID, agentID), time.Now().UnixNano()),
@@ -605,6 +611,20 @@ func startQRListener(port, cloudBase, agentID, agentToken, accessPointID, target
 	}
 
 	return scan
+}
+
+// disableQRListenersExcept makes removed or port-changed stations fail closed.
+// Listener sockets remain allocated for process lifetime, but no stale route
+// can continue authenticating or opening its former door.
+func disableQRListenersExcept(active map[string]bool) {
+	qrListeners.Lock()
+	defer qrListeners.Unlock()
+	for port := range qrListeners.started {
+		if !active[port] {
+			qrListeners.scans[port] = nil
+			log.Printf("QR listener :%s disabled (station removed or port changed)", port)
+		}
+	}
 }
 
 type agentAccessPoint struct {

@@ -115,7 +115,7 @@ func (q *QRAuth) Scan(ctx context.Context, qrToken, agentID string) (*QRSession,
 	return q.openSession(ctx, p, devices, "qr", "agent")
 }
 
-func (q *QRAuth) DirectOpen(ctx context.Context, credential, agentID, deviceID string) (*Person, string, error) {
+func (q *QRAuth) DirectOpen(ctx context.Context, credential, agentID, deviceID string, doorNo int) (*Person, string, error) {
 	if deviceID == "" {
 		return nil, "", errors.New("deviceId required for direct open")
 	}
@@ -154,7 +154,10 @@ func (q *QRAuth) DirectOpen(ctx context.Context, credential, agentID, deviceID s
 		_ = q.store.CommitAccess(ctx, decision, p.ID, p.EmployeeNo, deviceID, tenantID, "qr")
 		return p, decision.Reason, errors.New("access denied: " + decision.Reason)
 	}
-	resp, err := NewISAPIClientForDevice(d, q.hub).OpenDoor(1)
+	if doorNo <= 0 {
+		doorNo = 1
+	}
+	resp, err := NewISAPIClientForDevice(d, q.hub).OpenDoor(doorNo)
 	if err != nil {
 		return p, resp, err
 	}

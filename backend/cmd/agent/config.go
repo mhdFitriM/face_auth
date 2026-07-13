@@ -22,8 +22,8 @@ type AgentConfig struct {
 	QRDeviceAuto    bool             `json:"qr_device_auto,omitempty"`
 	QRTargetDevice  string           `json:"qr_target_device,omitempty"`
 	QRDirectOpen    bool             `json:"qr_direct_open,omitempty"`
-	ScannerBindings  []ScannerBinding  `json:"scanner_bindings,omitempty"`
-	ScannerStations  []ScannerStation  `json:"scanner_stations,omitempty"`
+	ScannerBindings []ScannerBinding `json:"scanner_bindings,omitempty"`
+	ScannerStations []ScannerStation `json:"scanner_stations,omitempty"`
 }
 
 // ScannerBinding connects one physical HID scanner to the scannerId of a
@@ -42,10 +42,10 @@ type ScannerStation struct {
 	ID         string `json:"id"`
 	Name       string `json:"name"`
 	HardwareID string `json:"hardware_id,omitempty"` // USB physical device path
-	DeviceID   string `json:"device_id"`              // Hikvision device to open
+	DeviceID   string `json:"device_id"`             // Hikvision device to open
 	DoorNo     int    `json:"door_no"`
 	Direction  string `json:"direction,omitempty"` // in | out
-	Port       int    `json:"port"`               // local HTTP listener port
+	Port       int    `json:"port"`                // local HTTP listener port
 }
 
 func (c *AgentConfig) Valid() bool {

@@ -1342,6 +1342,7 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 			AgentID       string `json:"agentId"`
 			AgentToken    string `json:"agentToken"`
 			DeviceID      string `json:"deviceId"`
+			DoorNo        int    `json:"doorNo"`
 			DirectOpen    bool   `json:"directOpen"`
 			AccessPointID string `json:"accessPointId"`
 			CorrelationID string `json:"correlationId"`
@@ -1360,11 +1361,11 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 				}
 				return c.JSON(fiber.Map{"ok": true, "opened": true, "accessPointId": point.ID, "deviceId": point.DeviceID, "doorNo": point.DoorNo, "direction": point.Direction, "person": p.Name, "employeeNo": p.EmployeeNo})
 			}
-			p, response, err := qrAuth.DirectOpen(c.Context(), body.QRToken, body.AgentID, body.DeviceID)
+			p, response, err := qrAuth.DirectOpen(c.Context(), body.QRToken, body.AgentID, body.DeviceID, body.DoorNo)
 			if err != nil {
 				return c.Status(400).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": response})
 			}
-			return c.JSON(fiber.Map{"ok": true, "opened": true, "deviceId": body.DeviceID, "person": p.Name, "employeeNo": p.EmployeeNo})
+			return c.JSON(fiber.Map{"ok": true, "opened": true, "deviceId": body.DeviceID, "doorNo": max(body.DoorNo, 1), "person": p.Name, "employeeNo": p.EmployeeNo})
 		}
 		s, err := qrAuth.Scan(c.Context(), body.QRToken, body.AgentID)
 		if err != nil {

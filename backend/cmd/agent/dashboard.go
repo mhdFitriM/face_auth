@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -351,6 +352,24 @@ func runDashboardServer(reconnect chan<- struct{}) {
 			if st.Port == 0 {
 				st.Port = nextStationPort(cfg.ScannerStations)
 			}
+			if st.Port < 1 || st.Port > 65535 || st.Port == 7780 {
+				httpJSON(w, 400, map[string]any{"ok": false, "error": "local HTTP port must be 1..65535 and cannot be the agent dashboard port 7780"})
+				return
+			}
+			if st.DoorNo < 1 || st.DoorNo > 32 {
+				httpJSON(w, 400, map[string]any{"ok": false, "error": "door number must be 1..32"})
+				return
+			}
+			for _, existing := range cfg.ScannerStations {
+				if existing.ID != st.ID && existing.Port == st.Port {
+					httpJSON(w, 409, map[string]any{"ok": false, "error": fmt.Sprintf("local HTTP port %d is already assigned to %s", st.Port, existing.Name)})
+					return
+				}
+			}
+			if !stationPortAvailable(st.Port) {
+				httpJSON(w, 409, map[string]any{"ok": false, "error": fmt.Sprintf("local HTTP port %d is already in use by another application", st.Port)})
+				return
+			}
 			if st.ID == "" {
 				st.ID = newShortID()
 			}
@@ -432,6 +451,24 @@ func runDashboardServer(reconnect chan<- struct{}) {
 		if cfg == nil {
 			httpJSON(w, 404, map[string]any{"ok": false, "error": "no config"})
 			return
+		}
+		connected := false
+		for _, d := range refreshPhysicalScanners() {
+			if strings.EqualFold(d.HardwareID, body.HardwareID) {
+				body.HardwareID = d.HardwareID
+				connected = true
+				break
+			}
+		}
+		if body.HardwareID != "" && !connected {
+			httpJSON(w, 400, map[string]any{"ok": false, "error": "selected Windows USB/HID port is no longer connected"})
+			return
+		}
+		for _, s := range cfg.ScannerStations {
+			if s.ID != body.StationID && body.HardwareID != "" && strings.EqualFold(s.HardwareID, body.HardwareID) {
+				httpJSON(w, 409, map[string]any{"ok": false, "error": "this Windows USB/HID port is already assigned to another station"})
+				return
+			}
 		}
 		found := false
 		for i, s := range cfg.ScannerStations {
@@ -598,6 +635,18 @@ func nextStationPort(stations []ScannerStation) int {
 			return p
 		}
 	}
+}
+
+func stationPortAvailable(port int) bool {
+	key := strconv.Itoa(port)
+	qrListeners.RLock()
+	alreadyOwned := qrListeners.started[key]
+	qrListeners.RUnlock()
+	if alreadyOwned { return true }
+	ln, err := net.Listen("tcp", "127.0.0.1:"+key)
+	if err != nil { return false }
+	_ = ln.Close()
+	return true
 }
 
 // newShortID returns an 8-char random hex string suitable for station IDs.
