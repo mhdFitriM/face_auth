@@ -3,13 +3,16 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 const qrWatcherFileName = "face_auth-qr-watcher.ahk"
@@ -170,4 +173,29 @@ func qrWatcherUninstall() error {
 		return err
 	}
 	return nil
+}
+
+// startQRWatchdog polls every 30 s and restarts the AHK watcher if it was
+// installed but is no longer running (crash or unexpected stop).
+func startQRWatchdog(ctx context.Context) {
+	go func() {
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				s := qrWatcherStatus()
+				if s.StartupInstalled && !s.Running {
+					log.Printf("[qr-watchdog] watcher stopped — restarting")
+					if err := qrWatcherStart(); err != nil {
+						log.Printf("[qr-watchdog] restart failed: %v", err)
+					} else {
+						log.Printf("[qr-watchdog] watcher restarted OK")
+					}
+				}
+			}
+		}
+	}()
 }

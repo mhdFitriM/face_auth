@@ -247,9 +247,11 @@ func (s *Store) ListDevicePlans(ctx context.Context, deviceID string) ([]string,
 
 func (s *Store) WriteAccessLog(ctx context.Context, e AccessLog) error {
 	_, err := s.PG.Exec(ctx, `
-		INSERT INTO access_log (tenant_id, person_id, employee_no, device_id, decision, reason, direction, open_method)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-	`, e.TenantID, nullIfEmpty(e.PersonID), e.EmployeeNo, e.DeviceID, e.Decision, e.Reason, e.Direction, e.OpenMethod)
+		INSERT INTO access_log (tenant_id, person_id, employee_no, device_id, decision, reason, direction, open_method,
+		outlet_id,access_point_id,access_point_name,agent_id,scanner_id,door_no,member_name,credential_mode,door_result,correlation_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+	`, e.TenantID, nullIfEmpty(e.PersonID), e.EmployeeNo, e.DeviceID, e.Decision, e.Reason, e.Direction, e.OpenMethod,
+		e.OutletID, e.AccessPointID, e.AccessPointName, e.AgentID, e.ScannerID, e.DoorNo, e.MemberName, e.CredentialMode, e.DoorResult, e.CorrelationID)
 	return err
 }
 
@@ -257,7 +259,8 @@ func (s *Store) ListAccessLog(ctx context.Context, tenantID string, limit int) (
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
-	q := `SELECT id, COALESCE(tenant_id,''), COALESCE(person_id,''), COALESCE(employee_no,''), COALESCE(device_id,''), decision, COALESCE(reason,''), COALESCE(direction,''), COALESCE(open_method,''), created_at
+	q := `SELECT id, COALESCE(tenant_id,''), COALESCE(person_id,''), COALESCE(employee_no,''), COALESCE(device_id,''), decision, COALESCE(reason,''), COALESCE(direction,''), COALESCE(open_method,''),
+	COALESCE(outlet_id,''),COALESCE(access_point_id,''),COALESCE(access_point_name,''),COALESCE(agent_id,''),COALESCE(scanner_id,''),COALESCE(door_no,0),COALESCE(member_name,''),COALESCE(credential_mode,''),COALESCE(door_result,''),COALESCE(correlation_id,''),created_at
 	      FROM access_log`
 	args := []any{}
 	if tenantID != "" {
@@ -273,7 +276,8 @@ func (s *Store) ListAccessLog(ctx context.Context, tenantID string, limit int) (
 	out := []AccessLog{}
 	for rows.Next() {
 		var a AccessLog
-		if err := rows.Scan(&a.ID, &a.TenantID, &a.PersonID, &a.EmployeeNo, &a.DeviceID, &a.Decision, &a.Reason, &a.Direction, &a.OpenMethod, &a.CreatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.TenantID, &a.PersonID, &a.EmployeeNo, &a.DeviceID, &a.Decision, &a.Reason, &a.Direction, &a.OpenMethod,
+			&a.OutletID, &a.AccessPointID, &a.AccessPointName, &a.AgentID, &a.ScannerID, &a.DoorNo, &a.MemberName, &a.CredentialMode, &a.DoorResult, &a.CorrelationID, &a.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -366,10 +370,31 @@ func (s *Store) EvaluateAccess(ctx context.Context, personID string, when time.T
 	return AccessDecision{Allow: false, PlanID: plan.ID, Reason: "unknown plan type"}
 }
 
+func (s *Store) EvaluateAccessForDirection(ctx context.Context, personID string, when time.Time, direction string) AccessDecision {
+	d := s.EvaluateAccess(ctx, personID, when)
+	if direction == "" || direction == "bidirectional" {
+		return d
+	}
+	if direction == "in" && d.Direction == "out" {
+		return AccessDecision{Allow: false, PlanID: d.PlanID, PlanType: d.PlanType, Direction: "in", Reason: "already inside — exit required before re-entry"}
+	}
+	if direction == "out" {
+		return AccessDecision{Allow: true, PlanID: d.PlanID, PlanType: d.PlanType, Direction: "out", Reason: "exit"}
+	}
+	d.Direction = "in"
+	return d
+}
+
 // CommitAccess updates state after a decision: credit decrement, inside flag,
 // and the access_log row. Idempotent — safe to call on duplicate events from
 // the camera (though we don't dedupe internally).
-func (s *Store) CommitAccess(ctx context.Context, decision AccessDecision, personID, employeeNo, deviceID, tenantID, openMethod string) error {
+type AccessLogContext struct {
+	OutletID, AccessPointID, AccessPointName, AgentID, ScannerID string
+	DoorNo                                                       int
+	MemberName, CredentialMode, DoorResult, CorrelationID        string
+}
+
+func (s *Store) CommitAccess(ctx context.Context, decision AccessDecision, personID, employeeNo, deviceID, tenantID, openMethod string, details ...AccessLogContext) error {
 	if decision.Allow {
 		if decision.PlanType == PlanCredit && decision.Direction == "in" {
 			_, _ = s.DecrementCredit(ctx, personID)
@@ -382,7 +407,7 @@ func (s *Store) CommitAccess(ctx context.Context, decision AccessDecision, perso
 			_ = s.SetPersonInside(ctx, personID, false)
 		}
 	}
-	return s.WriteAccessLog(ctx, AccessLog{
+	entry := AccessLog{
 		TenantID:   tenantID,
 		PersonID:   personID,
 		EmployeeNo: employeeNo,
@@ -391,7 +416,14 @@ func (s *Store) CommitAccess(ctx context.Context, decision AccessDecision, perso
 		Reason:     decision.Reason,
 		Direction:  decision.Direction,
 		OpenMethod: openMethod,
-	})
+	}
+	if len(details) > 0 {
+		d := details[0]
+		entry.OutletID, entry.AccessPointID, entry.AccessPointName = d.OutletID, d.AccessPointID, d.AccessPointName
+		entry.AgentID, entry.ScannerID, entry.DoorNo = d.AgentID, d.ScannerID, d.DoorNo
+		entry.MemberName, entry.CredentialMode, entry.DoorResult, entry.CorrelationID = d.MemberName, d.CredentialMode, d.DoorResult, d.CorrelationID
+	}
+	return s.WriteAccessLog(ctx, entry)
 }
 
 // matchAnyRule returns true if `when` falls into at least one rule's
@@ -402,8 +434,8 @@ func (s *Store) CommitAccess(ctx context.Context, decision AccessDecision, perso
 // gate snaps shut at exactly 15:15:00. This matches the common-sense reading
 // of "the window ends at 15:15".
 func matchAnyRule(rules []PlanRule, when time.Time) (bool, string) {
-	wd := int(when.Weekday())       // 0=Sun..6=Sat
-	wdBit := ((wd + 6) % 7)          // remap so Mon=0
+	wd := int(when.Weekday()) // 0=Sun..6=Sat
+	wdBit := ((wd + 6) % 7)   // remap so Mon=0
 	mask := 1 << uint(wdBit)
 	cur := when.Hour()*60 + when.Minute()
 	for _, r := range rules {

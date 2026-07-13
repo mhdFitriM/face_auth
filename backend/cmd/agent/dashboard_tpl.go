@@ -85,6 +85,7 @@ var dashboardTpl = template.Must(template.New("dash").Parse(`<!doctype html>
   .status-pill.err{color:var(--err);border-color:rgba(248,81,73,0.35);background:var(--err-soft)}
   @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(63,185,80,0.4)}70%{box-shadow:0 0 0 8px rgba(63,185,80,0)}100%{box-shadow:0 0 0 0 rgba(63,185,80,0)}}
   .header-actions{margin-left:auto;display:flex;align-items:center;gap:8px;flex-shrink:0}
+  .myt-clock{font-size:12px;font-variant-numeric:tabular-nums;color:var(--muted);letter-spacing:0.02em;font-family:ui-monospace,Menlo,Consolas,monospace;flex-shrink:0}
   .theme-toggle{width:34px;height:34px;border-radius:50%;border:1px solid var(--border);background:var(--soft);color:var(--text);cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
   .theme-toggle:hover{background:var(--hover)}
   .theme-toggle svg{width:16px;height:16px}
@@ -187,9 +188,10 @@ var dashboardTpl = template.Must(template.New("dash").Parse(`<!doctype html>
     <div class="brand">
       <span class="brand-dot"></span>
       <h1>face_auth agent</h1>
-      <span class="platform">v2.1 · {{.OS}}</span>
+      <span class="platform">v2.3 · {{.OS}}</span>
     </div>
     <div class="header-actions">
+      <span id="myt-clock" class="myt-clock" title="Malaysia Time (MYT = UTC+8)"></span>
       <span id="pill" class="status-pill"><span class="dot"></span><span id="pill-text">connecting…</span></span>
       <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light / dark">
         <svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
@@ -249,8 +251,8 @@ var dashboardTpl = template.Must(template.New("dash").Parse(`<!doctype html>
         <div class="step" id="step-ahk">
           <div class="step-num"><span>1</span></div>
           <div class="step-body">
-            <h3>AutoHotkey v2</h3>
-            <p id="step-ahk-desc">Required to run the watcher script. Free, ~3 MB, takes 30 seconds to install.</p>
+            <h3>{{if eq .OS "darwin"}}macOS keyboard access{{else}}AutoHotkey v2{{end}}</h3>
+            <p id="step-ahk-desc">{{if eq .OS "darwin"}}The native watcher requires Accessibility permission to read USB scanner keystrokes.{{else}}Required to run the watcher script. Free, ~3 MB, takes 30 seconds to install.{{end}}</p>
             <div class="btn-row">
               <a id="ahk-link" class="btn primary" href="#" target="_blank" rel="noopener">Download AutoHotkey v2</a>
               <button class="btn ghost" onclick="refreshQR()">I've installed it — recheck</button>
@@ -355,6 +357,7 @@ var dashboardTpl = template.Must(template.New("dash").Parse(`<!doctype html>
 <div id="toast" class="toast"></div>
 
 <script>
+const agentOS = '{{.OS}}';
 const $ = (id) => document.getElementById(id);
 let lastQR = null;
 
@@ -515,9 +518,9 @@ async function refreshQR() {
 
     // Step 1 — AutoHotkey
     $('step-ahk').classList.toggle('done', r.autohotkey_installed);
-    $('step-ahk-desc').textContent = r.autohotkey_installed
-      ? ('Detected at ' + (r.autohotkey_path || ''))
-      : 'Required to run the watcher script. Free, ~3 MB, takes 30 seconds to install.';
+    $('step-ahk-desc').textContent = agentOS === 'darwin'
+      ? (r.running ? 'Native watcher has keyboard access and is running.' : 'Allow face_auth-qr-watcher under System Settings → Privacy & Security → Accessibility.')
+      : (r.autohotkey_installed ? ('Detected at ' + (r.autohotkey_path || '')) : 'Required to run the watcher script. Free, ~3 MB, takes 30 seconds to install.');
 
     // Step 2 — Install + run state
     const installed = !!r.startup_installed;
@@ -571,6 +574,28 @@ async function qrUninstall() {
   toast(r.ok ? 'Removed from auto-start' : ('Remove failed: ' + (r.error||'unknown')), r.ok ? 'ok' : 'err');
   refreshQR();
 }
+
+// ─── MYT World Clock ──────────────────────────────────────
+function tickMYT() {
+  const el = $('myt-clock');
+  if (!el) return;
+  const now = new Date();
+  const time = now.toLocaleTimeString('en-MY', {
+    timeZone: 'Asia/Kuala_Lumpur',
+    hour12: false,
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+  const date = now.toLocaleDateString('en-MY', {
+    timeZone: 'Asia/Kuala_Lumpur',
+    day: '2-digit',
+    month: 'short',
+  });
+  el.textContent = 'MYT ' + date + ' ' + time;
+}
+tickMYT();
+setInterval(tickMYT, 1000);
 
 // PWA — register the tiny service worker so the install button appears
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});

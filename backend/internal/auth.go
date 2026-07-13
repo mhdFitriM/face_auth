@@ -32,8 +32,8 @@ import (
 )
 
 const (
-	RoleHQ            = "hq_admin"
-	RoleTenantAdmin   = "tenant_admin"
+	RoleHQ             = "hq_admin"
+	RoleTenantAdmin    = "tenant_admin"
 	RoleTenantOperator = "tenant_operator"
 
 	sessionTTL = 14 * 24 * time.Hour
@@ -286,6 +286,12 @@ func requireRole(roles ...string) fiber.Handler {
 //
 // Returns ("", error) if the caller is HQ and didn't pass a tenant.
 func tenantScope(c *fiber.Ctx) (string, error) {
+	if k, _ := c.Locals("apiKey").(*APIKey); k != nil {
+		if k.TenantID == "" {
+			return "", fmt.Errorf("API key has no tenant scope")
+		}
+		return k.TenantID, nil
+	}
 	u, _ := c.Locals("user").(*User)
 	if u == nil {
 		return "", fmt.Errorf("not authenticated")

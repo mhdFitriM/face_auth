@@ -66,6 +66,8 @@ export interface PersonForm {
   planTemplate?: string
   validBegin?: string
   validEnd?: string
+  qrMode?: 'static' | 'dynamic' | 'hikvision'
+  qrRotationSec?: number
 }
 
 export interface DeviceForm {
@@ -200,6 +202,8 @@ export const api = {
     return req(`/api/persons/${encodeURIComponent(id)}${q}`, { method: 'DELETE' })
   },
   getPerson: (id: string) => req(`/api/persons/${encodeURIComponent(id)}`),
+  getPersonAccessPoints: (id: string) => req(`/api/persons/${encodeURIComponent(id)}/access-points`),
+  setPersonAccessPoints: (id: string, accessPointIds: string[]) => req(`/api/persons/${encodeURIComponent(id)}/access-points`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accessPointIds }) }),
   syncPersons: (deviceId: string) => req(`/api/devices/${encodeURIComponent(deviceId)}/sync-persons`, { method: 'POST' }),
   openDoor: (deviceId: string, door = 1) => req(`/api/devices/${encodeURIComponent(deviceId)}/open-door?door=${door}`, { method: 'POST' }),
   snapshotUrl: (deviceId: string) => {
@@ -243,6 +247,10 @@ export const api = {
     }),
   // ----- Branches (one site = one agent + its devices) -----
   listBranches: () => req('/api/branches'),
+  listAccessPoints: (outletId = '') => req(`/api/access-points${outletId ? `?outletId=${encodeURIComponent(outletId)}` : ''}`),
+  createAccessPoint: (body: any) => req('/api/access-points', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+  updateAccessPoint: (id: string, body: any) => req(`/api/access-points/${encodeURIComponent(id)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+  deleteAccessPoint: (id: string) => req(`/api/access-points/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   createBranch: (name: string, address?: string) =>
     req('/api/branches', {
       method: 'POST',
@@ -278,6 +286,7 @@ export const api = {
   agentDownloadUrl: (file: string) => apiUrl(`/api/agents/downloads/${encodeURIComponent(file)}`),
   agentScriptUrl: (file: string) => apiUrl(`/api/agents/scripts/${encodeURIComponent(file)}`),
   rotateQR: (personId: string) => req(`/api/persons/${encodeURIComponent(personId)}/qr/rotate`, { method: 'POST' }),
+  currentQR: (personId: string) => req(`/api/persons/${encodeURIComponent(personId)}/qr/current`),
   // Authenticated object URL for <img> tags. The /api/images/* route is
   // session-gated, and <img> can't send an Authorization header, so the
   // session token is passed via ?token= (sessionAuth accepts it on GET).
@@ -468,6 +477,14 @@ export const api = {
   unassignDevicePlan: (deviceId: string, planId: string) =>
     req(`/api/devices/${encodeURIComponent(deviceId)}/plans/${encodeURIComponent(planId)}`, { method: 'DELETE' }),
   accessLog: (limit = 200) => req(`/api/access-log?limit=${limit}`),
+  accessSummary: (outletId = '') => req(`/api/reports/access-summary${outletId ? `?outletId=${encodeURIComponent(outletId)}` : ''}`),
+  accessLogExportUrl: (outletId = '') => {
+    const p = new URLSearchParams()
+    if (outletId) p.set('outletId', outletId)
+    if (auth.token) p.set('token', auth.token)
+    if (auth.activeTenantId) p.set('tenantId', auth.activeTenantId)
+    return apiUrl(`/api/access-log/export.csv?${p.toString()}`)
+  },
 
   // Generic raw caller for API Docs "Try it" feature
   raw: async (method: string, path: string, opts?: { apiKey?: string; body?: any; contentType?: string }) => {

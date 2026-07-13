@@ -13,9 +13,9 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -181,16 +181,38 @@ func runConnectionLoop(parent context.Context, reconnect <-chan struct{}) error 
 	} else if strings.HasPrefix(cloudHTTPBase, "wss://") {
 		cloudHTTPBase = "https://" + cloudHTTPBase[len("wss://"):]
 	}
-	scanFn := startQRListener(qrPort, cloudHTTPBase, agentID, agentToken)
-	log.Printf("QR scan listener on http://127.0.0.1:%s/scan", qrPort)
+	points := fetchAgentAccessPoints(cloudHTTPBase, agentID, agentToken)
+	var scanFn scanFunc
+	activeScannerCount := 0
+	if len(points) == 0 {
+		scanFn = startQRListener(qrPort, cloudHTTPBase, agentID, agentToken, "")
+		log.Printf("QR legacy listener on http://127.0.0.1:%s/scan", qrPort)
+	} else {
+		for _, point := range points {
+			if point.AuthMode != "faceauth_qr" || !point.Enabled {
+				continue
+			}
+			activeScannerCount++
+			fn := startQRListener(strconv.Itoa(point.ScannerPort), cloudHTTPBase, agentID, agentToken, point.ID)
+			if scanFn == nil {
+				scanFn = fn
+			}
+			log.Printf("QR access point %s listener on http://127.0.0.1:%d/scan -> %s door %d", point.ID, point.ScannerPort, point.DeviceID, point.DoorNo)
+		}
+	}
 
 	// On Linux, also read directly from /dev/input/eventN when QR_DEVICE
 	// (or QR_DEVICE_AUTO) is set. Same scanner-side flow, just no userspace
 	// helper needed.
-	startNativeHID(func(line string) {
-		status, body := scanFn(line)
-		log.Printf("HID scan -> cloud: %d %s", status, strings.TrimSpace(body)[:min(120, len(strings.TrimSpace(body)))])
-	})
+	startQRWatchdog(parent)
+	if scanFn != nil && activeScannerCount <= 1 {
+		startNativeHID(func(line string) {
+			status, body := scanFn(line)
+			log.Printf("HID scan -> cloud: %d %s", status, strings.TrimSpace(body)[:min(120, len(strings.TrimSpace(body)))])
+		})
+	} else if activeScannerCount > 1 {
+		log.Printf("HID global capture disabled: %d scanner stations require device-bound or network scanner input", activeScannerCount)
+	}
 
 	backoff := time.Second
 	attempt := 0
@@ -254,7 +276,7 @@ func connect(ctx context.Context, dialURL, agentID, agentName string) error {
 
 	// Send hello
 	c.SetWriteDeadline(time.Now().Add(agentWriteTimeout))
-	hello := internal.Frame{Type: "hello", AgentID: agentID, AgentName: agentName, Version: "2.1"}
+	hello := internal.Frame{Type: "hello", AgentID: agentID, AgentName: agentName, Version: "2.3"}
 	if err := c.WriteJSON(hello); err != nil {
 		return err
 	}
@@ -361,18 +383,20 @@ type scanFunc = func(qr string) (status int, body string)
 
 // qrScan holds the live scan function. The HTTP server always calls through
 // this pointer so that reconnects with new config don't need to rebind the port.
-var qrScan atomic.Pointer[scanFunc]
-
-// qrHTTPStarted tracks whether the QR HTTP server is already bound to its port.
-var qrHTTPStarted atomic.Bool
+var qrListeners = struct {
+	sync.RWMutex
+	scans   map[string]*scanFunc
+	started map[string]bool
+}{scans: map[string]*scanFunc{}, started: map[string]bool{}}
 
 // ScanEntry is one record in the debug ring buffer.
 type ScanEntry struct {
-	Time    string `json:"time"`
-	QR      string `json:"qr"`   // first 32 chars only
-	Status  int    `json:"status"`
-	Body    string `json:"body"`
-	Opened  bool   `json:"opened"`
+	Time   string `json:"time"`
+	QR     string `json:"qr"` // first 32 chars only
+	Member string `json:"member,omitempty"`
+	Status int    `json:"status"`
+	Body   string `json:"body"`
+	Opened bool   `json:"opened"`
 }
 
 var (
@@ -386,9 +410,14 @@ func recordScan(qr string, status int, body string, opened bool) {
 	if len(preview) > 32 {
 		preview = preview[:32] + "…"
 	}
+	var response struct {
+		Person string `json:"person"`
+	}
+	_ = json.Unmarshal([]byte(body), &response)
 	e := ScanEntry{
 		Time:   time.Now().Format("15:04:05"),
 		QR:     preview,
+		Member: response.Person,
 		Status: status,
 		Body:   body,
 		Opened: opened,
@@ -405,7 +434,7 @@ func recordScan(qr string, status int, body string, opened bool) {
 // the QR HTTP server is running. On reconnects the port stays bound (only one
 // server ever runs); the new scan function is stored in qrScan so the server
 // always forwards to the current cloud URL without rebinding.
-func startQRListener(port, cloudBase, agentID, agentToken string) scanFunc {
+func startQRListener(port, cloudBase, agentID, agentToken, accessPointID string) scanFunc {
 	httpClient := &http.Client{
 		Timeout:   8 * time.Second,
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
@@ -437,8 +466,10 @@ func startQRListener(port, cloudBase, agentID, agentToken string) scanFunc {
 		}
 		payload, _ := json.Marshal(map[string]any{
 			"qrToken": qr, "agentId": agentID, "agentToken": agentToken,
-			"deviceId":   getenv("QR_TARGET_DEVICE", ""),
-			"directOpen": strings.EqualFold(getenv("QR_DIRECT_OPEN", "false"), "true"),
+			"deviceId":      getenv("QR_TARGET_DEVICE", ""),
+			"directOpen":    accessPointID != "" || strings.EqualFold(getenv("QR_DIRECT_OPEN", "false"), "true"),
+			"accessPointId": accessPointID,
+			"correlationId": fmt.Sprintf("%s-%d", firstNonEmpty(accessPointID, agentID), time.Now().UnixNano()),
 		})
 		req, err := http.NewRequest("POST", cloudBase+"/api/qr-auth/scan", bytes.NewReader(payload))
 		if err != nil {
@@ -459,15 +490,24 @@ func startQRListener(port, cloudBase, agentID, agentToken string) scanFunc {
 
 	// Update the global pointer so the already-running HTTP server picks up the
 	// new cloud target without needing to rebind the port.
-	qrScan.Store(&scan)
+	qrListeners.Lock()
+	qrListeners.scans[port] = &scan
+	alreadyStarted := qrListeners.started[port]
+	if !alreadyStarted {
+		qrListeners.started[port] = true
+	}
+	qrListeners.Unlock()
 
 	// Start the HTTP server only once for the lifetime of the process.
-	if qrHTTPStarted.CompareAndSwap(false, true) {
+	if !alreadyStarted {
 		mux := http.NewServeMux()
 
 		// Dispatch through qrScan so reconnects with new config work without restart.
 		dispatch := func(qr string) (int, string) {
-			if fn := qrScan.Load(); fn != nil {
+			qrListeners.RLock()
+			fn := qrListeners.scans[port]
+			qrListeners.RUnlock()
+			if fn != nil {
 				return (*fn)(qr)
 			}
 			return 503, `{"error":"scanner not ready"}`
@@ -521,6 +561,45 @@ func startQRListener(port, cloudBase, agentID, agentToken string) scanFunc {
 	}
 
 	return scan
+}
+
+type agentAccessPoint struct {
+	ID          string `json:"id"`
+	ScannerPort int    `json:"scannerPort"`
+	DeviceID    string `json:"deviceId"`
+	DoorNo      int    `json:"doorNo"`
+	AuthMode    string `json:"authMode"`
+	Enabled     bool   `json:"enabled"`
+}
+
+func fetchAgentAccessPoints(cloudBase, agentID, agentToken string) []agentAccessPoint {
+	u := cloudBase + "/api/agent/access-points?agentId=" + url.QueryEscape(agentID) + "&token=" + url.QueryEscape(agentToken)
+	client := &http.Client{Timeout: 8 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+	resp, err := client.Get(u)
+	if err != nil {
+		log.Printf("access-point config: %v; using legacy listener", err)
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		log.Printf("access-point config: HTTP %d; using legacy listener", resp.StatusCode)
+		return nil
+	}
+	var points []agentAccessPoint
+	if err := json.NewDecoder(resp.Body).Decode(&points); err != nil {
+		log.Printf("access-point config decode: %v", err)
+		return nil
+	}
+	return points
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return "scan"
 }
 
 func min(a, b int) int {

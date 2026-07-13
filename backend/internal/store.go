@@ -168,6 +168,14 @@ ALTER TABLE persons ADD COLUMN IF NOT EXISTS valid_end TIMESTAMPTZ;
 ALTER TABLE persons ADD COLUMN IF NOT EXISTS qr_token TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_persons_qr_token ON persons(qr_token) WHERE qr_token IS NOT NULL AND qr_token <> '';
 
+CREATE TABLE IF NOT EXISTS person_qr_settings (
+    person_id TEXT PRIMARY KEY REFERENCES persons(id) ON DELETE CASCADE,
+    mode TEXT NOT NULL DEFAULT 'static',
+    rotation_seconds INTEGER NOT NULL DEFAULT 180,
+    secret TEXT NOT NULL DEFAULT '',
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS cards (
     card_id    TEXT PRIMARY KEY,
     person_id  TEXT NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
@@ -327,8 +335,20 @@ CREATE TABLE IF NOT EXISTS access_log (
     decision    TEXT,            -- allow | deny | observed
     reason      TEXT,
     direction   TEXT DEFAULT '', -- in | out | unknown
+    open_method TEXT DEFAULT '', -- qr | face | card | fingerprint | pin
     created_at  TIMESTAMPTZ DEFAULT NOW()
 );
+ALTER TABLE access_log ADD COLUMN IF NOT EXISTS open_method TEXT DEFAULT '';
+ALTER TABLE access_log ADD COLUMN IF NOT EXISTS outlet_id TEXT DEFAULT '';
+ALTER TABLE access_log ADD COLUMN IF NOT EXISTS access_point_id TEXT DEFAULT '';
+ALTER TABLE access_log ADD COLUMN IF NOT EXISTS access_point_name TEXT DEFAULT '';
+ALTER TABLE access_log ADD COLUMN IF NOT EXISTS agent_id TEXT DEFAULT '';
+ALTER TABLE access_log ADD COLUMN IF NOT EXISTS scanner_id TEXT DEFAULT '';
+ALTER TABLE access_log ADD COLUMN IF NOT EXISTS door_no INTEGER DEFAULT 0;
+ALTER TABLE access_log ADD COLUMN IF NOT EXISTS member_name TEXT DEFAULT '';
+ALTER TABLE access_log ADD COLUMN IF NOT EXISTS credential_mode TEXT DEFAULT '';
+ALTER TABLE access_log ADD COLUMN IF NOT EXISTS door_result TEXT DEFAULT '';
+ALTER TABLE access_log ADD COLUMN IF NOT EXISTS correlation_id TEXT DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_access_log_tenant_time ON access_log(tenant_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_access_log_person_time ON access_log(person_id, created_at DESC);
 
@@ -363,8 +383,8 @@ CREATE TABLE IF NOT EXISTS settings (
 ALTER TABLE plans        ADD COLUMN IF NOT EXISTS one_per_day      BOOLEAN DEFAULT FALSE;
 ALTER TABLE person_plans ADD COLUMN IF NOT EXISTS last_entry_date  DATE;
 
--- Branches: one physical site (outlet/office) per tenant. A branch owns its
--- LAN agent and its devices; device commands route via the branch's agent.
+-- Branches: one physical site (outlet/office) per tenant. An outlet may own
+-- multiple LAN agents and devices.
 CREATE TABLE IF NOT EXISTS branches (
     id TEXT PRIMARY KEY,
     tenant_id TEXT,
@@ -375,9 +395,8 @@ CREATE TABLE IF NOT EXISTS branches (
 CREATE INDEX IF NOT EXISTS idx_branches_tenant ON branches(tenant_id);
 ALTER TABLE agents  ADD COLUMN IF NOT EXISTS branch_id TEXT;
 ALTER TABLE devices ADD COLUMN IF NOT EXISTS branch_id TEXT;
--- Strict rule: at most ONE agent per branch (partial unique index).
-CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_branch_unique
-    ON agents(branch_id) WHERE branch_id IS NOT NULL AND branch_id <> '';
+DROP INDEX IF EXISTS idx_agents_branch_unique;
+CREATE INDEX IF NOT EXISTS idx_agents_branch ON agents(branch_id);
 CREATE INDEX IF NOT EXISTS idx_devices_branch ON devices(branch_id);
 
 -- Backfill: every pre-branch agent becomes its own branch (deterministic id
@@ -393,6 +412,35 @@ UPDATE devices d SET branch_id = a.branch_id
 FROM agents a
 WHERE (d.branch_id IS NULL OR d.branch_id = '')
   AND d.agent_id IS NOT NULL AND d.agent_id <> '' AND a.id = d.agent_id;
+
+CREATE TABLE IF NOT EXISTS access_points (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    outlet_id TEXT NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+    scanner_id TEXT NOT NULL,
+    scanner_port INTEGER NOT NULL,
+    device_id TEXT NOT NULL REFERENCES devices(device_id) ON DELETE RESTRICT,
+    door_no INTEGER NOT NULL DEFAULT 1,
+    direction TEXT NOT NULL DEFAULT 'in',
+    auth_mode TEXT NOT NULL DEFAULT 'disabled',
+    accepted_qr TEXT NOT NULL DEFAULT 'both',
+    rejection_sound BOOLEAN NOT NULL DEFAULT TRUE,
+    enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(agent_id, scanner_port),
+    UNIQUE(agent_id, scanner_id)
+);
+CREATE INDEX IF NOT EXISTS idx_access_points_tenant_outlet ON access_points(tenant_id, outlet_id);
+CREATE INDEX IF NOT EXISTS idx_access_points_agent ON access_points(agent_id);
+CREATE TABLE IF NOT EXISTS person_access_points (
+    person_id TEXT NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+    access_point_id TEXT NOT NULL REFERENCES access_points(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY(person_id,access_point_id)
+);
 `
 
 // ---------- Device ops ----------

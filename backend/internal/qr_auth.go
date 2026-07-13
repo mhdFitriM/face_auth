@@ -89,17 +89,9 @@ func (q *QRAuth) window() time.Duration {
 // Maps QR token → Person → calls openSession(qr) on every device linked to
 // the agent.
 func (q *QRAuth) Scan(ctx context.Context, qrToken, agentID string) (*QRSession, error) {
-	candidates := tokenCandidates(qrToken)
-	var p *Person
-	for _, t := range candidates {
-		pp, err := q.store.GetPersonByQRToken(ctx, t)
-		if err != nil {
-			return nil, fmt.Errorf("lookup: %w", err)
-		}
-		if pp != nil {
-			p = pp
-			break
-		}
+	p, err := q.resolveFaceAuthQR(ctx, qrToken)
+	if err != nil {
+		return nil, fmt.Errorf("lookup: %w", err)
 	}
 	if p == nil {
 		return nil, errors.New("unknown QR token")
@@ -138,15 +130,9 @@ func (q *QRAuth) DirectOpen(ctx context.Context, credential, agentID, deviceID s
 	// face_auth. Hikvision card and face databases are not consulted: after
 	// face_auth verifies identity and access policy, the device is used only as
 	// a relay for the OpenDoor command.
-	var p *Person
-	for _, candidate := range tokenCandidates(credential) {
-		p, err = q.store.GetPersonByQRToken(ctx, candidate)
-		if err != nil {
-			return nil, "", err
-		}
-		if p != nil {
-			break
-		}
+	p, err := q.resolveFaceAuthQR(ctx, credential)
+	if err != nil {
+		return nil, "", err
 	}
 	if p == nil {
 		return nil, "", errors.New("unknown face_auth QR")
@@ -174,6 +160,120 @@ func (q *QRAuth) DirectOpen(ctx context.Context, credential, agentID, deviceID s
 	}
 	_ = q.store.CommitAccess(ctx, decision, p.ID, p.EmployeeNo, deviceID, tenantID, "qr")
 	return p, resp, nil
+}
+
+func (q *QRAuth) DirectOpenAccessPoint(ctx context.Context, credential, agentID, accessPointID, correlationID string) (*Person, *AccessPoint, string, error) {
+	tenantID, outletID, err := q.store.GetAgentScope(ctx, agentID)
+	if err != nil || tenantID == "" || outletID == "" {
+		return nil, nil, "", errors.New("agent has no merchant/outlet assignment")
+	}
+	a, err := q.store.GetAccessPoint(ctx, tenantID, accessPointID)
+	if err != nil || a == nil {
+		return nil, nil, "", errors.New("access point not found")
+	}
+	if a.AgentID != agentID || a.OutletID != outletID {
+		return nil, a, "", errors.New("access point is not assigned to this agent/outlet")
+	}
+	if !a.Enabled || a.AuthMode == "disabled" {
+		q.logAccessPointDenial(ctx, tenantID, a, nil, "access point is disabled", "unknown", correlationID)
+		return nil, a, "", errors.New("access point is disabled")
+	}
+	if a.AuthMode != "faceauth_qr" {
+		q.logAccessPointDenial(ctx, tenantID, a, nil, "access point uses Hikvision-native authentication", "unknown", correlationID)
+		return nil, a, "", errors.New("access point uses Hikvision-native authentication")
+	}
+	p, err := q.resolveFaceAuthQR(ctx, credential)
+	if err != nil {
+		return nil, a, "", err
+	}
+	if p == nil {
+		q.logAccessPointDenial(ctx, tenantID, a, nil, "unknown face_auth QR", "unknown", correlationID)
+		return nil, a, "", errors.New("unknown face_auth QR")
+	}
+	q.store.PopulatePersonQRSettings(ctx, p)
+	if a.AcceptedQR != "both" && p.QRMode != a.AcceptedQR {
+		q.logAccessPointDenial(ctx, tenantID, a, p, fmt.Sprintf("access point does not accept %s QR", p.QRMode), p.QRMode, correlationID)
+		return p, a, "", fmt.Errorf("access point does not accept %s QR", p.QRMode)
+	}
+	personTenant, _ := q.store.GetPersonTenant(ctx, p.ID)
+	if personTenant != tenantID {
+		q.logAccessPointDenial(ctx, tenantID, a, p, "QR member and access point are not in the same merchant", p.QRMode, correlationID)
+		return p, a, "", errors.New("QR member and access point are not in the same merchant")
+	}
+	allowed, err := q.store.PersonAllowedAtAccessPoint(ctx, p.ID, a.ID)
+	if err != nil {
+		return p, a, "", err
+	}
+	if !allowed {
+		q.logAccessPointDenial(ctx, tenantID, a, p, "member is not assigned to this access point", p.QRMode, correlationID)
+		return p, a, "", errors.New("member is not assigned to this access point")
+	}
+	now := time.Now()
+	if p.ValidBegin != nil && now.Before(*p.ValidBegin) {
+		q.logAccessPointDenial(ctx, tenantID, a, p, "access not started", p.QRMode, correlationID)
+		return p, a, "", errors.New("access not started")
+	}
+	if p.ValidEnd != nil && now.After(*p.ValidEnd) {
+		q.logAccessPointDenial(ctx, tenantID, a, p, "access expired", p.QRMode, correlationID)
+		return p, a, "", errors.New("access expired")
+	}
+	decision := q.store.EvaluateAccessForDirection(ctx, p.ID, now, a.Direction)
+	details := AccessLogContext{OutletID: a.OutletID, AccessPointID: a.ID, AccessPointName: a.Name, AgentID: a.AgentID, ScannerID: a.ScannerID, DoorNo: a.DoorNo, MemberName: p.Name, CredentialMode: p.QRMode, CorrelationID: correlationID}
+	if !decision.Allow {
+		_ = q.store.CommitAccess(ctx, decision, p.ID, p.EmployeeNo, a.DeviceID, tenantID, "qr", details)
+		return p, a, decision.Reason, errors.New("access denied: " + decision.Reason)
+	}
+	d, err := q.store.GetDevice(ctx, a.DeviceID)
+	if err != nil || d == nil {
+		return p, a, "", errors.New("target device not found")
+	}
+	resp, err := NewISAPIClientForDevice(d, q.hub).OpenDoor(a.DoorNo)
+	details.DoorResult = resp
+	if len(details.DoorResult) > 1000 {
+		details.DoorResult = details.DoorResult[:1000]
+	}
+	if err != nil {
+		failed := decision
+		failed.Allow, failed.Reason = false, "door command failed: "+err.Error()
+		_ = q.store.CommitAccess(ctx, failed, p.ID, p.EmployeeNo, a.DeviceID, tenantID, "qr", details)
+		return p, a, resp, err
+	}
+	_ = q.store.CommitAccess(ctx, decision, p.ID, p.EmployeeNo, a.DeviceID, tenantID, "qr", details)
+	return p, a, resp, nil
+}
+
+func (q *QRAuth) logAccessPointDenial(ctx context.Context, tenantID string, a *AccessPoint, p *Person, reason, credentialMode, correlationID string) {
+	if a == nil {
+		return
+	}
+	e := AccessLog{TenantID: tenantID, DeviceID: a.DeviceID, Decision: "deny", Reason: reason, Direction: a.Direction, OpenMethod: "qr", OutletID: a.OutletID, AccessPointID: a.ID, AccessPointName: a.Name, AgentID: a.AgentID, ScannerID: a.ScannerID, DoorNo: a.DoorNo, CredentialMode: credentialMode, CorrelationID: correlationID}
+	if p != nil {
+		e.PersonID, e.EmployeeNo, e.MemberName = p.ID, p.EmployeeNo, p.Name
+	}
+	_ = q.store.WriteAccessLog(ctx, e)
+}
+
+func (q *QRAuth) resolveFaceAuthQR(ctx context.Context, credential string) (*Person, error) {
+	for _, candidate := range tokenCandidates(credential) {
+		p, err := q.store.GetPersonByQRToken(ctx, candidate)
+		if err != nil {
+			return nil, err
+		}
+		if p != nil {
+			q.store.PopulatePersonQRSettings(ctx, p)
+			if p.QRMode != "hikvision" {
+				return p, nil
+			}
+		}
+		p, err = q.store.ResolveDynamicQR(ctx, candidate, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		if p != nil {
+			return p, nil
+		}
+	}
+	return nil, nil
 }
 
 // StartFaceAuth opens a face-auth window on a specific device. Behavior depends

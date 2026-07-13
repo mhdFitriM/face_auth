@@ -3,6 +3,7 @@ package internal
 import (
 	"bufio"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -93,7 +94,7 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		// hold no dashboard session. The per-person QR token in the body IS the
 		// credential, so this route authenticates itself — same model as the
 		// /api/v1/qr-auth/scan API-key endpoint.
-		if p == "/api/auth/login" || p == "/api/healthz" || p == "/api/qr-auth/scan" {
+		if p == "/api/auth/login" || p == "/api/healthz" || p == "/api/qr-auth/scan" || p == "/api/agent/access-points" {
 			return c.Next()
 		}
 		// /api/v1/* is the third-party surface — it carries its own apiKeyAuth
@@ -106,6 +107,16 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		// (the per-agent token is generated separately and shown once in the UI),
 		// so they're served without a session — no token needed in the URL.
 		if strings.HasPrefix(p, "/api/agents/downloads") || strings.HasPrefix(p, "/api/agents/scripts/") {
+			return c.Next()
+		}
+		// QR images are public: the QR token encoded in the image IS already the
+		// credential for door access. Making the PNG unauthenticated means the
+		// <img> tag works from any proxy (VPSDeck, nginx, etc.) without needing
+		// the ?token= session parameter, which some proxies strip.
+		if c.Method() == "GET" && strings.HasSuffix(p, "/qr.png") {
+			return c.Next()
+		}
+		if c.Method() == "GET" && strings.HasSuffix(p, "/qr-card.png") {
 			return c.Next()
 		}
 		return sessionAuth(store)(c)
@@ -450,10 +461,113 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if err != nil {
 			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 		}
-		limit, _ := strconv.Atoi(c.Query("limit", "200"))
-		out, err := store.ListAccessLog(c.Context(), tid, limit)
+		limit, _ := strconv.Atoi(c.Query("limit", "500"))
+		from, _ := time.Parse(time.RFC3339, c.Query("from"))
+		to, _ := time.Parse(time.RFC3339, c.Query("to"))
+		out, err := store.QueryAccessLog(c.Context(), AccessLogFilter{TenantID: tid, OutletID: c.Query("outletId"), AccessPointID: c.Query("accessPointId"), AgentID: c.Query("agentId"), DeviceID: c.Query("deviceId"), PersonID: c.Query("personId"), Decision: c.Query("decision"), Direction: c.Query("direction"), CredentialMode: c.Query("credentialMode"), From: from, To: to, Limit: limit})
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(out)
+	})
+
+	api.Get("/access-log/export.csv", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		from, _ := time.Parse(time.RFC3339, c.Query("from"))
+		to, _ := time.Parse(time.RFC3339, c.Query("to"))
+		rows, err := store.QueryAccessLog(c.Context(), AccessLogFilter{TenantID: tid, OutletID: c.Query("outletId"), AccessPointID: c.Query("accessPointId"), Decision: c.Query("decision"), From: from, To: to, Limit: 10000})
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		var b strings.Builder
+		w := csv.NewWriter(&b)
+		_ = w.Write([]string{"timestamp", "outlet_id", "access_point", "agent", "scanner", "device", "door", "member", "employee_no", "credential", "direction", "decision", "reason", "correlation_id"})
+		for _, r := range rows {
+			_ = w.Write([]string{r.CreatedAt.Format(time.RFC3339), r.OutletID, r.AccessPointName, r.AgentID, r.ScannerID, r.DeviceID, strconv.Itoa(r.DoorNo), r.MemberName, r.EmployeeNo, r.CredentialMode, r.Direction, r.Decision, r.Reason, r.CorrelationID})
+		}
+		w.Flush()
+		c.Set("Content-Type", "text/csv; charset=utf-8")
+		c.Set("Content-Disposition", `attachment; filename="access-log.csv"`)
+		return c.SendString(b.String())
+	})
+
+	api.Get("/reports/access-summary", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		from, _ := time.Parse(time.RFC3339, c.Query("from"))
+		to, _ := time.Parse(time.RFC3339, c.Query("to"))
+		out, err := store.AccessSummary(c.Context(), tid, c.Query("outletId"), from, to)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(out)
+	})
+	api.Get("/reports/denials", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		out, err := store.DenialReport(c.Context(), tid, c.Query("outletId"))
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(out)
+	})
+	api.Get("/reports/attendance", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		from, _ := time.Parse(time.RFC3339, c.Query("from"))
+		to, _ := time.Parse(time.RFC3339, c.Query("to"))
+		out, err := store.AttendanceReport(c.Context(), tid, c.Query("outletId"), from, to)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(out)
+	})
+	api.Get("/reports/occupancy", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		out, err := store.OccupancyReport(c.Context(), tid)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(out)
+	})
+	api.Get("/reports/access-point-health", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		out, err := store.ListAccessPoints(c.Context(), tid, c.Query("outletId"), "")
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		for i := range out {
+			out[i].AgentOnline = hub.IsOnline(out[i].AgentID)
+		}
+		return c.JSON(out)
+	})
+	api.Get("/reports/agent-health", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		agents, err := store.ListAgentsByTenant(c.Context(), tid)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		out := []fiber.Map{}
+		for _, a := range agents {
+			out = append(out, fiber.Map{"agentId": a.ID, "name": a.Name, "outletId": a.BranchID, "outletName": a.BranchName, "online": hub.IsOnline(a.ID)})
 		}
 		return c.JSON(out)
 	})
@@ -679,9 +793,8 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 
 	// ---------- Branches ----------
 	//
-	// A branch = one physical site inside a tenant. It owns at most ONE agent
-	// (strictly enforced) and any number of devices; devices attached to a
-	// branch route their ISAPI commands through the branch's agent.
+	// A branch = one physical outlet inside a tenant. It may own multiple
+	// agents and devices.
 
 	api.Get("/branches", func(c *fiber.Ctx) error {
 		tid, err := tenantScope(c)
@@ -744,8 +857,8 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		return c.JSON(fiber.Map{"ok": true})
 	})
 
-	// Assign an agent to the branch (strict: one agent per branch, and an
-	// agent can serve only one branch).
+	// Assign an agent to the outlet. An outlet may own multiple agents, while
+	// each agent belongs to at most one outlet.
 	api.Post("/branches/:id/agent", func(c *fiber.Ctx) error {
 		var body struct {
 			AgentID string `json:"agentId"`
@@ -760,7 +873,14 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 	})
 
 	api.Delete("/branches/:id/agent", func(c *fiber.Ctx) error {
-		if err := store.UnassignAgentFromBranch(c.Context(), c.Params("id")); err != nil {
+		agentID := c.Query("agentId")
+		var err error
+		if agentID == "" {
+			err = store.UnassignAgentFromBranch(c.Context(), c.Params("id"))
+		} else {
+			err = store.UnassignAgent(c.Context(), c.Params("id"), agentID)
+		}
+		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
 		return c.JSON(fiber.Map{"ok": true})
@@ -837,6 +957,137 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
 		return c.JSON(fiber.Map{"ok": true})
+	})
+
+	// ---------- Access points / scanner stations ----------
+	api.Get("/access-points", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		out, err := store.ListAccessPoints(c.Context(), tid, c.Query("outletId"), c.Query("agentId"))
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		for i := range out {
+			out[i].AgentOnline = hub.IsOnline(out[i].AgentID)
+		}
+		return c.JSON(out)
+	})
+
+	api.Post("/access-points", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		var a AccessPoint
+		if err := json.Unmarshal(c.Body(), &a); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "invalid body"})
+		}
+		if a.ID == "" {
+			a.ID = "ap-" + RandomString(12, charset+hexCharset)
+		}
+		a.TenantID = tid
+		if err := store.SaveAccessPoint(c.Context(), a); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.Status(201).JSON(a)
+	})
+
+	api.Put("/access-points/:id", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		existing, err := store.GetAccessPoint(c.Context(), tid, c.Params("id"))
+		if err != nil || existing == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "access point not found"})
+		}
+		var a AccessPoint
+		if err := json.Unmarshal(c.Body(), &a); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "invalid body"})
+		}
+		a.ID, a.TenantID = existing.ID, tid
+		if err := store.SaveAccessPoint(c.Context(), a); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(a)
+	})
+
+	api.Delete("/access-points/:id", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		if err := store.DeleteAccessPoint(c.Context(), tid, c.Params("id")); err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"ok": true})
+	})
+	api.Post("/access-points/:id/test", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		a, err := store.GetAccessPoint(c.Context(), tid, c.Params("id"))
+		if err != nil || a == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "access point not found"})
+		}
+		agentOnline := hub.IsOnline(a.AgentID)
+		ready := a.Enabled && a.AuthMode != "disabled" && agentOnline && a.DeviceOnline
+		return c.JSON(fiber.Map{"ok": true, "ready": ready, "enabled": a.Enabled, "authMode": a.AuthMode, "agentOnline": agentOnline, "deviceOnline": a.DeviceOnline, "listener": fmt.Sprintf("127.0.0.1:%d", a.ScannerPort), "doorNo": a.DoorNo, "direction": a.Direction, "doorOpened": false})
+	})
+
+	api.Get("/persons/:id/access-points", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		ids, err := store.ListPersonAccessPoints(c.Context(), tid, c.Params("id"))
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"accessPointIds": ids})
+	})
+	api.Put("/persons/:id/access-points", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		var body struct {
+			AccessPointIDs []string `json:"accessPointIds"`
+		}
+		if err := json.Unmarshal(c.Body(), &body); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "invalid body"})
+		}
+		if err := store.SetPersonAccessPoints(c.Context(), tid, c.Params("id"), body.AccessPointIDs); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"ok": true, "accessPointIds": body.AccessPointIDs})
+	})
+
+	// Agent-authenticated configuration feed. It returns only enabled stations
+	// owned by the agent's merchant and outlet.
+	api.Get("/agent/access-points", func(c *fiber.Ctx) error {
+		agentID, token := c.Query("agentId"), c.Query("token")
+		if !store.VerifyAgentToken(c.Context(), agentID, token) {
+			return c.Status(401).JSON(fiber.Map{"error": "invalid agent credentials"})
+		}
+		tid, outletID, err := store.GetAgentScope(c.Context(), agentID)
+		if err != nil || tid == "" || outletID == "" {
+			return c.Status(400).JSON(fiber.Map{"error": "agent has no merchant/outlet assignment"})
+		}
+		points, err := store.ListAccessPoints(c.Context(), tid, outletID, agentID)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		enabled := make([]AccessPoint, 0, len(points))
+		for _, p := range points {
+			if p.Enabled {
+				enabled = append(enabled, p)
+			}
+		}
+		return c.JSON(enabled)
 	})
 
 	// List available agent binaries
@@ -925,6 +1176,9 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
+		for i := range out {
+			store.PopulatePersonQRSettings(c.Context(), &out[i])
+		}
 		return c.JSON(out)
 	})
 	api.Post("/persons", func(c *fiber.Ctx) error {
@@ -954,6 +1208,16 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
 		_ = store.SetPersonTenant(c.Context(), body.ID, tid)
+		if body.QRMode != "" {
+			if err := store.ConfigurePersonQR(c.Context(), body.ID, body.QRMode, body.QRRotationSec); err != nil {
+				return c.Status(500).JSON(fiber.Map{"error": "configure QR: " + err.Error()})
+			}
+		}
+		fresh, _ := store.GetPerson(c.Context(), body.ID)
+		if fresh != nil {
+			store.PopulatePersonQRSettings(c.Context(), fresh)
+			body = *fresh
+		}
 		return c.JSON(body)
 	})
 	// ---------- QR token + QR auth ----------
@@ -962,6 +1226,20 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		p, _ := store.GetPerson(c.Context(), c.Params("id"))
 		if p == nil {
 			return c.Status(404).JSON(fiber.Map{"error": "person not found"})
+		}
+		store.PopulatePersonQRSettings(c.Context(), p)
+		if p.QRMode == "hikvision" {
+			return c.Status(409).JSON(fiber.Map{"error": "FaceAuth QR-only is disabled for this Hikvision QR/card member"})
+		}
+		if p.QRMode == "dynamic" {
+			if err := store.ConfigurePersonQR(c.Context(), p.ID, "dynamic", p.QRRotationSec); err != nil {
+				return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+			}
+			token, expires, err := store.DynamicQRToken(c.Context(), p.ID, time.Now())
+			if err != nil {
+				return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+			}
+			return c.JSON(fiber.Map{"ok": true, "qrToken": token, "expiresAt": expires, "qrMode": "dynamic"})
 		}
 		token := RandomString(24, charset+hexCharset)
 		if err := store.SetQRToken(c.Context(), p.ID, token); err != nil {
@@ -972,7 +1250,19 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 
 	api.Get("/persons/:id/qr.png", func(c *fiber.Ctx) error {
 		p, _ := store.GetPerson(c.Context(), c.Params("id"))
-		if p == nil || p.QRToken == "" {
+		if p == nil {
+			return c.Status(404).SendString("person not found")
+		}
+		store.PopulatePersonQRSettings(c.Context(), p)
+		token := p.QRToken
+		if p.QRMode == "dynamic" {
+			var err error
+			token, _, err = store.DynamicQRToken(c.Context(), p.ID, time.Now())
+			if err != nil {
+				return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+			}
+		}
+		if token == "" {
 			return c.Status(404).SendString("no QR token — call /qr/rotate first")
 		}
 		size, _ := strconv.Atoi(c.Query("size", "256"))
@@ -982,13 +1272,29 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if size > 1024 {
 			size = 1024
 		}
-		png, err := qrcode.Encode(p.QRToken, qrcode.Medium, size)
+		png, err := qrcode.Encode(token, qrcode.Medium, size)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
 		c.Set("Content-Type", "image/png")
 		c.Set("Cache-Control", "no-store")
 		return c.Send(png)
+	})
+
+	api.Get("/persons/:id/qr/current", func(c *fiber.Ctx) error {
+		p, _ := store.GetPerson(c.Context(), c.Params("id"))
+		if p == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "person not found"})
+		}
+		store.PopulatePersonQRSettings(c.Context(), p)
+		if p.QRMode != "dynamic" {
+			return c.JSON(fiber.Map{"qrMode": "static", "qrToken": p.QRToken})
+		}
+		token, expires, err := store.DynamicQRToken(c.Context(), p.ID, time.Now())
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"qrMode": "dynamic", "qrToken": token, "expiresAt": expires, "rotationSec": p.QRRotationSec})
 	})
 
 	// QR-as-card: generates a QR image whose payload IS the person's card number.
@@ -1010,6 +1316,10 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if cardNo == "" {
 			return c.Status(400).SendString("no card enrolled — enrol a card first or pass ?cardNo=")
 		}
+		cardNo, err := ValidateHikvisionCardNo(cardNo)
+		if err != nil {
+			return c.Status(400).SendString(err.Error())
+		}
 		size, _ := strconv.Atoi(c.Query("size", "256"))
 		if size < 96 {
 			size = 96
@@ -1028,11 +1338,13 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 
 	api.Post("/qr-auth/scan", func(c *fiber.Ctx) error {
 		var body struct {
-			QRToken    string `json:"qrToken"`
-			AgentID    string `json:"agentId"`
-			AgentToken string `json:"agentToken"`
-			DeviceID   string `json:"deviceId"`
-			DirectOpen bool   `json:"directOpen"`
+			QRToken       string `json:"qrToken"`
+			AgentID       string `json:"agentId"`
+			AgentToken    string `json:"agentToken"`
+			DeviceID      string `json:"deviceId"`
+			DirectOpen    bool   `json:"directOpen"`
+			AccessPointID string `json:"accessPointId"`
+			CorrelationID string `json:"correlationId"`
 		}
 		if err := json.Unmarshal(c.Body(), &body); err != nil || body.QRToken == "" {
 			return c.Status(400).JSON(fiber.Map{"error": "qrToken required"})
@@ -1040,6 +1352,13 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if body.DirectOpen {
 			if !store.VerifyAgentToken(c.Context(), body.AgentID, body.AgentToken) {
 				return c.Status(401).JSON(fiber.Map{"ok": false, "error": "invalid agent credentials"})
+			}
+			if body.AccessPointID != "" {
+				p, point, response, err := qrAuth.DirectOpenAccessPoint(c.Context(), body.QRToken, body.AgentID, body.AccessPointID, body.CorrelationID)
+				if err != nil {
+					return c.Status(400).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": response})
+				}
+				return c.JSON(fiber.Map{"ok": true, "opened": true, "accessPointId": point.ID, "deviceId": point.DeviceID, "doorNo": point.DoorNo, "direction": point.Direction, "person": p.Name, "employeeNo": p.EmployeeNo})
 			}
 			p, response, err := qrAuth.DirectOpen(c.Context(), body.QRToken, body.AgentID, body.DeviceID)
 			if err != nil {
@@ -1098,6 +1417,7 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 			return c.Status(404).JSON(fiber.Map{"error": "person not found"})
 		}
 		faces, _ := store.ListFaces(c.Context(), "", p.ID)
+		store.PopulatePersonQRSettings(c.Context(), p)
 		return c.JSON(fiber.Map{"person": p, "faces": faces})
 	})
 
@@ -1363,6 +1683,10 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		}
 		if e := json.Unmarshal(c.Body(), &body); e != nil || body.EmployeeNo == "" || body.CardNo == "" {
 			return c.Status(400).JSON(fiber.Map{"error": "employeeNo and cardNo required"})
+		}
+		body.CardNo, err = ValidateHikvisionCardNo(body.CardNo)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
 		}
 		client := NewISAPIClientForDevice(d, hub)
 		resp, err := client.SetCardInfo(body.EmployeeNo, body.CardNo, body.CardType, body.Mode)
@@ -2175,7 +2499,11 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 	// ---------- API keys (admin) ----------
 
 	api.Get("/api-keys", func(c *fiber.Ctx) error {
-		out, err := settings.ListAPIKeys(c.Context())
+		tid, scopeErr := tenantScope(c)
+		if scopeErr != nil {
+			return c.Status(400).JSON(fiber.Map{"error": scopeErr.Error()})
+		}
+		out, err := settings.ListAPIKeys(c.Context(), tid)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
@@ -2186,7 +2514,11 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 			Name string `json:"name"`
 		}
 		_ = json.Unmarshal(c.Body(), &body)
-		k, err := settings.CreateAPIKey(c.Context(), body.Name)
+		tid, scopeErr := tenantScope(c)
+		if scopeErr != nil {
+			return c.Status(400).JSON(fiber.Map{"error": scopeErr.Error()})
+		}
+		k, err := settings.CreateAPIKey(c.Context(), body.Name, tid)
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
 		}
@@ -2217,6 +2549,143 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 
 	v1.Get("/ping", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"ok": true, "service": "face_auth", "time": time.Now().UTC()})
+	})
+
+	// Multi-outlet access topology (API-key scoped to the key's merchant).
+	v1.Get("/access-points", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		out, err := store.ListAccessPoints(c.Context(), tid, c.Query("outletId"), c.Query("agentId"))
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		for i := range out {
+			out[i].AgentOnline = hub.IsOnline(out[i].AgentID)
+		}
+		return c.JSON(out)
+	})
+	v1.Post("/access-points", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		var a AccessPoint
+		if err := json.Unmarshal(c.Body(), &a); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "invalid body"})
+		}
+		if a.ID == "" {
+			a.ID = "ap-" + RandomString(12, charset+hexCharset)
+		}
+		a.TenantID = tid
+		if err := store.SaveAccessPoint(c.Context(), a); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.Status(201).JSON(a)
+	})
+	v1.Put("/access-points/:id", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		existing, _ := store.GetAccessPoint(c.Context(), tid, c.Params("id"))
+		if existing == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "access point not found"})
+		}
+		var a AccessPoint
+		if err := json.Unmarshal(c.Body(), &a); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": "invalid body"})
+		}
+		a.ID, a.TenantID = existing.ID, tid
+		if err := store.SaveAccessPoint(c.Context(), a); err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(a)
+	})
+	v1.Delete("/access-points/:id", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		if err := store.DeleteAccessPoint(c.Context(), tid, c.Params("id")); err != nil {
+			return c.Status(404).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(fiber.Map{"ok": true})
+	})
+	v1.Post("/access-points/:id/test", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		a, err := store.GetAccessPoint(c.Context(), tid, c.Params("id"))
+		if err != nil || a == nil {
+			return c.Status(404).JSON(fiber.Map{"error": "access point not found"})
+		}
+		agentOnline := hub.IsOnline(a.AgentID)
+		return c.JSON(fiber.Map{"ok": true, "ready": a.Enabled && a.AuthMode != "disabled" && agentOnline && a.DeviceOnline, "agentOnline": agentOnline, "deviceOnline": a.DeviceOnline, "doorOpened": false})
+	})
+	v1.Get("/access-log", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		limit, _ := strconv.Atoi(c.Query("limit", "500"))
+		from, _ := time.Parse(time.RFC3339, c.Query("from"))
+		to, _ := time.Parse(time.RFC3339, c.Query("to"))
+		out, err := store.QueryAccessLog(c.Context(), AccessLogFilter{TenantID: tid, OutletID: c.Query("outletId"), AccessPointID: c.Query("accessPointId"), Decision: c.Query("decision"), Direction: c.Query("direction"), From: from, To: to, Limit: limit})
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(out)
+	})
+	v1.Get("/reports/access-summary", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		from, _ := time.Parse(time.RFC3339, c.Query("from"))
+		to, _ := time.Parse(time.RFC3339, c.Query("to"))
+		out, err := store.AccessSummary(c.Context(), tid, c.Query("outletId"), from, to)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(out)
+	})
+	v1.Get("/reports/denials", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		out, err := store.DenialReport(c.Context(), tid, c.Query("outletId"))
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(out)
+	})
+	v1.Get("/reports/attendance", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		from, _ := time.Parse(time.RFC3339, c.Query("from"))
+		to, _ := time.Parse(time.RFC3339, c.Query("to"))
+		out, err := store.AttendanceReport(c.Context(), tid, c.Query("outletId"), from, to)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(out)
+	})
+	v1.Get("/reports/occupancy", func(c *fiber.Ctx) error {
+		tid, err := tenantScope(c)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
+		out, err := store.OccupancyReport(c.Context(), tid)
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{"error": err.Error()})
+		}
+		return c.JSON(out)
 	})
 
 	v1.Get("/devices", func(c *fiber.Ctx) error {
@@ -2861,6 +3330,10 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		if e := json.Unmarshal(c.Body(), &b); e != nil || b.EmployeeNo == "" || b.CardNo == "" {
 			return c.Status(400).JSON(fiber.Map{"error": "employeeNo and cardNo required"})
 		}
+		b.CardNo, err = ValidateHikvisionCardNo(b.CardNo)
+		if err != nil {
+			return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+		}
 		resp, err := NewISAPIClientForDevice(d, hub).SetCardInfo(b.EmployeeNo, b.CardNo, b.CardType, b.Mode)
 		if err != nil {
 			return c.Status(502).JSON(fiber.Map{"ok": false, "error": err.Error(), "response": resp})
@@ -3273,6 +3746,7 @@ func NewAPIServer(store *Store, cfg Config, hub *AgentHub) *fiber.App {
 		}
 		return c.JSON(fiber.Map{
 			"ok":              true,
+			"version":         "2.3",
 			"devices":         len(devices),
 			"devicesOnline":   online,
 			"time":            time.Now().UTC(),

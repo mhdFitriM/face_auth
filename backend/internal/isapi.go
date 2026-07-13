@@ -930,6 +930,11 @@ func (c *ISAPIClient) CaptureFingerPrint(fingerNo int) (string, error) {
 // SetCardInfo creates (or, if mode=="modify", updates) a card bound to a user.
 // cardType is typically "normalCard". Mirrors UserInfo Record vs Modify.
 func (c *ISAPIClient) SetCardInfo(employeeNo, cardNo, cardType, mode string) (string, error) {
+	var err error
+	cardNo, err = ValidateHikvisionCardNo(cardNo)
+	if err != nil {
+		return "", err
+	}
 	if cardType == "" {
 		cardType = "normalCard"
 	}
@@ -1259,13 +1264,13 @@ func (c *ISAPIClient) SupportsCameraQR() (bool, string, error) {
 // status the device returned, and the raw response body. Used by DiagnoseQR to
 // let an admin see which ISAPI namespace their firmware actually exposes.
 type QRProbeResult struct {
-	Label    string   `json:"label"`
-	Method   string   `json:"method"`
-	Path     string   `json:"path"`
-	Status   int      `json:"status"`
-	Body     string   `json:"body"`
-	QRHits   []string `json:"qrHits,omitempty"` // lines/snippets containing "qr" — the useful bits
-	Error    string   `json:"error,omitempty"`
+	Label  string   `json:"label"`
+	Method string   `json:"method"`
+	Path   string   `json:"path"`
+	Status int      `json:"status"`
+	Body   string   `json:"body"`
+	QRHits []string `json:"qrHits,omitempty"` // lines/snippets containing "qr" — the useful bits
+	Error  string   `json:"error,omitempty"`
 }
 
 // extractQRHits pulls the interesting lines from an ISAPI response — anything

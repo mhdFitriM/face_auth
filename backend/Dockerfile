@@ -11,13 +11,13 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o
 
 # Cross-compile the agent for all common platforms.
 # These get bundled into the runtime image so the admin UI can offer them as downloads.
-RUN mkdir -p /agents && \
-    CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /agents/face_auth-agent-linux-amd64        ./cmd/agent && \
-    CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o /agents/face_auth-agent-linux-arm64        ./cmd/agent && \
-    CGO_ENABLED=0 GOOS=linux   GOARCH=arm   GOARM=7 go build -trimpath -ldflags="-s -w" -o /agents/face_auth-agent-linux-armv7 ./cmd/agent && \
-    CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w -H=windowsgui" -o /agents/face_auth-agent-windows-amd64.exe  ./cmd/agent && \
-    CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /agents/face_auth-agent-darwin-amd64       ./cmd/agent && \
-    CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o /agents/face_auth-agent-darwin-arm64       ./cmd/agent
+RUN set -e; mkdir -p /agents; \
+    (CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /agents/face_auth-agent-linux-amd64 ./cmd/agent) & p1=$!; \
+    (CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o /agents/face_auth-agent-linux-arm64 ./cmd/agent) & p2=$!; wait $p1; wait $p2; \
+    (CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -ldflags="-s -w" -o /agents/face_auth-agent-linux-armv7 ./cmd/agent) & p1=$!; \
+    (CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w -H=windowsgui" -o /agents/face_auth-agent-windows-amd64.exe ./cmd/agent) & p2=$!; wait $p1; wait $p2; \
+    (CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /agents/face_auth-agent-darwin-amd64 ./cmd/agent) & p1=$!; \
+    (CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o /agents/face_auth-agent-darwin-arm64 ./cmd/agent) & p2=$!; wait $p1; wait $p2
 
 FROM alpine:3.19
 RUN apk add --no-cache ca-certificates tzdata

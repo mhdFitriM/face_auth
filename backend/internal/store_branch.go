@@ -12,7 +12,7 @@ import (
 // ---------- Branch ops ----------
 //
 // A branch is one physical site inside a tenant. Invariants:
-//   - a branch has AT MOST one agent (enforced by idx_agents_branch_unique)
+//   - a branch may own multiple agents
 //   - devices attached to a branch route ISAPI through that branch's agent
 //     (resolved in the device SELECTs via effectiveAgentSQL)
 
@@ -23,7 +23,7 @@ import (
 // branch keep the legacy direct agent_id link.
 const effectiveAgentSQL = `CASE
     WHEN devices.branch_id IS NOT NULL AND devices.branch_id <> '' THEN
-        COALESCE((SELECT ba.id FROM agents ba WHERE ba.branch_id = devices.branch_id LIMIT 1), '')
+        COALESCE(NULLIF(devices.agent_id,''),(SELECT ba.id FROM agents ba WHERE ba.branch_id = devices.branch_id ORDER BY ba.created_at LIMIT 1), '')
     ELSE COALESCE(NULLIF(devices.agent_id,''), '')
     END`
 
@@ -53,13 +53,14 @@ func (s *Store) UpdateBranch(ctx context.Context, id, name, address string) erro
 func (s *Store) GetBranch(ctx context.Context, id string) (*Branch, error) {
 	row := s.PG.QueryRow(ctx, `
 		SELECT b.id, COALESCE(b.tenant_id,''), b.name, COALESCE(b.address,''), b.created_at,
-		       COALESCE(a.id,''), COALESCE(a.name,''),
+		       COALESCE((SELECT a.id FROM agents a WHERE a.branch_id=b.id ORDER BY a.created_at LIMIT 1),''),
+		       COALESCE((SELECT a.name FROM agents a WHERE a.branch_id=b.id ORDER BY a.created_at LIMIT 1),''),
+		       (SELECT COUNT(*) FROM agents a WHERE a.branch_id=b.id),
 		       (SELECT COUNT(*) FROM devices d WHERE d.branch_id = b.id)
 		FROM branches b
-		LEFT JOIN agents a ON a.branch_id = b.id
 		WHERE b.id=$1`, id)
 	b := &Branch{}
-	err := row.Scan(&b.ID, &b.TenantID, &b.Name, &b.Address, &b.CreatedAt, &b.AgentID, &b.AgentName, &b.DeviceCount)
+	err := row.Scan(&b.ID, &b.TenantID, &b.Name, &b.Address, &b.CreatedAt, &b.AgentID, &b.AgentName, &b.AgentCount, &b.DeviceCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -69,10 +70,11 @@ func (s *Store) GetBranch(ctx context.Context, id string) (*Branch, error) {
 func (s *Store) ListBranchesByTenant(ctx context.Context, tenantID string) ([]Branch, error) {
 	rows, err := s.PG.Query(ctx, `
 		SELECT b.id, COALESCE(b.tenant_id,''), b.name, COALESCE(b.address,''), b.created_at,
-		       COALESCE(a.id,''), COALESCE(a.name,''),
+		       COALESCE((SELECT a.id FROM agents a WHERE a.branch_id=b.id ORDER BY a.created_at LIMIT 1),''),
+		       COALESCE((SELECT a.name FROM agents a WHERE a.branch_id=b.id ORDER BY a.created_at LIMIT 1),''),
+		       (SELECT COUNT(*) FROM agents a WHERE a.branch_id=b.id),
 		       (SELECT COUNT(*) FROM devices d WHERE d.branch_id = b.id)
 		FROM branches b
-		LEFT JOIN agents a ON a.branch_id = b.id
 		WHERE b.tenant_id=$1
 		ORDER BY b.created_at DESC`, tenantID)
 	if err != nil {
@@ -82,7 +84,7 @@ func (s *Store) ListBranchesByTenant(ctx context.Context, tenantID string) ([]Br
 	out := []Branch{}
 	for rows.Next() {
 		var b Branch
-		if err := rows.Scan(&b.ID, &b.TenantID, &b.Name, &b.Address, &b.CreatedAt, &b.AgentID, &b.AgentName, &b.DeviceCount); err != nil {
+		if err := rows.Scan(&b.ID, &b.TenantID, &b.Name, &b.Address, &b.CreatedAt, &b.AgentID, &b.AgentName, &b.AgentCount, &b.DeviceCount); err != nil {
 			return nil, err
 		}
 		out = append(out, b)
@@ -110,16 +112,16 @@ func (s *Store) DeleteBranch(ctx context.Context, id string) error {
 	return tx.Commit(ctx)
 }
 
-// AssignAgentToBranch enforces the strict one-agent-per-branch rule with
-// explicit checks (clearer errors than the unique-index violation).
 func (s *Store) AssignAgentToBranch(ctx context.Context, branchID, agentID string) error {
-	var existing string
-	err := s.PG.QueryRow(ctx, `SELECT id FROM agents WHERE branch_id=$1`, branchID).Scan(&existing)
-	if err == nil && existing != agentID {
-		return fmt.Errorf("branch already has agent %q — unassign it first", existing)
+	var branchTenant, agentTenant string
+	if err := s.PG.QueryRow(ctx, `SELECT COALESCE(tenant_id,'') FROM branches WHERE id=$1`, branchID).Scan(&branchTenant); err != nil {
+		return errors.New("outlet not found")
 	}
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return err
+	if err := s.PG.QueryRow(ctx, `SELECT COALESCE(tenant_id,'') FROM agents WHERE id=$1`, agentID).Scan(&agentTenant); err != nil {
+		return errors.New("agent not found")
+	}
+	if branchTenant == "" || agentTenant != branchTenant {
+		return errors.New("agent and outlet must belong to the same merchant")
 	}
 	var current *string
 	if err := s.PG.QueryRow(ctx, `SELECT branch_id FROM agents WHERE id=$1`, agentID).Scan(&current); err != nil {
@@ -131,7 +133,12 @@ func (s *Store) AssignAgentToBranch(ctx context.Context, branchID, agentID strin
 	if current != nil && *current != "" && *current != branchID {
 		return fmt.Errorf("agent is already assigned to branch %q — unassign it first", *current)
 	}
-	_, err = s.PG.Exec(ctx, `UPDATE agents SET branch_id=$1 WHERE id=$2`, branchID, agentID)
+	_, err := s.PG.Exec(ctx, `UPDATE agents SET branch_id=$1 WHERE id=$2`, branchID, agentID)
+	return err
+}
+
+func (s *Store) UnassignAgent(ctx context.Context, branchID, agentID string) error {
+	_, err := s.PG.Exec(ctx, `UPDATE agents SET branch_id=NULL WHERE branch_id=$1 AND id=$2`, branchID, agentID)
 	return err
 }
 
@@ -142,6 +149,18 @@ func (s *Store) UnassignAgentFromBranch(ctx context.Context, branchID string) er
 
 // SetDeviceBranch attaches a device to a branch ("" detaches it).
 func (s *Store) SetDeviceBranch(ctx context.Context, deviceID, branchID string) error {
+	if branchID != "" {
+		var branchTenant, deviceTenant string
+		if err := s.PG.QueryRow(ctx, `SELECT COALESCE(tenant_id,'') FROM branches WHERE id=$1`, branchID).Scan(&branchTenant); err != nil {
+			return errors.New("outlet not found")
+		}
+		if err := s.PG.QueryRow(ctx, `SELECT COALESCE(tenant_id,'') FROM devices WHERE device_id=$1`, deviceID).Scan(&deviceTenant); err != nil {
+			return errors.New("device not found")
+		}
+		if branchTenant == "" || deviceTenant != branchTenant {
+			return errors.New("device and outlet must belong to the same merchant")
+		}
+	}
 	_, err := s.PG.Exec(ctx, `UPDATE devices SET branch_id=NULLIF($1,'') WHERE device_id=$2`, branchID, deviceID)
 	return err
 }

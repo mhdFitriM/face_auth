@@ -43,16 +43,16 @@ type Session struct {
 // ---------- Membership plans ----------
 
 type Plan struct {
-	ID                       string     `json:"id"`
-	TenantID                 string     `json:"tenantId"`
-	Name                     string     `json:"name"`
-	Type                     string     `json:"type"`         // unlimited | credit | rule
-	DefaultCredits           int        `json:"defaultCredits"`
-	MustExitBeforeReentry    bool       `json:"mustExitBeforeReentry"`
-	OnePerDay                bool       `json:"onePerDay"`    // allow at most one entry per calendar day
-	Active                   bool       `json:"active"`
-	CreatedAt                time.Time  `json:"createdAt"`
-	Rules                    []PlanRule `json:"rules,omitempty"`
+	ID                    string     `json:"id"`
+	TenantID              string     `json:"tenantId"`
+	Name                  string     `json:"name"`
+	Type                  string     `json:"type"` // unlimited | credit | rule
+	DefaultCredits        int        `json:"defaultCredits"`
+	MustExitBeforeReentry bool       `json:"mustExitBeforeReentry"`
+	OnePerDay             bool       `json:"onePerDay"` // allow at most one entry per calendar day
+	Active                bool       `json:"active"`
+	CreatedAt             time.Time  `json:"createdAt"`
+	Rules                 []PlanRule `json:"rules,omitempty"`
 }
 
 type PlanRule struct {
@@ -75,16 +75,47 @@ type PersonPlan struct {
 }
 
 type AccessLog struct {
-	ID         int64     `json:"id"`
-	TenantID   string    `json:"tenantId"`
-	PersonID   string    `json:"personId,omitempty"`
-	EmployeeNo string    `json:"employeeNo,omitempty"`
-	DeviceID   string    `json:"deviceId,omitempty"`
-	Decision   string    `json:"decision"`              // allow | deny | observed
-	Reason     string    `json:"reason,omitempty"`
-	Direction  string    `json:"direction,omitempty"`
-	OpenMethod string    `json:"openMethod,omitempty"` // qr | face | card | fingerprint | pin
-	CreatedAt  time.Time `json:"createdAt"`
+	ID              int64     `json:"id"`
+	TenantID        string    `json:"tenantId"`
+	PersonID        string    `json:"personId,omitempty"`
+	EmployeeNo      string    `json:"employeeNo,omitempty"`
+	DeviceID        string    `json:"deviceId,omitempty"`
+	Decision        string    `json:"decision"` // allow | deny | observed
+	Reason          string    `json:"reason,omitempty"`
+	Direction       string    `json:"direction,omitempty"`
+	OpenMethod      string    `json:"openMethod,omitempty"` // qr | face | card | fingerprint | pin
+	OutletID        string    `json:"outletId,omitempty"`
+	AccessPointID   string    `json:"accessPointId,omitempty"`
+	AccessPointName string    `json:"accessPointName,omitempty"`
+	AgentID         string    `json:"agentId,omitempty"`
+	ScannerID       string    `json:"scannerId,omitempty"`
+	DoorNo          int       `json:"doorNo,omitempty"`
+	MemberName      string    `json:"memberName,omitempty"`
+	CredentialMode  string    `json:"credentialMode,omitempty"`
+	DoorResult      string    `json:"doorResult,omitempty"`
+	CorrelationID   string    `json:"correlationId,omitempty"`
+	CreatedAt       time.Time `json:"createdAt"`
+}
+
+type AccessPoint struct {
+	ID             string    `json:"id"`
+	TenantID       string    `json:"tenantId"`
+	OutletID       string    `json:"outletId"`
+	Name           string    `json:"name"`
+	AgentID        string    `json:"agentId"`
+	ScannerID      string    `json:"scannerId"`
+	ScannerPort    int       `json:"scannerPort"`
+	DeviceID       string    `json:"deviceId"`
+	DoorNo         int       `json:"doorNo"`
+	Direction      string    `json:"direction"`  // in | out | bidirectional
+	AuthMode       string    `json:"authMode"`   // faceauth_qr | hikvision | disabled
+	AcceptedQR     string    `json:"acceptedQr"` // static | dynamic | both
+	RejectionSound bool      `json:"rejectionSound"`
+	Enabled        bool      `json:"enabled"`
+	AgentOnline    bool      `json:"agentOnline,omitempty"`
+	DeviceOnline   bool      `json:"deviceOnline,omitempty"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 type Agent struct {
@@ -108,6 +139,7 @@ type Branch struct {
 	AgentID     string    `json:"agentId,omitempty"`   // joined: the branch's agent
 	AgentName   string    `json:"agentName,omitempty"` // joined
 	AgentOnline bool      `json:"agentOnline"`         // live, filled from hub
+	AgentCount  int       `json:"agentCount"`
 	DeviceCount int       `json:"deviceCount"`
 	CreatedAt   time.Time `json:"createdAt"`
 }
@@ -152,9 +184,9 @@ type Person struct {
 	ID             string          `json:"id"`
 	Name           string          `json:"name"`
 	EmployeeNo     string          `json:"employeeNo,omitempty"`
-	Gender         string          `json:"gender,omitempty"`         // male | female | unknown
-	PersonType     string          `json:"personType,omitempty"`     // normal | visitor | blackList
-	PersonRole     string          `json:"personRole,omitempty"`     // basic | administrator | operator
+	Gender         string          `json:"gender,omitempty"`     // male | female | unknown
+	PersonType     string          `json:"personType,omitempty"` // normal | visitor | blackList
+	PersonRole     string          `json:"personRole,omitempty"` // basic | administrator | operator
 	LongTerm       bool            `json:"longTerm"`
 	AttendanceOnly bool            `json:"attendanceOnly"`
 	DoorRight      string          `json:"doorRight,omitempty"`
@@ -163,6 +195,8 @@ type Person struct {
 	ValidEnd       *time.Time      `json:"validEnd,omitempty"`
 	Metadata       json.RawMessage `json:"metadata,omitempty"`
 	QRToken        string          `json:"qrToken,omitempty"`
+	QRMode         string          `json:"qrMode,omitempty"` // static | dynamic | hikvision
+	QRRotationSec  int             `json:"qrRotationSec,omitempty"`
 	CreatedAt      time.Time       `json:"createdAt"`
 }
 

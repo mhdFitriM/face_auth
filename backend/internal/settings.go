@@ -81,11 +81,12 @@ func defaultSettings() Settings {
 
 // APIKey is an opaque token a third-party caller presents on /api/v1/* requests.
 type APIKey struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Key       string    `json:"key,omitempty"` // only returned once on creation
+	ID        string     `json:"id"`
+	Name      string     `json:"name"`
+	Key       string     `json:"key,omitempty"` // only returned once on creation
 	LastUsed  *time.Time `json:"lastUsedAt,omitempty"`
-	CreatedAt time.Time `json:"createdAt"`
+	CreatedAt time.Time  `json:"createdAt"`
+	TenantID  string     `json:"tenantId,omitempty"`
 }
 
 // SettingsStore wraps the cached settings + thread-safe access.
@@ -189,9 +190,10 @@ func (s *SettingsStore) DeviceRequiresQR(ctx context.Context, deviceID string) (
 }
 
 // SetDeviceRequireQR sets / clears the per-device override.
-//   value == nil  → clear override (fall back to global)
-//   value == true → require QR on this device
-//   value == false → device is face-only
+//
+//	value == nil  → clear override (fall back to global)
+//	value == true → require QR on this device
+//	value == false → device is face-only
 func (s *SettingsStore) SetDeviceRequireQR(ctx context.Context, deviceID string, value *bool) error {
 	_, err := s.pg.PG.Exec(ctx, `UPDATE devices SET require_qr_2fa=$1 WHERE device_id=$2`, value, deviceID)
 	if err != nil {
@@ -205,13 +207,14 @@ func (s *SettingsStore) SetDeviceRequireQR(ctx context.Context, deviceID string,
 
 // ---- API keys ----
 
-func (s *SettingsStore) CreateAPIKey(ctx context.Context, name string) (APIKey, error) {
+func (s *SettingsStore) CreateAPIKey(ctx context.Context, name, tenantID string) (APIKey, error) {
 	k := APIKey{
 		ID:   "ak_" + RandomString(10, hexCharset),
 		Name: name,
 		Key:  "fa_" + RandomString(40, charset+hexCharset),
 	}
-	_, err := s.pg.PG.Exec(ctx, `INSERT INTO api_keys (id, name, key) VALUES ($1, $2, $3)`, k.ID, k.Name, k.Key)
+	k.TenantID = tenantID
+	_, err := s.pg.PG.Exec(ctx, `INSERT INTO api_keys (id, name, key, tenant_id) VALUES ($1, $2, $3, NULLIF($4,''))`, k.ID, k.Name, k.Key, tenantID)
 	if err != nil {
 		return APIKey{}, err
 	}
@@ -219,8 +222,8 @@ func (s *SettingsStore) CreateAPIKey(ctx context.Context, name string) (APIKey, 
 	return k, nil
 }
 
-func (s *SettingsStore) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
-	rows, err := s.pg.PG.Query(ctx, `SELECT id, name, last_used_at, created_at FROM api_keys ORDER BY created_at DESC`)
+func (s *SettingsStore) ListAPIKeys(ctx context.Context, tenantID string) ([]APIKey, error) {
+	rows, err := s.pg.PG.Query(ctx, `SELECT id, name, last_used_at, created_at, COALESCE(tenant_id,'') FROM api_keys WHERE tenant_id=$1 ORDER BY created_at DESC`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +231,7 @@ func (s *SettingsStore) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
 	out := []APIKey{}
 	for rows.Next() {
 		var k APIKey
-		if err := rows.Scan(&k.ID, &k.Name, &k.LastUsed, &k.CreatedAt); err != nil {
+		if err := rows.Scan(&k.ID, &k.Name, &k.LastUsed, &k.CreatedAt, &k.TenantID); err != nil {
 			return nil, err
 		}
 		out = append(out, k)
@@ -247,9 +250,9 @@ func (s *SettingsStore) VerifyAPIKey(ctx context.Context, presented string) (*AP
 	if presented == "" {
 		return nil, errors.New("missing api key")
 	}
-	row := s.pg.PG.QueryRow(ctx, `SELECT id, name, created_at FROM api_keys WHERE key=$1`, presented)
+	row := s.pg.PG.QueryRow(ctx, `SELECT id, name, created_at, COALESCE(tenant_id,'') FROM api_keys WHERE key=$1`, presented)
 	var k APIKey
-	if err := row.Scan(&k.ID, &k.Name, &k.CreatedAt); err != nil {
+	if err := row.Scan(&k.ID, &k.Name, &k.CreatedAt, &k.TenantID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("invalid api key")
 		}

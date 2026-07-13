@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useState, useRef, useMemo } from 'react'
 import { api, apiUrl, auth, subscribeEvents, DeviceForm, PersonForm } from './api'
 
-type Tab = 'devices' | 'branches' | 'live' | 'persons' | 'enrol' | 'events' | 'qr-auth' | 'agents' | 'console' | 'test' | 'settings' | 'guide' | 'api-docs' | 'plugin-faceapp' | 'plans' | 'access-log' | 'hq'
+type Tab = 'devices' | 'branches' | 'access-points' | 'reports' | 'live' | 'persons' | 'enrol' | 'events' | 'qr-auth' | 'agents' | 'console' | 'test' | 'settings' | 'guide' | 'api-docs' | 'plugin-faceapp' | 'plans' | 'access-log' | 'hq'
 
 export default function App() {
   const [me, setMe] = useState<any>(null)
@@ -125,7 +125,7 @@ function Dashboard({ me, onMe, onLogout, theme, setTheme }: { me: any; onMe: (m:
   // Deep-linkable initial tab (?tab=devices|persons|…) — lets an embedding
   // console (e.g. qstudio backoffice) open a specific screen directly.
   const [tab, setTab] = useState<Tab>(() => {
-    const all: Tab[] = ['devices', 'live', 'persons', 'enrol', 'events', 'qr-auth', 'agents', 'console', 'test', 'settings', 'guide', 'api-docs', 'plugin-faceapp', 'plans', 'access-log', 'hq']
+    const all: Tab[] = ['devices', 'branches', 'access-points', 'reports', 'live', 'persons', 'enrol', 'events', 'qr-auth', 'agents', 'console', 'test', 'settings', 'guide', 'api-docs', 'plugin-faceapp', 'plans', 'access-log', 'hq']
     const q = new URLSearchParams(window.location.search).get('tab') as Tab | null
     return q && all.includes(q) ? q : (isHQ ? 'hq' : 'devices')
   })
@@ -169,11 +169,13 @@ function Dashboard({ me, onMe, onLogout, theme, setTheme }: { me: any; onMe: (m:
     { id: 'hq',      label: 'HQ overview', group: 'HQ', hq: true },
     { id: 'devices', label: 'Devices', group: 'Operate' },
     { id: 'branches', label: 'Outlets', group: 'Operate' },
+    { id: 'access-points', label: 'Access points', group: 'Operate' },
     { id: 'live',    label: 'Live cameras', group: 'Operate' },
     { id: 'persons', label: 'Members', group: 'Operate' },
     { id: 'enrol',   label: 'Enrol', group: 'Operate' },
     { id: 'plans',   label: 'Plans & rules', group: 'Operate' },
     { id: 'access-log', label: 'Access log', group: 'Operate' },
+    { id: 'reports', label: 'Reports', group: 'Operate' },
     { id: 'events',  label: 'Raw events', group: 'Diagnostics' },
     { id: 'qr-auth', label: 'QR Auth', group: 'Diagnostics' },
     { id: 'agents',  label: 'Agents', group: 'Diagnostics' },
@@ -276,6 +278,7 @@ function Dashboard({ me, onMe, onLogout, theme, setTheme }: { me: any; onMe: (m:
         <main>
           {tab === 'devices' && <DevicesTab />}
           {tab === 'branches' && <BranchesTab />}
+          {tab === 'access-points' && <AccessPointsTab />}
           {tab === 'live' && <LiveTab />}
           {tab === 'persons' && <PersonsTab onEnrol={goEnrol} />}
           {tab === 'enrol' && <EnrolTab initialPersonId={enrolPersonId} onConsumeInitial={() => setEnrolPersonId('')} />}
@@ -291,6 +294,7 @@ function Dashboard({ me, onMe, onLogout, theme, setTheme }: { me: any; onMe: (m:
           {tab === 'hq' && <HQTab />}
           {tab === 'plans' && <PlansTab />}
           {tab === 'access-log' && <AccessLogTab />}
+          {tab === 'reports' && <ReportsTab />}
         </main>
       </div>
     </div>
@@ -339,8 +343,8 @@ function DevicesTab() {
     }
     const out = branches
       .filter((b) => byBranch[b.id])
-      .map((b) => ({ id: b.id, name: b.name, agentId: b.agentId, agentName: b.agentName, agentOnline: b.agentOnline, devices: byBranch[b.id] }))
-    if (byBranch['']) out.push({ id: '', name: 'No outlet', agentId: '', agentName: '', agentOnline: false, devices: byBranch[''] })
+      .map((b) => ({ id: b.id, name: b.name, agentId: b.agentId, agentName: b.agentName, agentOnline: b.agentOnline, agentCount: b.agentCount || (b.agentId ? 1 : 0), devices: byBranch[b.id] }))
+    if (byBranch['']) out.push({ id: '', name: 'No outlet', agentId: '', agentName: '', agentOnline: false, agentCount: 0, devices: byBranch[''] })
     return out
   }, [filtered, branches])
 
@@ -400,8 +404,8 @@ function DevicesTab() {
                     <td colSpan={6} style={{ paddingTop: 14 }}>
                       <strong>{g.name}</strong>
                       <span className="muted small"> · {g.devices.length} device{g.devices.length === 1 ? '' : 's'}</span>
-                      {g.id !== '' && (g.agentId
-                        ? <span className={`badge ${g.agentOnline ? 'ok' : ''}`} style={{ marginLeft: 10 }}><span className="status-dot" />agent: {g.agentName || g.agentId} · {g.agentOnline ? 'online' : 'offline'}</span>
+                      {g.id !== '' && (g.agentCount
+                        ? <span className={`badge ${g.agentOnline ? 'ok' : ''}`} style={{ marginLeft: 10 }}><span className="status-dot" />{g.agentCount} agent{g.agentCount===1?'':'s'} · primary {g.agentOnline ? 'online' : 'offline'}</span>
                         : <span className="badge" style={{ marginLeft: 10 }}>no agent assigned</span>)}
                     </td>
                   </tr>
@@ -1276,9 +1280,11 @@ function PersonModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
     personType: 'normal', personRole: 'basic',
     longTerm: true, attendanceOnly: false,
     doorRight: '1', planTemplate: '1',
+    qrMode: 'static', qrRotationSec: 180,
   })
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
+  const [accessPath, setAccessPath] = useState<'faceauth-qr' | 'hikvision-device'>('faceauth-qr')
 
   // Optional credentials
   const [devices, setDevices] = useState<any[]>([])
@@ -1334,9 +1340,13 @@ function PersonModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (accessPath === 'hikvision-device' && (!credDeviceId || !cardNo)) {
+      setErr('Hikvision QR/card mode requires a device and card number')
+      return
+    }
     setBusy(true); setErr('')
     try {
-      const person = await api.createPerson(form)
+      const person = await api.createPerson(accessPath === 'faceauth-qr' ? form : { ...form, qrMode: 'hikvision', qrRotationSec: undefined })
       const empNo = person.employeeNo || form.employeeNo || ''
       const pid = person.id || ''
       // Enrol face if photo taken
@@ -1407,7 +1417,37 @@ function PersonModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
         </label>
 
         <hr style={{ margin: '12px 0', border: 'none', borderTop: '1px solid var(--border, #e2e8f0)' }} />
-        <div className="small muted" style={{ marginBottom: 8 }}>Face, card &amp; fingerprint — optional, requires a device</div>
+        <Field label="Access path" hint="Choose who verifies the credential. These modes are separate.">
+          <div className="seg">
+            <button type="button" className={accessPath === 'faceauth-qr' ? 'active' : ''} onClick={() => setAccessPath('faceauth-qr')}>FaceAuth QR-only</button>
+            <button type="button" className={accessPath === 'hikvision-device' ? 'active' : ''} onClick={() => setAccessPath('hikvision-device')}>Hikvision QR/card</button>
+          </div>
+        </Field>
+        {accessPath === 'faceauth-qr' && (
+          <Field label="FaceAuth QR type" hint="FaceAuth verifies this QR; Hikvision receives only OpenDoor.">
+            <div className="seg">
+              <button type="button" className={form.qrMode === 'static' ? 'active' : ''} onClick={() => setForm({ ...form, qrMode: 'static' })}>Static QR</button>
+              <button type="button" className={form.qrMode === 'dynamic' ? 'active' : ''} onClick={() => setForm({ ...form, qrMode: 'dynamic' })}>Dynamic QR</button>
+            </div>
+          </Field>
+        )}
+        {accessPath === 'faceauth-qr' && form.qrMode === 'dynamic' && (
+          <Field label="QR changes every" hint="The old QR stops working when the selected interval ends.">
+            <select value={form.qrRotationSec || 180} onChange={(e) => setForm({ ...form, qrRotationSec: Number(e.target.value) })}>
+              <option value={60}>1 minute</option>
+              <option value={180}>3 minutes</option>
+              <option value={300}>5 minutes</option>
+              <option value={600}>10 minutes</option>
+            </select>
+          </Field>
+        )}
+
+        <hr style={{ margin: '12px 0', border: 'none', borderTop: '1px solid var(--border, #e2e8f0)' }} />
+        <div className="small muted" style={{ marginBottom: 8 }}>
+          {accessPath === 'hikvision-device'
+            ? 'Hikvision device credentials — device and card number are required; Hikvision performs authentication'
+            : 'Face, card & fingerprint — optional and separate from FaceAuth QR-only access'}
+        </div>
         <Field label="Device">
           <select value={credDeviceId} onChange={(e) => setCredDeviceId(e.target.value)}>
             <option value="">— none —</option>
@@ -1446,7 +1486,7 @@ function PersonModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =>
         <div className="form-row" style={{ alignItems: 'flex-end', gap: 8 }}>
           <Field label="Card number (optional)" grow={2}>
             <input value={cardNo} onChange={(e) => setCardNo(e.target.value)}
-              placeholder="Type number or swipe at reader" disabled={!credDeviceId} />
+              maxLength={20} placeholder="1–20 characters or swipe at reader" disabled={!credDeviceId} />
           </Field>
           <button type="button" className="btn-ghost" disabled={!credDeviceId || !!capBusy || !!busy}
             style={{ marginBottom: 1 }} onClick={swipeCard}>
@@ -1488,19 +1528,20 @@ function PersonDetailModal({ personId, onClose, onDeleted, onEnrol }: { personId
   const [data, setData] = useState<any>(null)
   const [err, setErr] = useState('')
   const [qrBust, setQrBust] = useState(0)
+  const [dynamicQR, setDynamicQR] = useState<any>(null)
   const [cards, setCards] = useState<any[]>([])
   const [cardsBusy, setCardsBusy] = useState(false)
   const [devices, setDevices] = useState<any[]>([])
   const [addCardDeviceId, setAddCardDeviceId] = useState('')
   const [addCardNo, setAddCardNo] = useState('')
   const [addCardErr, setAddCardErr] = useState('')
-  const [qrPushDeviceId, setQrPushDeviceId] = useState('')
-  const [qrPushBusy, setQrPushBusy] = useState(false)
-  const [qrPushResult, setQrPushResult] = useState<{ ok?: boolean; error?: string } | null>(null)
   const [cardQrNo, setCardQrNo] = useState('')
   const [cardSyncDevice, setCardSyncDevice] = useState('')
   const [cardSyncBusy, setCardSyncBusy] = useState(false)
   const [cardSyncResult, setCardSyncResult] = useState<{ ok?: boolean; error?: string } | null>(null)
+  const [accessPoints,setAccessPoints]=useState<any[]>([])
+  const [assignedAccessPoints,setAssignedAccessPoints]=useState<string[]>([])
+  const [accessBusy,setAccessBusy]=useState(false)
 
   const loadCards = () => api.listCards(personId).then((r) => setCards(r?.cards || [])).catch(() => {})
 
@@ -1514,11 +1555,30 @@ function PersonDetailModal({ personId, onClose, onDeleted, onEnrol }: { personId
       const defaultDevice = online || (list.length === 1 ? list[0] : null)
       if (defaultDevice) {
         setAddCardDeviceId(defaultDevice.deviceID)
-        setQrPushDeviceId(defaultDevice.deviceID)
         setCardSyncDevice(defaultDevice.deviceID)
       }
     }).catch(() => {})
+    api.listAccessPoints().then(setAccessPoints).catch(()=>{})
+    api.getPersonAccessPoints(personId).then((r:any)=>setAssignedAccessPoints(r.accessPointIds||[])).catch(()=>{})
   }, [personId])
+
+  useEffect(() => {
+    if (data?.person?.qrMode !== 'dynamic') { setDynamicQR(null); return }
+    let stopped = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const refresh = async () => {
+      try {
+        const current = await api.currentQR(personId)
+        if (stopped) return
+        setDynamicQR(current)
+        setQrBust(Date.now())
+        const delay = Math.max(1000, new Date(current.expiresAt).getTime() - Date.now() + 250)
+        timer = setTimeout(refresh, delay)
+      } catch {}
+    }
+    refresh()
+    return () => { stopped = true; if (timer) clearTimeout(timer) }
+  }, [personId, data?.person?.qrMode, data?.person?.qrRotationSec])
 
   const rotateQR = async () => {
     try {
@@ -1611,7 +1671,7 @@ function PersonDetailModal({ personId, onClose, onDeleted, onEnrol }: { personId
           </Field>
           <Field label="Card number" grow={2}>
             <input value={addCardNo} onChange={(e) => { setAddCardNo(e.target.value); setAddCardErr('') }}
-              placeholder="e.g. 1234567890" />
+              maxLength={20} placeholder="1–20 characters, e.g. 1234567890" />
           </Field>
           <button
             className="btn-primary"
@@ -1633,16 +1693,28 @@ function PersonDetailModal({ personId, onClose, onDeleted, onEnrol }: { personId
       </div>
 
       <div className="qr-block">
-        <h3 className="section-title">QR Access</h3>
-        {p.qrToken ? (
+        <h3 className="section-title">Allowed access points</h3>
+        <p className="muted small" style={{marginBottom:8}}>No selection means all compatible access points in this merchant (legacy default). Select gates to restrict this member.</p>
+        <div style={{display:'flex',flexDirection:'column',gap:6}}>{accessPoints.map((ap:any)=><label className="check" key={ap.id}><input type="checkbox" checked={assignedAccessPoints.includes(ap.id)} onChange={e=>setAssignedAccessPoints(e.target.checked?[...assignedAccessPoints,ap.id]:assignedAccessPoints.filter(id=>id!==ap.id))}/><span>{ap.name} <span className="muted small">· {ap.outletId} · {ap.direction}</span></span></label>)}</div>
+        <button className="btn-primary" style={{marginTop:10}} disabled={accessBusy} onClick={async()=>{setAccessBusy(true);try{await api.setPersonAccessPoints(personId,assignedAccessPoints)}catch(e:any){alert(String(e))}finally{setAccessBusy(false)}}}>{accessBusy?'Saving…':'Save gate access'}</button>
+      </div>
+
+      <div className="qr-block">
+        <h3 className="section-title">FaceAuth QR-only <span className="chip" style={{ fontSize: 11, verticalAlign: 'middle' }}>Hikvision relay</span></h3>
+        {p.qrMode === 'hikvision' ? (
+          <div className="empty" style={{ textAlign: 'left' }}>
+            FaceAuth QR-only is disabled for this member. Their QR/card credential is verified by the Hikvision device.
+          </div>
+        ) : (p.qrToken || p.qrMode === 'dynamic') ? (
           <>
             <div className="qr-row">
               <img className="qr-img" src={`${api.qrImageUrl(personId, 240)}&_b=${qrBust}`} alt="QR" />
               <div className="qr-meta">
-                <div className="mono small" style={{ wordBreak: 'break-all', marginBottom: 6 }}>{p.qrToken}</div>
+                <div className="mono small" style={{ wordBreak: 'break-all', marginBottom: 6 }}>{p.qrMode === 'dynamic' ? (dynamicQR?.qrToken || 'Generating…') : p.qrToken}</div>
                 <p className="muted small" style={{ marginBottom: 8 }}>
-                  Send or show this QR to the visitor. They present it to the device camera to gain access.
-                  Also works with a USB scanner for 2-step face auth.
+                  {p.qrMode === 'dynamic'
+                    ? `Dynamic FaceAuth QR — changes every ${Math.round((p.qrRotationSec || 180) / 60)} minute(s). Present it to the USB scanner before it expires.`
+                    : 'Static FaceAuth QR — remains valid until you rotate it. Present it to the USB scanner for QR-only access.'}
                 </p>
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                   <a
@@ -1658,47 +1730,12 @@ function PersonDetailModal({ personId, onClose, onDeleted, onEnrol }: { personId
                       const blob = await res.blob()
                       await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
                       alert('QR image copied to clipboard')
-                    } catch { navigator.clipboard?.writeText(p.qrToken) }
+                    } catch { navigator.clipboard?.writeText(p.qrMode === 'dynamic' ? (dynamicQR?.qrToken || '') : p.qrToken) }
                   }}>Copy image</button>
-                  <button className="btn-ghost" style={{ fontSize: 12 }} onClick={rotateQR}>Rotate token</button>
+                  <button className="btn-ghost" style={{ fontSize: 12 }} onClick={rotateQR}>{p.qrMode === 'dynamic' ? 'Rotate secret now' : 'Rotate token'}</button>
                 </div>
               </div>
             </div>
-            {p.employeeNo && (
-              <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--border)' }}>
-                <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>Push QR to device camera</div>
-                <p className="muted small" style={{ marginBottom: 10 }}>
-                  Register this QR on the device so the on-screen camera reader can scan it and grant access.
-                </p>
-                <div className="form-row" style={{ alignItems: 'flex-end', gap: 8, flexWrap: 'wrap' }}>
-                  <Field label="Device">
-                    <select value={qrPushDeviceId} onChange={(e) => { setQrPushDeviceId(e.target.value); setQrPushResult(null) }} style={{ minWidth: 160 }}>
-                      <option value="">— Select device —</option>
-                      {devices.map((d: any) => (
-                        <option key={d.deviceID} value={d.deviceID}>
-                          {(d.name || d.deviceID) + (d.online ? ' (online)' : '')}
-                        </option>
-                      ))}
-                    </select>
-                  </Field>
-                  <button
-                    className="btn-primary"
-                    disabled={qrPushBusy || !qrPushDeviceId}
-                    style={{ marginBottom: 1 }}
-                    onClick={async () => {
-                      setQrPushBusy(true); setQrPushResult(null)
-                      try {
-                        await api.qrPush(qrPushDeviceId, { personId })
-                        setQrPushResult({ ok: true })
-                      } catch (e: any) { setQrPushResult({ error: String(e) }) }
-                      setQrPushBusy(false)
-                    }}
-                  >{qrPushBusy ? 'Pushing…' : 'Push to device'}</button>
-                </div>
-                {qrPushResult?.ok && <div style={{ marginTop: 6, fontSize: 12, color: 'var(--accent, #10b981)' }}>QR registered on device.</div>}
-                {qrPushResult?.error && <div className="err small" style={{ marginTop: 6 }}>{qrPushResult.error}</div>}
-              </div>
-            )}
           </>
         ) : (
           <div className="qr-row">
@@ -1712,7 +1749,7 @@ function PersonDetailModal({ personId, onClose, onDeleted, onEnrol }: { personId
         const activeCard = cardQrNo || cards[0]?.cardNo
         return (
           <div className="qr-block">
-            <h3 className="section-title">Card QR <span className="chip" style={{ fontSize: 11, verticalAlign: 'middle' }}>camera mode</span></h3>
+            <h3 className="section-title">Hikvision QR/card <span className="chip" style={{ fontSize: 11, verticalAlign: 'middle' }}>device authentication</span></h3>
             <p className="muted small" style={{ marginBottom: 10 }}>
               Show this QR to the device camera — it reads the card number directly, no registration needed.
             </p>
@@ -1943,7 +1980,7 @@ function EnrolTab({ initialPersonId, onConsumeInitial }: { initialPersonId?: str
         </div>
         <div className="form-row" style={{ marginTop: 12, alignItems: 'flex-end' }}>
           <Field label="Bind card number" grow={2}>
-            <input value={cardNo} onChange={(e) => setCardNo(e.target.value)} placeholder="e.g. 1234567890" />
+            <input value={cardNo} onChange={(e) => setCardNo(e.target.value)} maxLength={20} placeholder="1–20 characters, e.g. 1234567890" />
           </Field>
           <button type="button" className="btn-primary" disabled={!!capBusy || !employeeNo || !cardNo}
             onClick={() => runCapture('bindcard', () => api.setCard(deviceId, { employeeNo, personId, cardNo }))}>
@@ -2743,15 +2780,54 @@ function AgentModal({ onClose, onCreated }: { onClose: () => void; onCreated: (c
 function QRAuthTab() {
   const [data, setData] = useState<{ active: any[]; history: any[] }>({ active: [], history: [] })
   const [devices, setDevices] = useState<any[]>([])
+  const [persons, setPersons] = useState<any[]>([])
   const [scanInput, setScanInput] = useState('')
   const [scanResult, setScanResult] = useState<any>(null)
+
+  // Dynamic QR tester
+  const [testPersonId, setTestPersonId] = useState('')
+  const [qrInfo, setQrInfo] = useState<any>(null)
+  const [qrBust, setQrBust] = useState(0)
+  const [countdown, setCountdown] = useState(0)
+  const [testerResult, setTesterResult] = useState<any>(null)
 
   const load = () => api.qrAuthSessions().then((d) => setData(d || { active: [], history: [] })).catch(() => {})
   useEffect(() => {
     load(); const t = setInterval(load, 1000)
     api.listDevices().then((d) => setDevices(d || []))
+    api.listPersons().then((d) => setPersons(d || []))
     return () => clearInterval(t)
   }, [])
+
+  // Fetch current QR for selected person; re-poll every 5 s so dynamic tokens auto-refresh
+  useEffect(() => {
+    if (!testPersonId) { setQrInfo(null); setTesterResult(null); return }
+    const fetch = () => api.currentQR(testPersonId)
+      .then(d => { setQrInfo(d); setQrBust(b => b + 1) })
+      .catch(err => setQrInfo({ error: String(err) }))
+    fetch()
+    const t = setInterval(fetch, 5000)
+    return () => clearInterval(t)
+  }, [testPersonId])
+
+  // Live countdown for dynamic tokens
+  useEffect(() => {
+    if (!qrInfo?.expiresAt) { setCountdown(0); return }
+    const tick = () => setCountdown(Math.max(0, Math.ceil((new Date(qrInfo.expiresAt).getTime() - Date.now()) / 1000)))
+    tick()
+    const t = setInterval(tick, 500)
+    return () => clearInterval(t)
+  }, [qrInfo?.expiresAt])
+
+  const simulateScanTester = async () => {
+    if (!qrInfo?.qrToken) return
+    setTesterResult(null)
+    try {
+      const r = await api.qrAuthScan(qrInfo.qrToken.trim())
+      setTesterResult(r)
+      load()
+    } catch (e: any) { setTesterResult({ error: String(e) }) }
+  }
 
   const simulateScan = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -2802,7 +2878,49 @@ function QRAuthTab() {
         </div>
       </Card>
 
-      <Card title="Simulate a scan" header={<span className="muted small">use this to test without a USB scanner</span>}>
+      <Card title="Dynamic QR Tester" header={<span className="muted small">pick a person, view their live QR, one-click scan</span>}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <select value={testPersonId} onChange={(e) => setTestPersonId(e.target.value)} style={{ maxWidth: 340 }}>
+            <option value="">— select a person —</option>
+            {persons.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}{p.employeeNo ? ` (#${p.employeeNo})` : ''}{p.qrMode === 'dynamic' ? ' · dynamic' : ''}</option>
+            ))}
+          </select>
+          {testPersonId && !qrInfo && <div className="muted small">Loading…</div>}
+          {testPersonId && qrInfo?.error && (
+            <div className="muted small" style={{ color: 'var(--error,#f66)' }}>Error: {qrInfo.error}</div>
+          )}
+          {testPersonId && qrInfo && !qrInfo.error && (
+            <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+              <div style={{ flexShrink: 0 }}>
+                <img
+                  src={`${api.qrImageUrl(testPersonId, 180)}&_b=${qrBust}`}
+                  alt="QR"
+                  style={{ width: 180, height: 180, display: 'block', background: '#fff', borderRadius: 6, border: '1px solid var(--border)' }}
+                />
+              </div>
+              <div style={{ flex: 1, minWidth: 180 }}>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+                  <span className="badge">{qrInfo.qrMode || 'static'}</span>
+                  {qrInfo.qrMode === 'dynamic' && qrInfo.expiresAt && (
+                    <span className="muted small">rotates in <strong>{countdown}s</strong></span>
+                  )}
+                </div>
+                <div className="mono small" style={{ wordBreak: 'break-all', background: 'var(--surface)', padding: '8px 10px', borderRadius: 4, marginBottom: 10, userSelect: 'all' }}>
+                  {qrInfo.qrToken || '(no token — click Generate QR in Persons tab)'}
+                </div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+                  <button className="btn-primary" onClick={simulateScanTester} disabled={!qrInfo.qrToken}>Simulate Scan</button>
+                  <button className="btn-ghost" onClick={() => navigator.clipboard?.writeText(qrInfo.qrToken || '')}>Copy Token</button>
+                </div>
+                {testerResult && <pre className="result">{JSON.stringify(testerResult, null, 2)}</pre>}
+              </div>
+            </div>
+          )}
+        </div>
+      </Card>
+
+      <Card title="Simulate a scan (raw)" header={<span className="muted small">paste any token manually</span>}>
         <form onSubmit={simulateScan} className="form-row">
           <input value={scanInput} onChange={(e) => setScanInput(e.target.value)} placeholder="paste a QR token here" style={{ flex: 4 }} />
           <button type="submit" className="btn-primary" style={{ flex: 1 }}>Scan</button>
@@ -3707,6 +3825,15 @@ const ENDPOINTS: EndpointDef[] = [
 
   { method: 'GET', path: '/api/v1/events', group: 'v1 — Events', summary: 'List recent device events', auth: 'v1', params: [{ name: 'limit', in: 'query', type: 'int' }, { name: 'deviceId', in: 'query' }] },
   { method: 'GET', path: '/api/v1/events/stream', group: 'v1 — Events', summary: 'SSE event stream', auth: 'v1', responseType: 'sse' },
+  { method: 'GET', path: '/api/v1/access-points', group: 'v1 — Access topology', summary: 'List merchant access points', auth: 'v1', params: [{ name: 'outletId', in: 'query' }, { name: 'agentId', in: 'query' }] },
+  { method: 'POST', path: '/api/v1/access-points', group: 'v1 — Access topology', summary: 'Create an outlet access point', auth: 'v1', bodyExample: { outletId: 'outlet-a', name: 'Front entry', agentId: 'agent-a', scannerId: 'front-scanner', scannerPort: 7771, deviceId: 'DEVICE-A', doorNo: 1, direction: 'in', authMode: 'faceauth_qr', acceptedQr: 'both', rejectionSound: true, enabled: false } },
+  { method: 'PUT', path: '/api/v1/access-points/:id', group: 'v1 — Access topology', summary: 'Update an access point', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'DELETE', path: '/api/v1/access-points/:id', group: 'v1 — Access topology', summary: 'Delete an access point', auth: 'v1', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'GET', path: '/api/v1/access-log', group: 'v1 — Reports', summary: 'Filtered enriched access log', auth: 'v1', params: [{ name: 'outletId', in: 'query' }, { name: 'accessPointId', in: 'query' }, { name: 'decision', in: 'query' }, { name: 'direction', in: 'query' }, { name: 'from', in: 'query', description: 'RFC3339' }, { name: 'to', in: 'query', description: 'RFC3339' }] },
+  { method: 'GET', path: '/api/v1/reports/access-summary', group: 'v1 — Reports', summary: 'Entry, exit, denial, member and occupancy summary', auth: 'v1', params: [{ name: 'outletId', in: 'query' }, { name: 'from', in: 'query' }, { name: 'to', in: 'query' }] },
+  { method: 'GET', path: '/api/v1/reports/attendance', group: 'v1 — Reports', summary: 'Daily first/last access and entry/exit totals by member', auth: 'v1' },
+  { method: 'GET', path: '/api/v1/reports/occupancy', group: 'v1 — Reports', summary: 'Members currently marked inside', auth: 'v1' },
+  { method: 'GET', path: '/api/v1/reports/denials', group: 'v1 — Reports', summary: 'Denial reason breakdown', auth: 'v1' },
 
   // ADMIN
   { method: 'GET', path: '/api/status', group: 'admin — System', summary: 'System status summary', auth: 'admin' },
@@ -3727,6 +3854,18 @@ const ENDPOINTS: EndpointDef[] = [
   { method: 'POST', path: '/api/agents', group: 'admin — Agents', summary: 'Register agent (token shown once)', auth: 'admin', bodyExample: { id: 'lobby-agent', name: 'Lobby Agent' } },
   { method: 'DELETE', path: '/api/agents/:id', group: 'admin — Agents', summary: 'Delete an agent', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
   { method: 'POST', path: '/api/agents/:id/regen-token', group: 'admin — Agents', summary: 'Rotate agent token', auth: 'admin', params: [{ name: 'id', in: 'path', required: true }] },
+  { method: 'GET', path: '/api/access-points', group: 'admin — Access topology', summary: 'List access points for active merchant', auth: 'admin' },
+  { method: 'POST', path: '/api/access-points', group: 'admin — Access topology', summary: 'Create outlet scanner/gate assignment', auth: 'admin' },
+  { method: 'PUT', path: '/api/access-points/:id', group: 'admin — Access topology', summary: 'Update access point settings', auth: 'admin' },
+  { method: 'DELETE', path: '/api/access-points/:id', group: 'admin — Access topology', summary: 'Delete access point', auth: 'admin' },
+  { method: 'POST', path: '/api/access-points/:id/test', group: 'admin — Access topology', summary: 'Readiness test without opening the door', auth: 'admin' },
+  { method: 'GET', path: '/api/access-log/export.csv', group: 'admin — Reports', summary: 'Export scoped access log as CSV', auth: 'admin' },
+  { method: 'GET', path: '/api/reports/access-summary', group: 'admin — Reports', summary: 'Access and occupancy summary', auth: 'admin' },
+  { method: 'GET', path: '/api/reports/attendance', group: 'admin — Reports', summary: 'Daily member attendance', auth: 'admin' },
+  { method: 'GET', path: '/api/reports/occupancy', group: 'admin — Reports', summary: 'Current inside members', auth: 'admin' },
+  { method: 'GET', path: '/api/reports/denials', group: 'admin — Reports', summary: 'Denial reason counts', auth: 'admin' },
+  { method: 'GET', path: '/api/reports/access-point-health', group: 'admin — Reports', summary: 'Access point, agent, and device readiness', auth: 'admin' },
+  { method: 'GET', path: '/api/reports/agent-health', group: 'admin — Reports', summary: 'Agent health by outlet', auth: 'admin' },
   { method: 'GET', path: '/api/agents/downloads', group: 'admin — Agents', summary: 'List agent binaries (public — no auth)', auth: 'none' },
   { method: 'GET', path: '/api/agents/downloads/:file', group: 'admin — Agents', summary: 'Download an agent binary (public — no auth)', auth: 'none', responseType: 'binary', params: [{ name: 'file', in: 'path', required: true }] },
   { method: 'GET', path: '/api/qr-auth/sessions', group: 'admin — QR Auth', summary: 'Active + historical sessions', auth: 'admin' },
@@ -5271,6 +5410,40 @@ function NewTenantModal({ onClose, onCreated }: { onClose: () => void; onCreated
   )
 }
 
+function AccessPointsTab() {
+  const [points,setPoints]=useState<any[]>([]),[outlets,setOutlets]=useState<any[]>([]),[agents,setAgents]=useState<any[]>([]),[devices,setDevices]=useState<any[]>([])
+  const [form,setForm]=useState<any>({name:'',outletId:'',agentId:'',scannerId:'scanner-1',scannerPort:7771,deviceId:'',doorNo:1,direction:'in',authMode:'disabled',acceptedQr:'both',rejectionSound:true,enabled:false})
+  const [err,setErr]=useState(''),[busy,setBusy]=useState(false)
+  const load=()=>Promise.all([api.listAccessPoints(),api.listBranches(),api.listAgents(),api.listDevices()]).then(([p,o,a,d])=>{setPoints(p||[]);setOutlets(o||[]);setAgents(a||[]);setDevices(d||[])}).catch(e=>setErr(String(e)))
+  useEffect(()=>{load()},[])
+  const outletAgents=agents.filter((a:any)=>a.branchId===form.outletId), outletDevices=devices.filter((d:any)=>d.branchId===form.outletId)
+  const save=async(e:React.FormEvent)=>{e.preventDefault();setBusy(true);setErr('');try{await api.createAccessPoint({...form,scannerPort:Number(form.scannerPort),doorNo:Number(form.doorNo)});setForm({...form,name:'',scannerId:'scanner-1',enabled:false});await load()}catch(e:any){setErr(String(e))}finally{setBusy(false)}}
+  return <>
+    <div className="page-toolbar"><h1 className="page-title">Access points <span className="muted">· {points.length}</span></h1></div>
+    {err&&<div className="err">{err}</div>}
+    <Card title="Add scanner / gate">
+      <form className="form" onSubmit={save}>
+        <div className="form-row"><Field label="Outlet"><select required value={form.outletId} onChange={e=>setForm({...form,outletId:e.target.value,agentId:'',deviceId:''})}><option value="">— Select —</option>{outlets.map((o:any)=><option key={o.id} value={o.id}>{o.name}</option>)}</select></Field><Field label="Name"><input required value={form.name} onChange={e=>setForm({...form,name:e.target.value})} placeholder="Front entry"/></Field></div>
+        <div className="form-row"><Field label="Agent"><select required value={form.agentId} onChange={e=>setForm({...form,agentId:e.target.value})}><option value="">— Select outlet agent —</option>{outletAgents.map((a:any)=><option key={a.id} value={a.id}>{a.name||a.id}{a.online?' (online)':''}</option>)}</select></Field><Field label="Device"><select required value={form.deviceId} onChange={e=>setForm({...form,deviceId:e.target.value})}><option value="">— Select outlet device —</option>{outletDevices.map((d:any)=><option key={d.deviceID} value={d.deviceID}>{d.name||d.deviceID}</option>)}</select></Field></div>
+        <div className="form-row"><Field label="Scanner ID"><input required value={form.scannerId} onChange={e=>setForm({...form,scannerId:e.target.value})}/></Field><Field label="Listener port"><input type="number" min={1} max={65535} value={form.scannerPort} onChange={e=>setForm({...form,scannerPort:e.target.value})}/></Field><Field label="Door"><input type="number" min={1} max={32} value={form.doorNo} onChange={e=>setForm({...form,doorNo:e.target.value})}/></Field></div>
+        <div className="form-row"><Field label="Direction"><select value={form.direction} onChange={e=>setForm({...form,direction:e.target.value})}><option value="in">Entry</option><option value="out">Exit</option><option value="bidirectional">Bidirectional</option></select></Field><Field label="Authentication"><select value={form.authMode} onChange={e=>setForm({...form,authMode:e.target.value})}><option value="disabled">Disabled</option><option value="faceauth_qr">FaceAuth QR relay</option><option value="hikvision">Hikvision native</option></select></Field><Field label="Accepted FaceAuth QR"><select disabled={form.authMode!=='faceauth_qr'} value={form.acceptedQr} onChange={e=>setForm({...form,acceptedQr:e.target.value})}><option value="both">Static + dynamic</option><option value="static">Static only</option><option value="dynamic">Dynamic only</option></select></Field></div>
+        <label className="check"><input type="checkbox" checked={form.rejectionSound} onChange={e=>setForm({...form,rejectionSound:e.target.checked})}/><span>Rejection sound</span></label>
+        <label className="check"><input type="checkbox" checked={form.enabled} onChange={e=>setForm({...form,enabled:e.target.checked})}/><span>Enable immediately</span></label>
+        <button className="btn-primary" disabled={busy}>{busy?'Saving…':'Create access point'}</button>
+      </form>
+    </Card>
+    <Card title="Outlet topology"><div className="table-wrap"><table className="data-table"><thead><tr><th>Access point</th><th>Outlet</th><th>Agent / scanner</th><th>Device / door</th><th>Mode</th><th>Direction</th><th>Status</th><th/></tr></thead><tbody>{points.map((p:any)=><tr key={p.id}><td><strong>{p.name}</strong><div className="muted mono small">{p.id}</div></td><td>{outlets.find((o:any)=>o.id===p.outletId)?.name||p.outletId}</td><td>{p.agentId}<div className="muted small">{p.scannerId} · :{p.scannerPort}</div></td><td>{p.deviceId}<div className="muted small">door {p.doorNo}</div></td><td>{p.authMode}{p.authMode==='faceauth_qr'&&<div className="muted small">{p.acceptedQr}</div>}</td><td>{p.direction}</td><td><span className={`badge ${p.enabled&&p.agentOnline?'ok':''}`}>{p.enabled?(p.agentOnline?'online':'agent offline'):'disabled'}</span></td><td><button className="btn-danger" onClick={async()=>{if(confirm(`Delete ${p.name}?`)){await api.deleteAccessPoint(p.id);load()}}}>Delete</button></td></tr>)}</tbody></table></div></Card>
+  </>
+}
+
+function ReportsTab(){
+  const [outlets,setOutlets]=useState<any[]>([]),[outletId,setOutletId]=useState(''),[summary,setSummary]=useState<any>(null),[err,setErr]=useState('')
+  const load=()=>api.accessSummary(outletId).then(setSummary).catch(e=>setErr(String(e)))
+  useEffect(()=>{api.listBranches().then(setOutlets).catch(()=>{});load()},[]);useEffect(()=>{load()},[outletId])
+  const cards=[['Total decisions',summary?.total],['Allowed',summary?.allowed],['Denied',summary?.denied],['Entries',summary?.entries],['Exits',summary?.exits],['Estimated occupancy',summary?.estimatedOccupancy],['Unique members',summary?.uniqueMembers]]
+  return <><div className="page-toolbar"><h1 className="page-title">Access reports</h1><div className="toolbar-right"><select value={outletId} onChange={e=>setOutletId(e.target.value)}><option value="">All outlets</option>{outlets.map((o:any)=><option key={o.id} value={o.id}>{o.name}</option>)}</select><a className="btn-ghost" href={api.accessLogExportUrl(outletId)}>Export CSV</a></div></div>{err&&<div className="err">{err}</div>}<div className="stats-grid">{cards.map(([label,value])=><Card key={String(label)}><div className="muted small">{label}</div><div style={{fontSize:28,fontWeight:700}}>{value??'—'}</div></Card>)}</div></>
+}
+
 function AccessLogTab() {
   const [rows, setRows] = useState<any[]>([])
   const [err, setErr] = useState('')
@@ -5293,15 +5466,17 @@ function AccessLogTab() {
           : (
             <div className="table-wrap">
               <table className="data-table">
-                <thead><tr><th>When</th><th>Decision</th><th>Via</th><th>Person</th><th>Device</th><th>Direction</th><th>Reason</th></tr></thead>
+                <thead><tr><th>When</th><th>Decision</th><th>Via</th><th>Member</th><th>Access point</th><th>Agent / scanner</th><th>Device / door</th><th>Direction</th><th>Reason</th></tr></thead>
                 <tbody>
                   {rows.map((r: any) => (
                     <tr key={r.id}>
                       <td className="muted small">{new Date(r.createdAt).toLocaleString()}</td>
                       <td><span className={`badge ${r.decision === 'allow' ? 'ok' : r.decision === 'deny' ? 'err' : ''}`}>{r.decision}</span></td>
                       <td>{r.openMethod ? <span className={`badge ${r.openMethod === 'qr' ? 'info' : r.openMethod === 'face' ? 'ok' : ''}`}>{r.openMethod}</span> : <span className="muted small">—</span>}</td>
-                      <td><strong>{r.employeeNo || '—'}</strong></td>
-                      <td className="mono small">{r.deviceId || '—'}</td>
+                      <td><strong>{r.memberName || r.employeeNo || '—'}</strong><div className="muted small">{r.memberName ? r.employeeNo : ''}</div></td>
+                      <td>{r.accessPointName || '—'}<div className="muted mono small">{r.outletId || ''}</div></td>
+                      <td className="mono small">{r.agentId || '—'}<div className="muted small">{r.scannerId || ''}</div></td>
+                      <td className="mono small">{r.deviceId || '—'}<div className="muted small">{r.doorNo ? `door ${r.doorNo}` : ''}</div></td>
                       <td className="muted small">{r.direction || ''}</td>
                       <td className="muted small">{r.reason}</td>
                     </tr>
