@@ -6,6 +6,43 @@ import (
 	"time"
 )
 
+// scannerDeviceKey groups the HID collections that belong to one physical USB
+// device. Composite scanners commonly expose the decoded POS stream on MI_01
+// and keyboard input on MI_00. Windows gives those collections different HID
+// paths even though their USB instance portion is the same.
+//
+// Keep the instance portion in the key so identical scanner models plugged
+// into different USB ports remain isolated from one another.
+func scannerDeviceKey(hardwareID string) string {
+	parts := strings.Split(strings.ToLower(strings.TrimSpace(hardwareID)), "#")
+	if len(parts) < 3 {
+		return strings.ToLower(strings.TrimSpace(hardwareID))
+	}
+	descriptor := parts[1]
+	tokens := strings.Split(descriptor, "&")
+	kept := tokens[:0]
+	for _, token := range tokens {
+		if (strings.HasPrefix(token, "mi_") && len(token) == 5) ||
+			(strings.HasPrefix(token, "col") && len(token) == 5) {
+			continue
+		}
+		kept = append(kept, token)
+	}
+	return strings.Join(kept, "&") + "#" + parts[2]
+}
+
+// scannerModelKey extracts the USB VID/PID shared by sibling HID interfaces.
+// It is used only as a guarded fallback when Windows assigns different device
+// instance IDs to a scanner's POS and keyboard collections.
+func scannerModelKey(hardwareID string) string {
+	upper := strings.ToUpper(hardwareID)
+	vidAt, pidAt := strings.Index(upper, "VID_"), strings.Index(upper, "PID_")
+	if vidAt < 0 || pidAt < 0 || len(upper) < vidAt+8 || len(upper) < pidAt+8 {
+		return ""
+	}
+	return upper[vidAt+4:vidAt+8] + ":" + upper[pidAt+4:pidAt+8]
+}
+
 // decodePOSReportPart implements the USB-IF HID POS Scanned Data Report:
 // report ID 2, three symbology bytes, 50 decoded-data bytes, then the
 // Decode Data Continued bit. It also accepts a conservative vendor fallback

@@ -111,6 +111,8 @@ type posDevice struct {
 var winScanner = struct {
 	sync.RWMutex
 	routes     map[string]scannerRoute
+	aliases    map[string]scannerRoute
+	ambiguous  map[string]bool
 	buffers    map[uintptr]*strings.Builder
 	shift      map[uintptr]bool
 	paths      map[uintptr]string
@@ -119,7 +121,7 @@ var winScanner = struct {
 	managerCtx context.Context
 	rawActive  bool
 	posActive  map[string]bool
-}{routes: map[string]scannerRoute{}, buffers: map[uintptr]*strings.Builder{}, shift: map[uintptr]bool{}, paths: map[uintptr]string{}, pos: map[string]posDevice{}, posStarted: map[string]bool{}, posActive: map[string]bool{}}
+}{routes: map[string]scannerRoute{}, aliases: map[string]scannerRoute{}, ambiguous: map[string]bool{}, buffers: map[uintptr]*strings.Builder{}, shift: map[uintptr]bool{}, paths: map[uintptr]string{}, pos: map[string]posDevice{}, posStarted: map[string]bool{}, posActive: map[string]bool{}}
 
 var rawInputLoopOnce sync.Once
 
@@ -290,13 +292,70 @@ func startNativeScannerManager(ctx context.Context, routes []scannerRoute) error
 	winScanner.Lock()
 	winScanner.managerCtx = ctx
 	winScanner.routes = map[string]scannerRoute{}
+	winScanner.aliases = map[string]scannerRoute{}
+	winScanner.ambiguous = map[string]bool{}
 	for _, route := range routes {
-		winScanner.routes[strings.ToLower(route.HardwareID)] = route
+		exact := strings.ToLower(route.HardwareID)
+		winScanner.routes[exact] = route
+		key := scannerDeviceKey(route.HardwareID)
+		if existing, ok := winScanner.aliases[key]; ok && existing.ScannerID != route.ScannerID {
+			delete(winScanner.aliases, key)
+			winScanner.ambiguous[key] = true
+		} else if !winScanner.ambiguous[key] {
+			winScanner.aliases[key] = route
+		}
 	}
 	winScanner.Unlock()
 	refreshPhysicalScanners()
 	rawInputLoopOnce.Do(func() { go runRawInputLoop(ctx) })
 	return nil
+}
+
+// scannerRouteLocked first honors an exact interface binding, then accepts a
+// sibling HID collection from the same physical USB instance. The alias map is
+// deliberately omitted when bindings are ambiguous, preserving fail-closed
+// routing for multiple scanners of the same model.
+func scannerRouteLocked(hardwareID string) (scannerRoute, bool) {
+	if route, ok := winScanner.routes[strings.ToLower(hardwareID)]; ok {
+		return route, true
+	}
+	if route, ok := winScanner.aliases[scannerDeviceKey(hardwareID)]; ok {
+		return route, true
+	}
+
+	// Some composite HID drivers assign different instance IDs to MI_00 and
+	// MI_01, so the physical-device key cannot join them. Fall back to VID/PID
+	// only when there is exactly one bound route and exactly one connected Raw
+	// Input interface for that model. A second matching scanner makes this
+	// ambiguous and therefore remains unbound/fail-closed.
+	model := scannerModelKey(hardwareID)
+	if model == "" {
+		return scannerRoute{}, false
+	}
+	var candidate scannerRoute
+	foundRoute := false
+	for boundID, route := range winScanner.routes {
+		if scannerModelKey(boundID) != model {
+			continue
+		}
+		if foundRoute && candidate.ScannerID != route.ScannerID {
+			return scannerRoute{}, false
+		}
+		candidate, foundRoute = route, true
+	}
+	if !foundRoute {
+		return scannerRoute{}, false
+	}
+	matchingRaw := 0
+	for _, path := range winScanner.paths {
+		if scannerModelKey(path) == model {
+			matchingRaw++
+		}
+	}
+	if matchingRaw != 1 {
+		return scannerRoute{}, false
+	}
+	return candidate, true
 }
 
 // nativeScannerCaptureStatus reports the capture path that is actually able to
@@ -311,10 +370,13 @@ func nativeScannerCaptureStatus() (active bool, bound int) {
 			if winScanner.posActive[hardwareID] {
 				return true, bound
 			}
-			continue
 		}
 		if winScanner.rawActive {
-			return true, bound
+			for _, path := range winScanner.paths {
+				if _, ok := scannerRouteLocked(path); ok {
+					return true, bound
+				}
+			}
 		}
 	}
 	return false, bound
@@ -376,7 +438,7 @@ func readPOSScanner(ctx context.Context, hardwareID string, dev posDevice) {
 				continue
 			}
 			winScanner.RLock()
-			route, bound := winScanner.routes[hardwareID]
+			route, bound := scannerRouteLocked(hardwareID)
 			winScanner.RUnlock()
 			if !bound {
 				continue
@@ -462,7 +524,7 @@ func rawInputWndProc(hwnd uintptr, message uint32, wparam, lparam uintptr) uintp
 	messageType := *(*uint32)(unsafe.Pointer(&b[off+8]))
 	winScanner.Lock()
 	path := winScanner.paths[handle]
-	route, bound := winScanner.routes[strings.ToLower(path)]
+	route, bound := scannerRouteLocked(path)
 	if vkey == 0x10 {
 		// RI_KEY_BREAK (bit 0) means key-up. Raw Input reports both key-down
 		// and key-up, unlike the previous global keyboard hook.
